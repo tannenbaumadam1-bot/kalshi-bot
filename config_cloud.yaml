@@ -1,0 +1,56 @@
+# ============================================================
+#  CLOUD PAPER config - for the 24/7 server.
+#  Paper trading uses NO API key and NO money, so these api
+#  fields are harmless placeholders (never used). Nothing
+#  sensitive is on the server.
+# ============================================================
+environment: demo
+api:
+  key_id: "paper-no-auth-needed"
+  private_key_path: "none"
+
+risk:
+  max_trades_per_day: 100000
+  target_position_dollars: 2.50
+  max_position_dollars: 3.50
+  max_open_dollars: 20.00
+  max_daily_loss_dollars: 5.00
+  min_cash_reserve_dollars: 1.00
+  position_pct: 0.03            # compound: each bet = 3% of current equity
+
+markets:
+  scan_top_n: 60
+  scan_pages: 15
+  min_book_depth: 4
+  min_spread_cents: 2
+  max_spread_cents: 10
+  min_price_cents: 20
+  max_price_cents: 80
+  min_volume: 2
+  max_days_to_resolve: 730     # drop absurd multi-year markets (>~2 yrs)
+  min_recent_volume: 3         # require some trading in the last 24h
+
+arb:
+  trade: true
+  qty_per_leg: 1
+  min_net_cents: 2
+  max_legs: 10
+
+strategy: smart
+strategy_params:
+  smart:
+    lookback_cycles: 4
+    order_size: 4
+    edge_cents: 1
+    stop_loss_cents: 8
+    max_down_trend_cents: 3
+    exit_down_trend_cents: 5
+    momentum_entry_cents: 4
+    max_hold_cycles: 480       # ~8h: free capital from positions that go nowhere
+  watch: {order_size: 4}
+  maker: {edge_cents: 1, order_size: 4}
+  momentum: {lookback_cycles: 5, order_size: 4}
+
+engine:
+  cycle_seconds: 60
+  cancel_stale_after_s: 300
