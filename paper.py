@@ -343,7 +343,7 @@ def touch_lock():
         pass
 
 
-def write_state(sim, book):
+def write_state(sim, book, enabled=True):
     """Publish the bot's CURRENT holdings + resting orders so the dashboard
     can show exactly what markets it is in and what it is waiting on."""
     pos = []
@@ -357,6 +357,7 @@ def write_state(sim, book):
         rest.append({"ticker": t, "name": sim.names.get(t, t), "action": o["action"],
                      "price": o["price"], "count": o["count"]})
     data = {"updated": datetime.datetime.now().isoformat(timespec="seconds"),
+            "spread_enabled": enabled,
             "start": round(sim.start / 100.0, 2),
             "equity": round(sim.equity(book) / 100.0, 2),
             "cash": round(sim.cash / 100.0, 2),
@@ -409,6 +410,7 @@ def main():
 
     cfg = load_config(cfg_path)
     m = cfg.markets
+    spread_on = bool(cfg.raw.get("spread_capture", True))
     strat = build_strategy("smart", cfg.strategy_params)
     sim = Sim(int(start_dollars * 100))
     wp = None
@@ -432,64 +434,68 @@ def main():
     try:
         while cycles == 0 or n < cycles:
             n += 1
-            book = fetch_live()
-            sim.names.update({t: q.get('name', t) for t, q in book.items()})
-            sim.check_resting_fills(book)
-            # re-price: drop unfilled orders older than the stale window
-            # so they get re-placed at current prices (keeps tracker fresh)
-            _stale = max(1, cfg.engine.cancel_stale_after_s // max(1, cfg.engine.cycle_seconds))
-            for _t in [t for t, o in sim.resting.items() if n - o.get('placed', n) >= _stale]:
-                del sim.resting[_t]
-            cands = select(book, m)
-            watch = set(cands) | set(sim.pos) | set(sim.resting)
+            if spread_on:
+                book = fetch_live()
+                sim.names.update({t: q.get('name', t) for t, q in book.items()})
+                sim.check_resting_fills(book)
+                # re-price: drop unfilled orders older than the stale window
+                # so they get re-placed at current prices (keeps tracker fresh)
+                _stale = max(1, cfg.engine.cancel_stale_after_s // max(1, cfg.engine.cycle_seconds))
+                for _t in [t for t, o in sim.resting.items() if n - o.get('placed', n) >= _stale]:
+                    del sim.resting[_t]
+                cands = select(book, m)
+                watch = set(cands) | set(sim.pos) | set(sim.resting)
 
-            for t in watch:
-                q = book.get(t)
-                if not q:
-                    continue
-                snap = MarketSnapshot(
-                    ticker=t, yes_bid=q["yes_bid"], yes_ask=q["yes_ask"],
-                    no_bid=100 - q["yes_ask"], no_ask=100 - q["yes_bid"],
-                    yes_bid_size=q["yes_bid_size"], yes_ask_size=q["yes_ask_size"],
-                    position=sim.position_for(t),
-                )
-                for it in strat.decide(snap):
-                    if it.action == "buy":
-                        if t in sim.pos or t in sim.resting:
-                            continue
-                        pct = getattr(cfg.risk, "position_pct", 0) or 0
-                        eq_d = sim.equity(book) / 100.0          # current equity in $
-                        if pct > 0:
-                            target_d = max(0.50, eq_d * pct)     # grows/shrinks with equity
-                            target_d = min(target_d, eq_d * 0.10)  # never >10% of equity in one bet
-                        else:
-                            target_d = cfg.risk.target_position_dollars
-                        sz = max(1, int(target_d * 100) // max(1, it.price_cents))
-                        if sim.cash < it.price_cents * sz:
-                            continue
-                        if it.order_type == "market":
-                            sim.fill_buy(t, q["yes_ask"], sz, taker=True)
-                            print(f"  +BUY (mom)  {t[:34]} x{sz} @ {q['yes_ask']}c")
-                        else:
-                            sim.resting[t] = {"action": "buy", "price": it.price_cents, "count": sz, "placed": n}
-                    elif it.action == "sell":
-                        held = sim.pos.get(t)
-                        if not held:
-                            continue
-                        if it.order_type == "market":
-                            sim.fill_sell(t, q["yes_bid"], held[0], taker=True)
-                            print(f"  -SELL(exit) {t[:34]} x{held[0]} @ {q['yes_bid']}c")
-                        else:
-                            sim.resting[t] = {"action": "sell", "price": it.price_cents, "count": held[0], "placed": n}
+                for t in watch:
+                    q = book.get(t)
+                    if not q:
+                        continue
+                    snap = MarketSnapshot(
+                        ticker=t, yes_bid=q["yes_bid"], yes_ask=q["yes_ask"],
+                        no_bid=100 - q["yes_ask"], no_ask=100 - q["yes_bid"],
+                        yes_bid_size=q["yes_bid_size"], yes_ask_size=q["yes_ask_size"],
+                        position=sim.position_for(t),
+                    )
+                    for it in strat.decide(snap):
+                        if it.action == "buy":
+                            if t in sim.pos or t in sim.resting:
+                                continue
+                            pct = getattr(cfg.risk, "position_pct", 0) or 0
+                            eq_d = sim.equity(book) / 100.0          # current equity in $
+                            if pct > 0:
+                                target_d = max(0.50, eq_d * pct)     # grows/shrinks with equity
+                                target_d = min(target_d, eq_d * 0.10)  # never >10% of equity in one bet
+                            else:
+                                target_d = cfg.risk.target_position_dollars
+                            sz = max(1, int(target_d * 100) // max(1, it.price_cents))
+                            if sim.cash < it.price_cents * sz:
+                                continue
+                            if it.order_type == "market":
+                                sim.fill_buy(t, q["yes_ask"], sz, taker=True)
+                                print(f"  +BUY (mom)  {t[:34]} x{sz} @ {q['yes_ask']}c")
+                            else:
+                                sim.resting[t] = {"action": "buy", "price": it.price_cents, "count": sz, "placed": n}
+                        elif it.action == "sell":
+                            held = sim.pos.get(t)
+                            if not held:
+                                continue
+                            if it.order_type == "market":
+                                sim.fill_sell(t, q["yes_bid"], held[0], taker=True)
+                                print(f"  -SELL(exit) {t[:34]} x{held[0]} @ {q['yes_bid']}c")
+                            else:
+                                sim.resting[t] = {"action": "sell", "price": it.price_cents, "count": held[0], "placed": n}
 
-            total = sim.equity(book) - sim.start
-            print(f"[cycle {n}] candidates {len(cands)} | round-trips {sim.round_trips} "
-                  f"({sim.wins}W/{sim.losses}L) | resting {len(sim.resting)} | open {len(sim.pos)} | "
-                  f"fees ${sim.fees/100:.2f} | PAPER P&L ${total/100:+.2f}")
-            log_row(n, len(cands), sim, book)
-            sim.prev_vol = {t: q["volume"] for t, q in book.items()}
-            write_state(sim, book)
-            sim.save(SIM_PATH)
+                total = sim.equity(book) - sim.start
+                print(f"[cycle {n}] candidates {len(cands)} | round-trips {sim.round_trips} "
+                      f"({sim.wins}W/{sim.losses}L) | resting {len(sim.resting)} | open {len(sim.pos)} | "
+                      f"fees ${sim.fees/100:.2f} | PAPER P&L ${total/100:+.2f}")
+                log_row(n, len(cands), sim, book)
+                sim.prev_vol = {t: q["volume"] for t, q in book.items()}
+                write_state(sim, book)
+                sim.save(SIM_PATH)
+            else:
+                print(f"[cycle {n}] spread-capture DISABLED (weather-only mode)")
+                write_state(sim, {}, enabled=False)
             touch_lock()
             if wp is not None and n % 20 == 1:
                 try:

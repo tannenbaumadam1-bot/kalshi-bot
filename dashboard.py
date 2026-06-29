@@ -91,6 +91,7 @@ def build_data():
                     sc[k] = st[k]
             out["score"] = sc
             out["running"] = True
+            out["spread_enabled"] = st.get("spread_enabled", True)
         except Exception:
             pass
     wpath = os.path.join("logs", "weather_state.json")
@@ -179,7 +180,8 @@ async function tick(){
   const s=d.score;
   const t=document.getElementById('total');t.textContent=money(s.total);t.className='big '+cls(s.total);
   if(d.start!=null){const eq=(d.equity!=null?d.equity:d.start);document.getElementById('balances').innerHTML='Starting balance <b>$'+Number(d.start).toFixed(2)+'</b> &nbsp;&rarr;&nbsp; Current <b>$'+Number(eq).toFixed(2)+'</b>';}
-  document.getElementById('sub').textContent='cycle '+s.cycle+' - watching '+s.candidates+' markets'+(d.updated?' - state @ '+d.updated.slice(11,19):'');
+  const spreadOff = d.spread_enabled===false;
+  document.getElementById('sub').textContent=(spreadOff?'SPREAD-CAPTURE OFF (weather-only mode) - ':'')+'cycle '+s.cycle+' - watching '+s.candidates+' markets'+(d.updated?' - state @ '+d.updated.slice(11,19):'');
   const wr=s.round_trips?Math.round(100*s.wins/s.round_trips):0;
   document.getElementById('cards').innerHTML=[
     ['Open positions',s.open],['Completed trades',s.round_trips],
