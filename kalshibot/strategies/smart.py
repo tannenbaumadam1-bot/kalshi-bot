@@ -96,15 +96,17 @@ class SmartStrategy(Strategy):
                     order_type="market",
                     reason=f"max-hold {self._held[snap.ticker]} cycles - freeing capital",
                 )]
-            # 3) take-profit (rest a sell above entry, fee-aware)
-            costs = (fee_cents(pos.avg_price_cents, pos.count, taker=False)
-                     + fee_cents(pos.avg_price_cents + 2, pos.count, taker=False))
-            target = pos.avg_price_cents + max(2, (costs // max(1, pos.count)) + 1)
-            target = min(99, max(target, snap.yes_bid + self.edge_cents))
+            # 3) take-profit: CAPTURE THE SPREAD. Rest a sell near the ask, but
+            #    never below a fee-beating minimum, so every win clears fees with
+            #    margin (fixes tiny-win / huge-loss asymmetry).
+            rt_fee = fee_cents(pos.avg_price_cents, pos.count, taker=False) * 2
+            fee_per = max(1, rt_fee // max(1, pos.count))
+            min_target = pos.avg_price_cents + fee_per + 1
+            target = min(99, max(min_target, snap.yes_ask - self.edge_cents))
             return [OrderIntent(
                 ticker=snap.ticker, action="sell", side="yes",
                 count=pos.count, price_cents=target,
-                reason=f"take-profit @ {target}c (entry {pos.avg_price_cents}c)",
+                reason=f"take-profit @ {target}c (entry {pos.avg_price_cents}c, capture spread)",
             )]
 
         # ---------------- flat: consider an entry --------------------
