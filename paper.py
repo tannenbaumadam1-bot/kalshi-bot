@@ -34,6 +34,10 @@ import json
 import time
 import datetime
 import requests
+try:
+    import weather_paper
+except Exception:
+    weather_paper = None
 
 from kalshibot.config import load_config
 from kalshibot.fees import fee_cents
@@ -407,6 +411,12 @@ def main():
     m = cfg.markets
     strat = build_strategy("smart", cfg.strategy_params)
     sim = Sim(int(start_dollars * 100))
+    wp = None
+    if weather_paper is not None:
+        try:
+            wp = weather_paper.WeatherPaper()
+        except Exception:
+            wp = None
     if sim.load(SIM_PATH):
         print(f"Resumed previous session: ${sim.cash/100:.2f} cash, "
               f"{len(sim.pos)} positions held, {len(sim.resting)} resting orders, "
@@ -481,6 +491,14 @@ def main():
             write_state(sim, book)
             sim.save(SIM_PATH)
             touch_lock()
+            if wp is not None and n % 20 == 1:
+                try:
+                    wp.step()
+                    s = wp.summary()
+                    print(f"  WEATHER: P&L ${s['realized']:+.2f} | open {s['open_bets']} | "
+                          f"settled {s['wins']}W/{s['losses']}L | placed {s['placed']}")
+                except Exception as e:
+                    print(f"  weather step skipped: {e}")
             if cycles == 0 or n < cycles:
                 time.sleep(cfg.engine.cycle_seconds)
     except KeyboardInterrupt:

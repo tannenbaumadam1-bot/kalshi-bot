@@ -93,6 +93,12 @@ def build_data():
             out["running"] = True
         except Exception:
             pass
+    wpath = os.path.join("logs", "weather_state.json")
+    if os.path.exists(wpath):
+        try:
+            out["weather"] = json.load(open(wpath))
+        except Exception:
+            out["weather"] = None
     return out
 
 
@@ -133,6 +139,12 @@ PAGE = r"""<!doctype html><html><head><meta charset=utf-8>
 
  <h3>Gains breakdown</h3>
  <div class=bd id=bd></div>
+
+ <div id=wxwrap>
+ <h3>Weather edge - separate $100 experiment <span class=pill id=wxsum></span></h3>
+ <table><thead><tr><th>market</th><th>side</th><th>entry</th><th>contracts</th><th>our prob</th></tr></thead>
+ <tbody id=weather></tbody></table>
+ </div>
 
  <h3>Markets it's holding now <span class=pill id=poscount></span></h3>
  <table><thead><tr><th>market</th><th>contracts</th><th>avg cost</th><th>now (bid)</th><th>unrealized</th></tr></thead>
@@ -180,6 +192,15 @@ async function tick(){
     '<div class=op>=</div>'+
     '<div class="box combo"><div class=k>Combined total</div><div class="v '+cls(s.total)+'">'+money(s.total)+'</div></div>';
   document.getElementById('spark').innerHTML=spark(d.series);
+
+  if(d.weather && d.weather.summary){
+    const w=d.weather.summary;
+    document.getElementById('wxwrap').style.display='';
+    document.getElementById('wxsum').textContent='P&L $'+Number(w.realized).toFixed(2)+'  -  '+w.wins+'W/'+w.losses+'L ('+w.win_rate+'%)  -  '+w.open_bets+' open  -  '+w.placed+' placed';
+    document.getElementById('weather').innerHTML=(d.weather.open||[]).map(b=>
+      '<tr><td>'+b.city+' '+b.strike+'\u00b0'+b.hl+'</td><td class='+(b.side==='yes'?'buy':'sell')+'>'+b.side.toUpperCase()+'</td><td>'+b.entry+'c</td><td>'+b.count+'</td><td>'+Math.round(b.pside*100)+'%</td></tr>'
+    ).join('')||'<tr><td colspan=5 class=empty>No open weather bets right now - waiting for an edge.</td></tr>';
+  } else { document.getElementById('wxwrap').style.display='none'; }
 
   // holdings
   document.getElementById('poscount').textContent=d.positions.length+' markets';
