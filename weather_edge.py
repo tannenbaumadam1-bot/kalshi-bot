@@ -141,6 +141,11 @@ def scan(min_edge_cents=4, max_edge_cents=20, verbose=True):
             continue
         sigma = sigma_for_lead(mk["hrs"])
         fair = prob_at_least(ftemp, mk["strike"], sigma)   # P(temp >= strike)
+        # stay out of the tails: extreme strikes are where the model is least
+        # reliable (a 2-3 degF station diff swings a tail probability wildly),
+        # so only bet genuinely-uncertain strikes the forecast can speak to.
+        if fair < 0.20 or fair > 0.80:
+            continue
         yes_ask, no_ask = mk["yes_ask"], 100 - mk["yes_bid"]
         ev_yes = fair * 100 - yes_ask - fee_cents(yes_ask, 1, taker=True)
         ev_no = (1 - fair) * 100 - no_ask - fee_cents(no_ask, 1, taker=True)
