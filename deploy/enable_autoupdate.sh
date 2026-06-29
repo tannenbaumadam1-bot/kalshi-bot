@@ -21,7 +21,25 @@ new=$(git rev-parse HEAD 2>/dev/null)
 [ "$old" != "$new" ] && systemctl restart kalshi-paper kalshi-dashboard
 UPD
 chmod +x /usr/local/bin/kalshi-update.sh
-systemctl enable --now cron >/dev/null 2>&1 || systemctl enable --now crond >/dev/null 2>&1 || true
-(crontab -l 2>/dev/null | grep -v kalshi-update; echo "*/3 * * * * /usr/local/bin/kalshi-update.sh") | crontab -
+cat > /etc/systemd/system/kalshi-update.service <<'SVC'
+[Unit]
+Description=Kalshi auto-update
+After=network-online.target
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/kalshi-update.sh
+SVC
+cat > /etc/systemd/system/kalshi-update.timer <<'TMR'
+[Unit]
+Description=Run Kalshi auto-update every 3 minutes
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=3min
+Persistent=true
+[Install]
+WantedBy=timers.target
+TMR
+systemctl daemon-reload
+systemctl enable --now kalshi-update.timer
 systemctl start kalshi-paper kalshi-dashboard
 echo "=== AUTO-UPDATE ENABLED - server pulls from GitHub every 3 minutes ==="
