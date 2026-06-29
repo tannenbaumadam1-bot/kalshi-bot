@@ -42,13 +42,15 @@ class WeatherPaper:
         self.losses = 0
         self.fees = 0.0
         self.placed = 0
+        self.history = []   # recent settled bets (with outcomes)
         self.load()
 
     # ---- persistence ----
     def to_dict(self):
         return {"start": self.start, "cash": self.cash, "bets": self.bets,
                 "realized": self.realized, "wins": self.wins, "losses": self.losses,
-                "fees": self.fees, "placed": self.placed}
+                "fees": self.fees, "placed": self.placed,
+                "history": self.history[-100:]}
 
     def save(self):
         try:
@@ -59,7 +61,8 @@ class WeatherPaper:
                   "summary": self.summary(),
                   "open": [{"city": b["city"], "strike": b["strike"], "hl": b["hl"],
                             "side": b["side"], "entry": b["entry"], "count": b["count"],
-                            "pside": round(b["pside"], 2)} for b in self.bets.values()]}
+                            "pside": round(b["pside"], 2)} for b in self.bets.values()],
+                  "settled": list(reversed(self.history[-40:]))}
             with open(WSTATE, "w") as f:
                 json.dump(st, f)
         except Exception:
@@ -78,6 +81,7 @@ class WeatherPaper:
             self.losses = d.get("losses", 0)
             self.fees = d.get("fees", 0.0)
             self.placed = d.get("placed", 0)
+            self.history = d.get("history", [])
         except Exception:
             pass
 
@@ -107,6 +111,12 @@ class WeatherPaper:
             self.realized += net
             self.wins += int(won)
             self.losses += int(not won)
+            self.history.append({"city": b["city"], "strike": b["strike"], "hl": b["hl"],
+                                 "side": b["side"], "pside": round(b["pside"], 3),
+                                 "entry": b["entry"], "count": b["count"],
+                                 "outcome": (1 if won else 0), "pnl": round(net / 100.0, 2),
+                                 "ts": datetime.datetime.now().isoformat(timespec="seconds")})
+            self.history = self.history[-100:]
             self._log([datetime.datetime.now().isoformat(timespec="seconds"), "SETTLE",
                        b["city"], b["strike"], b["hl"], b["side"], round(b["pside"], 3),
                        b["entry"], b["count"], (1 if won else 0), round(net / 100, 2)])
@@ -157,8 +167,10 @@ class WeatherPaper:
     def summary(self):
         rt = self.wins + self.losses
         wr = round(100 * self.wins / rt) if rt else 0
+        at_stake = sum(b["entry"] * b["count"] for b in self.bets.values()) / 100.0
         return {"start": round(self.start / 100, 2), "cash": round(self.cash / 100, 2),
-                "open_bets": len(self.bets), "settled": rt, "wins": self.wins,
-                "losses": self.losses, "win_rate": wr,
-                "realized": round(self.realized / 100, 2), "fees": round(self.fees / 100, 2),
-                "placed": self.placed}
+                "open_bets": len(self.bets), "open_exposure": round(at_stake, 2),
+                "settled": rt, "wins": self.wins, "losses": self.losses, "win_rate": wr,
+                "realized": round(self.realized / 100, 2),
+                "total": round(self.realized / 100, 2),   # banked P&L (open held to settle)
+                "fees": round(self.fees / 100, 2), "placed": self.placed}
