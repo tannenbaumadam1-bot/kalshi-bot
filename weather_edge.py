@@ -124,7 +124,7 @@ def find_temp_markets(max_days=2):
     return out
 
 
-def scan(min_edge_cents=4, verbose=True):
+def scan(min_edge_cents=4, max_edge_cents=20, verbose=True):
     mkts = find_temp_markets()
     fcache = {}
     edges = []
@@ -144,10 +144,17 @@ def scan(min_edge_cents=4, verbose=True):
         yes_ask, no_ask = mk["yes_ask"], 100 - mk["yes_bid"]
         ev_yes = fair * 100 - yes_ask - fee_cents(yes_ask, 1, taker=True)
         ev_no = (1 - fair) * 100 - no_ask - fee_cents(no_ask, 1, taker=True)
-        if ev_yes >= ev_no and ev_yes >= min_edge_cents:
-            edges.append((ev_yes, "YES", mk, fair, ftemp))
-        elif ev_no > ev_yes and ev_no >= min_edge_cents:
-            edges.append((ev_no, "NO", mk, fair, ftemp))
+        raw_yes = fair * 100 - yes_ask              # disagreement vs market
+        raw_no = (1 - fair) * 100 - no_ask
+        if ev_yes >= ev_no:
+            side, ev, raw = "YES", ev_yes, raw_yes
+        else:
+            side, ev, raw = "NO", ev_no, raw_no
+        # must beat fees, but skip "too good to be true" gaps - those are
+        # almost always a data mismatch (wrong station/timing), not alpha.
+        if ev < min_edge_cents or raw > max_edge_cents:
+            continue
+        edges.append((ev, side, mk, fair, ftemp))
     edges.sort(key=lambda e: -e[0])
     if verbose:
         print(f"Scanned {len(mkts)} temp markets across {len(fcache)} city-days.")

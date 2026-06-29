@@ -113,7 +113,9 @@ class WeatherPaper:
             del self.bets[tk]
 
     def place(self):
-        edges = we.scan(min_edge_cents=4, verbose=False)
+        edges = we.scan(min_edge_cents=4, max_edge_cents=20, verbose=False)
+        # bankroll = cash + cost basis of open bets (so sizing scales with equity)
+        bankroll = self.cash + sum(b["entry"] * b["count"] for b in self.bets.values())
         for ev, side, mk, fair, ftemp in edges:
             tk = mk["ticker"]
             if tk in self.bets:
@@ -122,7 +124,16 @@ class WeatherPaper:
             price = mk["yes_ask"] if s == "yes" else (100 - mk["yes_bid"])
             if price <= 0 or price >= 100:
                 continue
-            size = max(1, int(self.per_bet * 100) // price)
+            # Kelly-fraction sizing, quarter-Kelly, hard-capped at 3% of bankroll
+            p = fair if s == "yes" else (1 - fair)
+            b_odds = (100 - price) / price
+            f_star = p - (1 - p) / b_odds
+            if f_star <= 0:
+                continue
+            frac = min(0.25 * f_star, 0.03)
+            size = int((frac * bankroll) // price)
+            if size < 1:
+                continue
             fee = fee_cents(price, size, taker=True)
             cost = price * size + fee
             if self.cash - cost < 100:        # keep a $1 reserve
