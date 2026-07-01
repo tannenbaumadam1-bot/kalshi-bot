@@ -147,6 +147,11 @@ def scan(min_edge_cents=4, max_edge_cents=20, verbose=True):
         if fair < 0.20 or fair > 0.80:
             continue
         yes_ask, no_ask = mk["yes_ask"], 100 - mk["yes_bid"]
+        # the MARKET must also see a real contest (15-85c). If the market is
+        # at 2c and we say 21%, that's a 10x disagreement on a tail - history
+        # says that's our data being wrong (station/timing), not free money.
+        if not (15 <= mk["yes_ask"] <= 85 or 15 <= mk["yes_bid"] <= 85):
+            continue
         ev_yes = fair * 100 - yes_ask - fee_cents(yes_ask, 1, taker=True)
         ev_no = (1 - fair) * 100 - no_ask - fee_cents(no_ask, 1, taker=True)
         raw_yes = fair * 100 - yes_ask              # disagreement vs market
