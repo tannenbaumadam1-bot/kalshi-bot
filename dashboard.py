@@ -169,6 +169,16 @@ class H(BaseHTTPRequestHandler):
         pass
 
     def do_GET(self):
+        if self.path.startswith("/public"):
+            # Read-only JSON, no token. Paper-trading stats only (no keys,
+            # no account data) - lets tooling check on the bot remotely.
+            body = json.dumps(build_data()).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
         if self.path.startswith("/data"):
             if TOKEN:
                 from urllib.parse import urlparse, parse_qs
@@ -201,19 +211,4 @@ def main():
         print("running - just open the address in your browser.")
         input("Press Enter to close...")
         return 1
-    shown = url + (f"/?token={TOKEN}" if TOKEN else "")
-    print(f"Dashboard running at {shown}")
-    if HOST == "127.0.0.1":
-        print("Opening your browser... (keep this window open; Ctrl+C to stop)")
-        threading.Timer(1.0, lambda: webbrowser.open(shown)).start()
-    else:
-        print("(Public mode - open the address above from any device.)")
-    try:
-        srv.serve_forever()
-    except KeyboardInterrupt:
-        print("\nDashboard stopped.")
-    return 0
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())
+    shown = url + (f"/?token={TOKEN}" if T
