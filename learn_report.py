@@ -64,6 +64,9 @@ def by_key(rows, key):
         print(f"  {str(k):>12}: {n:3d} bets, {w/n*100:4.0f}% won, {pnl:+7.2f}$")
 
 
+ERA_CUT = "2026-07-01"   # disciplined filters + market-price guard fully live
+
+
 def main():
     for label, path in FILES:
         rows = load(path)
