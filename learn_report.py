@@ -34,7 +34,8 @@ def load(path):
                              "entry": float(r["entry_c"]),
                              "count": float(r["count"]),
                              "won": int(r["outcome"]),
-                             "pnl": float(r["pnl_$"])})
+                             "pnl": float(r["pnl_$"]),
+                             "ts": r.get("timestamp", "")})
             except (ValueError, KeyError):
                 continue
     return rows
@@ -67,41 +68,52 @@ def by_key(rows, key):
 ERA_CUT = "2026-07-01"   # disciplined filters + market-price guard fully live
 
 
-def main():
-    for label, path in FILES:
-        rows = load(path)
-        print(f"\n===== {label} ({len(rows)} settled bets) =====")
-        if not rows:
-            print("  no settled bets yet")
-            continue
-        total = sum(r["pnl"] for r in rows)
-        wins = sum(r["won"] for r in rows)
-        exp_p = sum(r["p"] for r in rows) / len(rows)
-        print(f"  Net P&L: {total:+.2f}$ | {wins}W/{len(rows)-wins}L "
-              f"({wins/len(rows)*100:.0f}% actual vs {exp_p*100:.0f}% predicted)")
-        print("\n  -- calibration (the edge test) --")
-        calibration(rows)
-        print("\n  -- by city --")
-        by_key(rows, "city")
-        print("\n  -- by hi/lo --")
-        by_key(rows, "hl")
-        print("\n  -- by side --")
-        by_key(rows, "side")
-        # suggestions
-        print("\n  -- suggestions --")
-        if len(rows) < 30:
-            print(f"  Sample too small ({len(rows)} bets) for tuning decisions.")
-            print("  Rule of thumb: 30+ to spot gross miscalibration, 100+ to tune.")
+def _report(rows):
+    total = sum(r["pnl"] for r in rows)
+    wins = sum(r["won"] for r in rows)
+    exp_p = sum(r["p"] for r in rows) / len(rows)
+    print(f"  Net P&L: {total:+.2f}$ | {wins}W/{len(rows)-wins}L "
+          f"({wins/len(rows)*100:.0f}% actual vs {exp_p*100:.0f}% predicted)")
+    print("\n  -- calibration (the edge test) --")
+    calibration(rows)
+    print("\n  -- by city --")
+    by_key(rows, "city")
+    print("\n  -- by hi/lo --")
+    by_key(rows, "hl")
+    print("\n  -- by side --")
+    by_key(rows, "side")
+    print("\n  -- suggestions --")
+    if len(rows) < 30:
+        print(f"  Sample too small ({len(rows)} bets) for tuning decisions.")
+        print("  Rule of thumb: 30+ to spot gross miscalibration, 100+ to tune.")
+    else:
+        gap = wins / len(rows) - exp_p
+        if gap < -0.10:
+            print(f"  Predicted {exp_p*100:.0f}% but won {wins/len(rows)*100:.0f}% "
+                  "- model is OVERCONFIDENT. Widen sigma_for_lead or raise min_edge.")
+        elif gap > 0.05:
+            print("  Winning more than predicted - edge is real; consider "
+                  "sizing up (raise Kelly cap) before loosening filters.")
         else:
-            gap = wins / len(rows) - exp_p
-            if gap < -0.10:
-                print(f"  Predicted {exp_p*100:.0f}% but won {wins/len(rows)*100:.0f}% "
-                      "- model is OVERCONFIDENT. Widen sigma_for_lead or raise min_edge.")
-            elif gap > 0.05:
-                print("  Winning more than predicted - edge is real; consider "
-                      "sizing up (raise Kelly cap) before loosening filters.")
-            else:
-                print("  Roughly calibrated. Judge by net P&L after fees.")
+            print("  Roughly calibrated. Judge by net P&L after fees.")
+
+
+def main():
+    """The ledger is cumulative and never reset. The era split below is
+    analysis-only: it separates bets made under the old loose filters from
+    bets made under the disciplined filters, so both stay on the record but
+    the go-live decision is judged on the new-filter era alone."""
+    for label, path in FILES:
+        allrows = load(path)
+        for tag, rows in [
+                ("ALL TIME (cumulative)", allrows),
+                (f"NEW FILTERS ONLY (since {ERA_CUT[:10]})",
+                 [r for r in allrows if r["ts"] >= ERA_CUT])]:
+            print(f"\n===== {label} - {tag} ({len(rows)} settled bets) =====")
+            if not rows:
+                print("  no settled bets yet")
+                continue
+            _report(rows)
 
 
 if __name__ == "__main__":
