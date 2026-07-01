@@ -211,4 +211,19 @@ def main():
         print("running - just open the address in your browser.")
         input("Press Enter to close...")
         return 1
-    shown = url + (f"/?token={TOKEN}" if T
+    shown = url + (f"/?token={TOKEN}" if TOKEN else "")
+    print(f"Dashboard running at {shown}")
+    if HOST == "127.0.0.1":
+        print("Opening your browser... (keep this window open; Ctrl+C to stop)")
+        threading.Timer(1.0, lambda: webbrowser.open(shown)).start()
+    else:
+        print("(Public mode - open the address above from any device.)")
+    try:
+        srv.serve_forever()
+    except KeyboardInterrupt:
+        print("\nDashboard stopped.")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
