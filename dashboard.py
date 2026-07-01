@@ -42,6 +42,16 @@ def build_data():
         run += float(b.get("pnl", 0) or 0)
         curve.append(round(run, 2))
     out["curve"] = curve
+    # live trader state (only exists once real-money weather trading starts)
+    live_path = os.path.join("logs", "weather_live_state.json")
+    if os.path.exists(live_path):
+        try:
+            lv = json.load(open(live_path))
+            out["live"] = {"updated": lv.get("updated", ""),
+                           "summary": lv.get("summary", {}) or {},
+                           "balance_c": lv.get("balance_c")}
+        except Exception:
+            pass
     return out
 
 
@@ -130,6 +140,10 @@ async function load(){
   const s=d.summary||{};
   if(!d.running){$('sub').textContent='waiting for the weather bot to write its first state...';return;}
   $('sub').textContent='updated '+(d.updated?d.updated.replace('T',' ').slice(0,19):'-');
+  if(d.live&&d.live.summary){const L=d.live.summary;
+    $('sub').textContent+='   |   LIVE: '+money(L.net||0)+' net, '
+      +(L.wins||0)+'W/'+(L.losses||0)+'L, '+(L.open||0)+' open'
+      +(d.live.balance_c!=null?', bal $'+(d.live.balance_c/100).toFixed(2):'');}
   const total=Number(s.total||0);
   $('pnl').innerHTML='<span class="'+cls(total)+'">'+money(total)+'</span>';
   const equity=(Number(s.start||0)+total).toFixed(2);
