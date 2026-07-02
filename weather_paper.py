@@ -19,6 +19,11 @@ WSIM = os.path.join("logs", "weather_sim.json")
 WBETS = os.path.join("logs", "weather_bets.csv")
 WSTATE = os.path.join("logs", "weather_state.json")
 
+# Total-book exposure cap: open cost basis may never exceed this fraction of
+# bankroll (cash + open stake). Keeps one bad day from being a blowout and
+# leaves dry powder for tomorrow's edges. (Per-bet Kelly cap is 3%.)
+MAX_BOOK_FRAC = 0.50
+
 
 def fetch_result(ticker):
     """Settled outcome of a market: 'yes', 'no', or None if not settled yet."""
@@ -128,7 +133,8 @@ class WeatherPaper:
     def place(self):
         edges = we.scan(min_edge_cents=4, max_edge_cents=20, verbose=False)
         # bankroll = cash + cost basis of open bets (so sizing scales with equity)
-        bankroll = self.cash + sum(b["entry"] * b["count"] for b in self.bets.values())
+        open_stake = sum(b["entry"] * b["count"] for b in self.bets.values())
+        bankroll = self.cash + open_stake
         for ev, side, mk, fair, ftemp in edges:
             tk = mk["ticker"]
             if tk in self.bets:
@@ -149,9 +155,14 @@ class WeatherPaper:
                 continue
             fee = fee_cents(price, size, taker=True)
             cost = price * size + fee
+            # total-book cap: never let open cost basis exceed MAX_BOOK_FRAC
+            # of bankroll (edges are sorted best-first, so the best fit first)
+            if open_stake + price * size > MAX_BOOK_FRAC * bankroll:
+                continue
             if self.cash - cost < 100:        # keep a $1 reserve
                 continue
             self.cash -= cost
+            open_stake += price * size
             self.fees += fee
             pside = fair if s == "yes" else (1 - fair)
             self.bets[tk] = {"side": s, "entry": price, "count": size, "fee": fee,
@@ -173,10 +184,4 @@ class WeatherPaper:
     def summary(self):
         rt = self.wins + self.losses
         wr = round(100 * self.wins / rt) if rt else 0
-        at_stake = sum(b["entry"] * b["count"] for b in self.bets.values()) / 100.0
-        return {"start": round(self.start / 100, 2), "cash": round(self.cash / 100, 2),
-                "open_bets": len(self.bets), "open_exposure": round(at_stake, 2),
-                "settled": rt, "wins": self.wins, "losses": self.losses, "win_rate": wr,
-                "realized": round(self.realized / 100, 2),
-                "total": round(self.realized / 100, 2),   # banked P&L (open held to settle)
-                "fees": round(self.fees / 100, 2), "placed": self.placed}
+     
