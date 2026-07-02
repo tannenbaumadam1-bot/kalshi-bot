@@ -2,9 +2,9 @@
 """Live dashboard for the Kalshi WEATHER paper bot.
 
 Serves an auto-refreshing page (default http://127.0.0.1:8765) showing the
-weather strategy's P&L, open bets, and settled history. One unified tracker,
-correct math: Net P&L = banked (settled) P&L. Open bets are held to
-settlement, so they show as exposure ("at stake"), not noisy mark-to-market.
+weather strategy's P&L, open bets (with live market price + unrealized P/L),
+and settled history. Net P&L = banked (settled) P&L; open bets also show a
+mark-to-market so you can see how they're doing before settlement.
 
 No money, no API key, nothing sensitive. Reads logs/weather_state.json.
 
@@ -15,13 +15,62 @@ Public mode (for a cloud server):
 import json
 import os
 import threading
+import time
 import webbrowser
 from http.server import BaseHTTPRequestHandler, HTTPServer
+
+try:
+    import requests
+except Exception:       # dashboard still works without live prices
+    requests = None
 
 WEATHER_PATH = os.path.join("logs", "weather_state.json")
 HOST = os.environ.get("DASH_HOST", "127.0.0.1")
 PORT = int(os.environ.get("DASH_PORT", "8765"))
 TOKEN = os.environ.get("DASH_TOKEN", "")   # if set, /data requires ?token=...
+KALSHI = "https://api.elections.kalshi.com/trade-api/v2"
+
+# live-price cache for open bets: one batched Kalshi call, max once / 60s
+_PRICES = {"ts": 0.0, "by_ticker": {}}
+_PRICES_LOCK = threading.Lock()
+
+
+def _cents(mk, key):
+    v = mk.get(key)
+    if isinstance(v, (int, float)) and v > 0:
+        return int(round(float(v)))
+    v = mk.get(key + "_dollars")
+    try:
+        return int(round(float(v) * 100)) if v not in (None, "") else 0
+    except (TypeError, ValueError):
+        return 0
+
+
+def fetch_prices(tickers):
+    """Current yes_bid/yes_ask (cents) per ticker; cached 60s. Never raises."""
+    if not tickers or requests is None:
+        return {}
+    with _PRICES_LOCK:
+        fresh = (time.time() - _PRICES["ts"] < 60
+                 and all(t in _PRICES["by_ticker"] for t in tickers))
+        if fresh:
+            return _PRICES["by_ticker"]
+        out = dict(_PRICES["by_ticker"])   # keep stale marks if refresh fails
+        try:
+            for i in range(0, len(tickers), 40):
+                batch = tickers[i:i + 40]
+                d = requests.get(KALSHI + "/markets",
+                                 params={"tickers": ",".join(batch), "limit": len(batch)},
+                                 timeout=10).json()
+                for mk in d.get("markets", []) or []:
+                    out[mk.get("ticker", "")] = {
+                        "yes_bid": _cents(mk, "yes_bid"),
+                        "yes_ask": _cents(mk, "yes_ask")}
+            _PRICES["ts"] = time.time()
+            _PRICES["by_ticker"] = out
+        except Exception:
+            pass
+        return out
 
 
 def build_data():
@@ -36,6 +85,27 @@ def build_data():
             out["settled"] = w.get("settled", []) or []
         except Exception:
             pass
+    # enrich open bets with current market price + unrealized P/L
+    tickers = [b.get("ticker") for b in out["open"] if b.get("ticker")]
+    prices = fetch_prices(tickers)
+    unreal = 0.0
+    priced = 0
+    for b in out["open"]:
+        px = prices.get(b.get("ticker") or "")
+        if not px or not (px["yes_bid"] or px["yes_ask"]):
+            b["now"] = None
+            b["upnl"] = None
+            continue
+        # mark = what our side could sell for now
+        mark = px["yes_bid"] if b.get("side") == "yes" else (100 - px["yes_ask"])
+        mark = max(0, min(100, mark))
+        b["now"] = mark
+        b["value"] = round(mark * b.get("count", 0) / 100.0, 2)
+        b["upnl"] = round((mark - b.get("entry", 0)) * b.get("count", 0) / 100.0, 2)
+        unreal += b["upnl"]
+        priced += 1
+    if out["summary"] and priced:
+        out["summary"]["unrealized"] = round(unreal, 2)
     # cumulative banked P&L curve, oldest -> newest (settled is newest-first)
     curve, run = [], 0.0
     for b in reversed(out["settled"]):
@@ -96,14 +166,16 @@ svg{display:block;width:100%;height:64px;margin-top:6px}
 <h1>Kalshi Weather Bot</h1>
 <div class=sub id=sub>loading...</div>
 <div class=banner>Live simulation - no money, no API key. Strategy: out-forecast daily
-temperature markets, bet only disciplined edges (Kelly-sized, no tails, no data-error gaps).</div>
+temperature markets, bet only disciplined edges (Kelly-sized, no tails, no data-error gaps,
+model probability shrunk toward the market price).</div>
 <div class="pnl" id=pnl>--</div>
 <div class=equity id=equity></div>
 <svg id=spark viewBox="0 0 600 64" preserveAspectRatio=none></svg>
 <div class=grid id=cards></div>
 <h2>Open bets (held to settlement)</h2>
 <table><thead><tr><th>Market</th><th>Side</th><th class=num>Our prob</th>
-<th class=num>Price</th><th class=num>Contracts</th><th class=num>At stake</th></tr></thead>
+<th class=num>Entry</th><th class=num>Now</th><th class=num>Contracts</th>
+<th class=num>At stake</th><th class=num>Value now</th><th class=num>Unrl P&L</th></tr></thead>
 <tbody id=open></tbody></table>
 <h2>Settled bets (history)</h2>
 <table><thead><tr><th>Market</th><th>Side</th><th class=num>Our prob</th>
@@ -145,25 +217,33 @@ async function load(){
       +(L.wins||0)+'W/'+(L.losses||0)+'L, '+(L.open||0)+' open'
       +(d.live.balance_c!=null?', bal $'+(d.live.balance_c/100).toFixed(2):'');}
   const total=Number(s.total||0);
+  const unrl=(s.unrealized==null)?null:Number(s.unrealized);
   $('pnl').innerHTML='<span class="'+cls(total)+'">'+money(total)+'</span>';
   const equity=(Number(s.start||0)+total).toFixed(2);
   $('equity').textContent='Started $'+Number(s.start||0).toFixed(2)+'  →  banked $'+equity
-    +'   ('+(s.open_bets||0)+' open bet'+((s.open_bets===1)?'':'s')+', $'+Number(s.open_exposure||0).toFixed(2)+' at stake)';
+    +'   ('+(s.open_bets||0)+' open bet'+((s.open_bets===1)?'':'s')+', $'+Number(s.open_exposure||0).toFixed(2)+' at stake)'
+    +(unrl==null?'':'   |   marked equity $'+(Number(s.start||0)+total+unrl).toFixed(2));
   spark(d.curve);
   const wr=(s.settled||0)>0?(s.win_rate+'%'):'-';
   $('cards').innerHTML=[
     ['Net P&L (banked)','<span class="'+cls(total)+'">'+money(total)+'</span>'],
+    ['Unrealized P&L (open)',unrl==null?'-':'<span class="'+cls(unrl)+'">'+money(unrl)+'</span>'],
     ['Settled bets',(s.settled||0)+'  ('+(s.wins||0)+'W / '+(s.losses||0)+'L)'],
     ['Win rate',wr],
     ['Open bets',(s.open_bets||0)],
     ['Total placed',(s.placed||0)],
     ['Fees paid','$'+Number(s.fees||0).toFixed(2)],
   ].map(c=>'<div class=card><div class=k>'+c[0]+'</div><div class=v>'+c[1]+'</div></div>').join('');
-  $('open').innerHTML=(d.open||[]).map(b=>
-    '<tr>'+mkt(b)+side(b.side)+prob(b.pside)
-    +'<td class=num>'+b.entry+'¢</td><td class=num>'+b.count+'</td>'
-    +'<td class=num>$'+((b.entry*b.count)/100).toFixed(2)+'</td></tr>'
-  ).join('')||'<tr><td colspan=6 class=empty>No open bets - waiting for a disciplined edge.</td></tr>';
+  $('open').innerHTML=(d.open||[]).map(b=>{
+    const hasNow=(b.now!=null);
+    return '<tr>'+mkt(b)+side(b.side)+prob(b.pside)
+    +'<td class=num>'+b.entry+'¢</td>'
+    +'<td class=num>'+(hasNow?b.now+'¢':'-')+'</td>'
+    +'<td class=num>'+b.count+'</td>'
+    +'<td class=num>$'+((b.entry*b.count)/100).toFixed(2)+'</td>'
+    +'<td class=num>'+(hasNow?'$'+Number(b.value||0).toFixed(2):'-')+'</td>'
+    +'<td class=num>'+(hasNow?'<span class="'+cls(b.upnl)+'">'+money(b.upnl)+'</span>':'-')+'</td></tr>';
+  }).join('')||'<tr><td colspan=9 class=empty>No open bets - waiting for a disciplined edge.</td></tr>';
   $('settled').innerHTML=(d.settled||[]).map(b=>{
     const won=Number(b.outcome)===1;
     return '<tr>'+mkt(b)+side(b.side)+prob(b.pside)
@@ -171,8 +251,9 @@ async function load(){
     +'<td><span class="'+(won?'won':'lost')+'">'+(won?'WON':'LOST')+'</span></td>'
     +'<td class=num><span class="'+cls(b.pnl)+'">'+money(b.pnl)+'</span></td></tr>';
   }).join('')||'<tr><td colspan=7 class=empty>No settled bets yet - they resolve at end of day.</td></tr>';
-  $('foot').textContent='Paper trading only. Net P&L is banked (settled) profit; open bets are '
-    +'shown at cost since they are held to settlement. Auto-refreshes every 20s.';
+  $('foot').textContent='Paper trading only. Net P&L is banked (settled) profit; open bets also '
+    +'show a live mark (what your side could sell for now). Marks refresh about once a minute. '
+    +'Auto-refreshes every 20s.';
 }
 load();setInterval(load,20000);
 </script></body></html>"""

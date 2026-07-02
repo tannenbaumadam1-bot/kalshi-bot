@@ -59,9 +59,11 @@ class WeatherPaper:
                 json.dump(self.to_dict(), f)
             st = {"updated": datetime.datetime.now().isoformat(timespec="seconds"),
                   "summary": self.summary(),
-                  "open": [{"city": b["city"], "strike": b["strike"], "hl": b["hl"],
-                            "side": b["side"], "entry": b["entry"], "count": b["count"],
-                            "pside": round(b["pside"], 2)} for b in self.bets.values()],
+                  "open": [{"ticker": tk, "city": b["city"], "strike": b["strike"],
+                            "hl": b["hl"], "side": b["side"], "entry": b["entry"],
+                            "count": b["count"], "pside": round(b["pside"], 2),
+                            "ots": b.get("ots", ""), "era": b.get("era", "v2")}
+                           for tk, b in self.bets.items()],
                   "settled": list(reversed(self.history[-40:]))}
             with open(WSTATE, "w") as f:
                 json.dump(st, f)
@@ -115,7 +117,8 @@ class WeatherPaper:
                                  "side": b["side"], "pside": round(b["pside"], 3),
                                  "entry": b["entry"], "count": b["count"],
                                  "outcome": (1 if won else 0), "pnl": round(net / 100.0, 2),
-                                 "ts": datetime.datetime.now().isoformat(timespec="seconds")})
+                                 "ts": datetime.datetime.now().isoformat(timespec="seconds"),
+                                 "ots": b.get("ots", ""), "era": b.get("era", "v2")})
             self.history = self.history[-100:]
             self._log([datetime.datetime.now().isoformat(timespec="seconds"), "SETTLE",
                        b["city"], b["strike"], b["hl"], b["side"], round(b["pside"], 3),
@@ -153,7 +156,10 @@ class WeatherPaper:
             pside = fair if s == "yes" else (1 - fair)
             self.bets[tk] = {"side": s, "entry": price, "count": size, "fee": fee,
                              "pside": pside, "city": mk["city"], "strike": mk["strike"],
-                             "hl": ("lo" if mk["is_low"] else "hi")}
+                             "hl": ("lo" if mk["is_low"] else "hi"),
+                             "ots": datetime.datetime.now().isoformat(timespec="seconds"),
+                             "era": "v3-blend",
+                             "mkt_bid": mk["yes_bid"], "mkt_ask": mk["yes_ask"]}
             self.placed += 1
             self._log([datetime.datetime.now().isoformat(timespec="seconds"), "OPEN",
                        mk["city"], mk["strike"], ("lo" if mk["is_low"] else "hi"), s,

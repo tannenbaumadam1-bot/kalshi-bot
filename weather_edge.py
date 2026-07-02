@@ -32,6 +32,14 @@ CITY_COORDS = {
     "houston": (29.99, -95.36), "boston": (42.36, -71.01), "atlanta": (33.63, -84.44),
 }
 
+# aliases -> one canonical city label (keeps the ledger/calibration clean)
+CITY_CANON = {"nyc": "new york"}
+
+# Calibration says our raw model is overconfident (90-99% bucket won 12.5%).
+# Blend our probability with the market's implied probability: the market is
+# a strong prior, and any real edge must survive the shrinkage.
+MODEL_WEIGHT = 0.5
+
 
 def norm_cdf(z):
     return 0.5 * (1 + math.erf(z / math.sqrt(2)))
@@ -112,7 +120,7 @@ def find_temp_markets(max_days=2):
                 if not m:
                     continue
                 out.append({
-                    "ticker": mk["ticker"], "city": city, "is_low": is_low,
+                    "ticker": mk["ticker"], "city": CITY_CANON.get(city, city), "is_low": is_low,
                     "strike": int(m.group(1)),
                     "yes_bid": _c(mk.get("yes_bid_dollars")), "yes_ask": _c(mk.get("yes_ask_dollars")),
                     "date": close.astimezone().strftime("%Y-%m-%d"), "hrs": hrs,
@@ -140,11 +148,11 @@ def scan(min_edge_cents=4, max_edge_cents=20, verbose=True):
         if ftemp is None:
             continue
         sigma = sigma_for_lead(mk["hrs"])
-        fair = prob_at_least(ftemp, mk["strike"], sigma)   # P(temp >= strike)
+        model = prob_at_least(ftemp, mk["strike"], sigma)   # P(temp >= strike)
         # stay out of the tails: extreme strikes are where the model is least
         # reliable (a 2-3 degF station diff swings a tail probability wildly),
         # so only bet genuinely-uncertain strikes the forecast can speak to.
-        if fair < 0.20 or fair > 0.80:
+        if model < 0.20 or model > 0.80:
             continue
         yes_ask, no_ask = mk["yes_ask"], 100 - mk["yes_bid"]
         # the MARKET must also see a real contest (15-85c). If the market is
@@ -152,6 +160,11 @@ def scan(min_edge_cents=4, max_edge_cents=20, verbose=True):
         # says that's our data being wrong (station/timing), not free money.
         if not (15 <= mk["yes_ask"] <= 85 or 15 <= mk["yes_bid"] <= 85):
             continue
+        # shrink toward the market's implied probability (mid of bid/ask):
+        # calibration showed the raw model is overconfident, so any edge must
+        # survive being averaged with the crowd's price.
+        mkt_prob = ((mk["yes_bid"] + mk["yes_ask"]) / 2.0) / 100.0
+        fair = MODEL_WEIGHT * model + (1 - MODEL_WEIGHT) * mkt_prob
         ev_yes = fair * 100 - yes_ask - fee_cents(yes_ask, 1, taker=True)
         ev_no = (1 - fair) * 100 - no_ask - fee_cents(no_ask, 1, taker=True)
         raw_yes = fair * 100 - yes_ask              # disagreement vs market
