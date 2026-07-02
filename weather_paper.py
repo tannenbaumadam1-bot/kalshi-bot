@@ -184,4 +184,10 @@ class WeatherPaper:
     def summary(self):
         rt = self.wins + self.losses
         wr = round(100 * self.wins / rt) if rt else 0
-     
+        at_stake = sum(b["entry"] * b["count"] for b in self.bets.values()) / 100.0
+        return {"start": round(self.start / 100, 2), "cash": round(self.cash / 100, 2),
+                "open_bets": len(self.bets), "open_exposure": round(at_stake, 2),
+                "settled": rt, "wins": self.wins, "losses": self.losses, "win_rate": wr,
+                "realized": round(self.realized / 100, 2),
+                "total": round(self.realized / 100, 2),   # banked P&L (open held to settle)
+                "fees": round(self.fees / 100, 2), "placed": self.placed}
