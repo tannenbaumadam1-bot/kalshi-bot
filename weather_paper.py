@@ -64,7 +64,7 @@ class WeatherPaper:
                             "count": b["count"], "pside": round(b["pside"], 2),
                             "ots": b.get("ots", ""), "era": b.get("era", "v2")}
                            for tk, b in self.bets.items()],
-                  "settled": list(reversed(self.history[-40:]))}
+                  "settled": list(reversed(self.history[-100:]))}
             with open(WSTATE, "w") as f:
                 json.dump(st, f)
         except Exception:
