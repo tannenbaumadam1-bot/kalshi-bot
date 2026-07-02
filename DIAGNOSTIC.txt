@@ -1,0 +1,58 @@
+===== PYTHON LOCATIONS =====
+--- where py ---
+C:\Windows\py.exe
+C:\Users\tanne\AppData\Local\Microsoft\WindowsApps\py.exe
+--- where python ---
+C:\Python314\python.exe
+C:\Users\tanne\AppData\Local\Microsoft\WindowsApps\python.exe
+C:\Users\tanne\AppData\Local\Python\bin\python.exe
+===== PYTHON VERSION =====
+Python 3.14.3
+Python 3.14.6
+===== INSTALL REQUIREMENTS =====
+Requirement already satisfied: requests>=2.31.0 in c:\users\tanne\appdata\roaming\python\python314\site-packages (from -r requirements.txt (line 1)) (2.34.2)
+Requirement already satisfied: cryptography>=42.0.0 in c:\users\tanne\appdata\roaming\python\python314\site-packages (from -r requirements.txt (line 2)) (49.0.0)
+Requirement already satisfied: PyYAML>=6.0 in c:\users\tanne\appdata\roaming\python\python314\site-packages (from -r requirements.txt (line 3)) (6.0.3)
+Requirement already satisfied: charset_normalizer<4,>=2 in c:\users\tanne\appdata\roaming\python\python314\site-packages (from requests>=2.31.0->-r requirements.txt (line 1)) (3.4.7)
+Requirement already satisfied: idna<4,>=2.5 in c:\users\tanne\appdata\roaming\python\python314\site-packages (from requests>=2.31.0->-r requirements.txt (line 1)) (3.18)
+Requirement already satisfied: urllib3<3,>=1.26 in c:\users\tanne\appdata\roaming\python\python314\site-packages (from requests>=2.31.0->-r requirements.txt (line 1)) (2.7.0)
+Requirement already satisfied: certifi>=2023.5.7 in c:\users\tanne\appdata\roaming\python\python314\site-packages (from requests>=2.31.0->-r requirements.txt (line 1)) (2026.6.17)
+Requirement already satisfied: cffi>=2.0.0 in c:\users\tanne\appdata\roaming\python\python314\site-packages (from cryptography>=42.0.0->-r requirements.txt (line 2)) (2.0.0)
+Requirement already satisfied: pycparser in c:\users\tanne\appdata\roaming\python\python314\site-packages (from cffi>=2.0.0->cryptography>=42.0.0->-r requirements.txt (line 2)) (3.0)
+
+[notice] A new release of pip is available: 25.3 -> 26.1.2
+[notice] To update, run: C:\Users\tanne\AppData\Local\Python\pythoncore-3.14-64\python.exe -m pip install --upgrade pip
+Defaulting to user installation because normal site-packages is not writeable
+Requirement already satisfied: requests>=2.31.0 in C:\Users\tanne\AppData\Roaming\Python\Python314\site-packages (from -r requirements.txt (line 1)) (2.34.2)
+Requirement already satisfied: cryptography>=42.0.0 in C:\Users\tanne\AppData\Roaming\Python\Python314\site-packages (from -r requirements.txt (line 2)) (49.0.0)
+Requirement already satisfied: PyYAML>=6.0 in C:\Users\tanne\AppData\Roaming\Python\Python314\site-packages (from -r requirements.txt (line 3)) (6.0.3)
+Requirement already satisfied: charset_normalizer<4,>=2 in C:\Users\tanne\AppData\Roaming\Python\Python314\site-packages (from requests>=2.31.0->-r requirements.txt (line 1)) (3.4.7)
+Requirement already satisfied: idna<4,>=2.5 in C:\Users\tanne\AppData\Roaming\Python\Python314\site-packages (from requests>=2.31.0->-r requirements.txt (line 1)) (3.18)
+Requirement already satisfied: urllib3<3,>=1.26 in C:\Users\tanne\AppData\Roaming\Python\Python314\site-packages (from requests>=2.31.0->-r requirements.txt (line 1)) (2.7.0)
+Requirement already satisfied: certifi>=2023.5.7 in C:\Users\tanne\AppData\Roaming\Python\Python314\site-packages (from requests>=2.31.0->-r requirements.txt (line 1)) (2026.6.17)
+Requirement already satisfied: cffi>=2.0.0 in C:\Users\tanne\AppData\Roaming\Python\Python314\site-packages (from cryptography>=42.0.0->-r requirements.txt (line 2)) (2.0.0)
+Requirement already satisfied: pycparser in C:\Users\tanne\AppData\Roaming\Python\Python314\site-packages (from cffi>=2.0.0->cryptography>=42.0.0->-r requirements.txt (line 2)) (3.0)
+===== CONNECTION CHECK =====
+Environment: demo  (https://external-api.demo.kalshi.co/trade-api/v2)
+Connected. Balance: $100.00
+
+Sample open markets (5 shown):
+  KXWCGOAL-26JUN22ARGAUT-AUTMARNAU89-1 yes_bid=?c yes_ask=?c vol=?
+  KXWCGOAL-26JUN22ARGAUT-ARGNOTAME30-1 yes_bid=?c yes_ask=?c vol=?
+  KXWCGOAL-26JUN22ARGAUT-ARGNGONZA11-1 yes_bid=?c yes_ask=?c vol=?
+  KXWCTEAMFIRSTGOAL-26JUN22ARGAUT-AUT-MARNAU89 yes_bid=?c yes_ask=?c vol=?
+  KXTEMPNYCH-26JUN2216-T79.99  yes_bid=?c yes_ask=?c vol=?
+
+Looks good. Next: python run.py once   (dry run, places nothing)
+Environment: demo  (https://external-api.demo.kalshi.co/trade-api/v2)
+Connected. Balance: $100.00
+
+Sample open markets (5 shown):
+  KXWCGOAL-26JUN22ARGAUT-AUTMARNAU89-1 yes_bid=?c yes_ask=?c vol=?
+  KXWCGOAL-26JUN22ARGAUT-ARGNOTAME30-1 yes_bid=?c yes_ask=?c vol=?
+  KXWCGOAL-26JUN22ARGAUT-ARGNGONZA11-1 yes_bid=?c yes_ask=?c vol=?
+  KXWCTEAMFIRSTGOAL-26JUN22ARGAUT-AUT-MARNAU89 yes_bid=?c yes_ask=?c vol=?
+  KXTEMPNYCH-26JUN2216-T79.99  yes_bid=?c yes_ask=?c vol=?
+
+Looks good. Next: python run.py once   (dry run, places nothing)
+===== DONE =====
