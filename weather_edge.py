@@ -287,4 +287,9 @@ if __name__ == "__main__":
         assert prob_from_members([80] * 20, 72) > 0.99
         assert prob_from_members([60] * 20, 72) < 0.01
         assert prob_from_members([], 72) is None
-        # every whitelisted se
+        # every whitelisted series maps to a station we have coords for
+        for _st, (_city, _lo) in SERIES.items():
+            assert _city in CITY_COORDS, _city
+        print("weather math self-test PASSED (v4 ensemble)")
+    else:
+        scan()

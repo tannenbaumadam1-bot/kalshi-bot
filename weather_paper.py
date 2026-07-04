@@ -192,4 +192,39 @@ class WeatherPaper:
                 continue
             fee = fee_cents(price, size, taker=True)
             cost = price * size + fee
-            # total-book cap: ne
+            # total-book cap: never let open cost basis exceed MAX_BOOK_FRAC
+            # of bankroll (edges are sorted best-first, so the best fit first)
+            if open_stake + price * size > MAX_BOOK_FRAC * bankroll:
+                continue
+            if self.cash - cost < 100:        # keep a $1 reserve
+                continue
+            self.cash -= cost
+            open_stake += price * size
+            self.fees += fee
+            pside = fair if s == "yes" else (1 - fair)
+            self.bets[tk] = {"side": s, "entry": price, "count": size, "fee": fee,
+                             "pside": pside, "city": mk["city"], "strike": mk["strike"],
+                             "hl": ("lo" if mk["is_low"] else "hi"),
+                             "ots": datetime.datetime.now().isoformat(timespec="seconds"),
+                             "era": ERA,
+                             "mkt_bid": mk["yes_bid"], "mkt_ask": mk["yes_ask"]}
+            self.placed += 1
+            self._log([datetime.datetime.now().isoformat(timespec="seconds"), "OPEN",
+                       mk["city"], mk["strike"], ("lo" if mk["is_low"] else "hi"), s,
+                       round(pside, 3), price, size, "", ""])
+
+    def step(self):
+        self.settle()
+        self.place()
+        self.save()
+
+    def summary(self):
+        rt = self.wins + self.losses
+        wr = round(100 * self.wins / rt) if rt else 0
+        at_stake = sum(b["entry"] * b["count"] for b in self.bets.values()) / 100.0
+        return {"start": round(self.start / 100, 2), "cash": round(self.cash / 100, 2),
+                "open_bets": len(self.bets), "open_exposure": round(at_stake, 2),
+                "settled": rt, "wins": self.wins, "losses": self.losses, "win_rate": wr,
+                "realized": round(self.realized / 100, 2),
+                "total": round(self.realized / 100, 2),   # banked P&L (open held to settle)
+                "fees": round(self.fees / 100, 2), "placed": self.placed}

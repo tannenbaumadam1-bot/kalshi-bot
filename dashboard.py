@@ -521,4 +521,4 @@ def main():
 
 
 if __name__ == "__main__":
-    raise S
+    raise SystemExit(main())
