@@ -326,9 +326,52 @@ def print_summary(sim, book):
     print("  (Simulation only - no orders were ever placed.)")
 
 
+def _pid_alive(pid):
+    """Cross-platform 'is this PID a live process?' check.
+    NOTE: never use os.kill(pid, 0) on Windows - it TERMINATES the process."""
+    if os.name == "nt":
+        import ctypes
+        SYNCHRONIZE = 0x100000
+        ERROR_ACCESS_DENIED = 5
+        k32 = ctypes.windll.kernel32
+        h = k32.OpenProcess(SYNCHRONIZE, 0, pid)
+        if h:
+            k32.CloseHandle(h)
+            return True
+        return k32.GetLastError() == ERROR_ACCESS_DENIED
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+
+
 def _lock_fresh():
+    """True only if another LIVE process holds the lock.
+    A lock whose owning PID is dead is stale regardless of file mtime
+    (fixes the 2026-07-02/03 outages where a stale-but-recent lock
+    kept the bot crash-looping for hours)."""
     if not os.path.exists(LOCK_PATH):
         return False
+    pid = None
+    try:
+        with open(LOCK_PATH) as f:
+            pid = int(f.read().strip())
+    except (OSError, ValueError):
+        pass
+    if pid is not None and pid != os.getpid():
+        if _pid_alive(pid):
+            return True
+        try:
+            os.remove(LOCK_PATH)  # dead owner -> clean up and proceed
+        except OSError:
+            pass
+        return False
+    # unreadable/no PID: fall back to the old mtime freshness rule
     try:
         return (time.time() - os.path.getmtime(LOCK_PATH)) < 180
     except OSError:
