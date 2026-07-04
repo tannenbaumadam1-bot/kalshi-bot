@@ -81,7 +81,10 @@ SERIES = {
 
 # Blend our probability with the market's implied probability (v3):
 # calibration says the raw model is overconfident; edges must survive shrinkage.
-MODEL_WEIGHT = 0.5
+# v5 (2026-07-03): cut 0.5 -> 0.35. All 70 settled bets showed actual win rate
+# below prediction in EVERY bucket (e.g. pred 61% -> actual 0%); the market
+# mid was closer to truth than the blended fair, so weight it more.
+MODEL_WEIGHT = 0.35
 # Small noise smeared around each ensemble member: station micro-climate,
 # rounding, and the gap between model grid cell and the physical thermometer.
 OBS_JITTER = 1.5
@@ -284,9 +287,4 @@ if __name__ == "__main__":
         assert prob_from_members([80] * 20, 72) > 0.99
         assert prob_from_members([60] * 20, 72) < 0.01
         assert prob_from_members([], 72) is None
-        # every whitelisted series maps to a station we have coords for
-        for _st, (_city, _lo) in SERIES.items():
-            assert _city in CITY_COORDS, _city
-        print("weather math self-test PASSED (v4 ensemble)")
-    else:
-        scan()
+        # every whitelisted se

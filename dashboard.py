@@ -29,7 +29,7 @@ PORT = int(os.environ.get("DASH_PORT", "8765"))
 TOKEN = os.environ.get("DASH_TOKEN", "")
 KALSHI = "https://api.elections.kalshi.com/trade-api/v2"
 
-CUR_ERA = "v4-ens"      # bets from the current model; everything else = legacy
+CUR_ERA = "v5-cal"      # bets from the current model; everything else = legacy
 
 _PRICES = {"ts": 0.0, "by_ticker": {}}
 _PRICES_LOCK = threading.Lock()
@@ -311,8 +311,8 @@ td.num,th.num{text-align:right}
 </div>
 <h2>Strategy attribution</h2>
 <div class=eras>
-  <div class=panel><div class=t>Current model &middot; v4 ensemble</div><table><tbody id=eracur></tbody></table></div>
-  <div class=panel><div class=t>Legacy (pre-filter/pre-ensemble)</div><table><tbody id=eraleg></tbody></table></div>
+  <div class=panel><div class=t>Current model &middot; v5 calibration-gated</div><table><tbody id=eracur></tbody></table></div>
+  <div class=panel><div class=t>Legacy (v2/v3/v4 &mdash; unproven sizing)</div><table><tbody id=eraleg></tbody></table></div>
 </div>
 <h2>Model calibration <span style="text-transform:none;letter-spacing:0">(predicted vs realized win rate &mdash; the go-live gate)</span></h2>
 <table><thead><tr><th>Confidence bucket</th><th class=num>Bets</th><th class=num>Predicted</th>
@@ -336,8 +336,8 @@ const C=x=>Number(x||0)>=0?'pos':'neg';
 const NA='<span class=mut>&ndash;</span>';
 function mkt(b){return '<td><span class=mkt>'+(b.city||'')+' '+b.strike+'&deg; '+((b.hl==='lo')?'low':'high')+'</span></td>';}
 function side(s){s=(s||'').toLowerCase();return '<td><span class="chip '+(s==='yes'?'yes':'no')+'">'+s.toUpperCase()+'</span></td>';}
-function era(b){const cur=(b.era==='v4-ens');
-  return '<td><span class="chip '+(cur?'era':'leg')+'">'+(cur?'v4':'legacy')+'</span></td>';}
+function era(b){const cur=(b.era==='v5-cal');
+  return '<td><span class="chip '+(cur?'era':'leg')+'">'+(cur?'v5':'legacy')+'</span></td>';}
 function prob(p){return '<td class=num>'+Math.round((Number(p)||0)*100)+'%</td>';}
 function tile(k,v,s){return '<div class=tile><div class=k>'+k+'</div><div class=v>'+v+'</div>'+(s?'<div class=s>'+s+'</div>':'')+'</div>';}
 function drawCurve(el,curve){
@@ -521,4 +521,4 @@ def main():
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise S
