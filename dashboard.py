@@ -131,6 +131,10 @@ def compute_kpis(out):
         if d:
             daily[d] = daily.get(d, 0.0) + float(b.get("pnl", 0) or 0)
     k["daily"] = [[d, round(v, 2)] for d, v in sorted(daily.items())][-14:]
+    today = time.strftime("%Y-%m-%d", time.localtime())
+    k["today"] = today
+    k["today_pnl"] = round(sum(float(b.get("pnl", 0) or 0) for b in settled
+                               if (b.get("ts") or "")[:10] == today), 2)
 
     # strategy eras
     cur = [b for b in settled if b.get("era") == CUR_ERA]
@@ -144,7 +148,8 @@ def compute_kpis(out):
                (0.50, 0.70, "50-70%"), (0.70, 1.01, ">70%")]
     cal = []
     for lo, hi, label in buckets:
-        rows = [b for b in settled if lo <= float(b.get("pside", 0) or 0) < hi]
+        rows = [b for b in settled
+                if b.get("outcome") in (0, 1) and lo <= float(b.get("pside", 0) or 0) < hi]
         if rows:
             pred = 100 * sum(float(b.get("pside", 0) or 0) for b in rows) / len(rows)
             act = 100 * sum(1 for b in rows if b.get("outcome") == 1) / len(rows)
@@ -298,6 +303,7 @@ td.num,th.num{text-align:right}
   <div class=nav><div class=k>Marked equity (NAV)</div><div class=v id=nav>&ndash;</div>
     <div class=d id=navd></div></div>
   <div class=hmet><div class=k>Banked P&amp;L</div><div class=v id=banked>&ndash;</div></div>
+  <div class=hmet><div class=k>Today's P&amp;L</div><div class=v id=today>&ndash;</div></div>
   <div class=hmet><div class=k>Unrealized</div><div class=v id=unrl>&ndash;</div></div>
   <div class=hmet><div class=k>Cash</div><div class=v id=cash>&ndash;</div></div>
   <div class=hmet><div class=k>At stake</div><div class=v id=stake>&ndash;</div></div>
@@ -311,8 +317,8 @@ td.num,th.num{text-align:right}
 </div>
 <h2>Strategy attribution</h2>
 <div class=eras>
-  <div class=panel><div class=t>Current model &middot; v5 calibration-gated</div><table><tbody id=eracur></tbody></table></div>
-  <div class=panel><div class=t>Legacy (v2/v3/v4 &mdash; unproven sizing)</div><table><tbody id=eraleg></tbody></table></div>
+  <div class=panel><div class=t>Current model &middot; v6 ensemble (calibration-gated)</div><table><tbody id=eracur></tbody></table></div>
+  <div class=panel><div class=t>Legacy (v2&ndash;v5 &mdash; pre-ensemble)</div><table><tbody id=eraleg></tbody></table></div>
 </div>
 <h2>Model calibration <span style="text-transform:none;letter-spacing:0">(predicted vs realized win rate &mdash; the go-live gate)</span></h2>
 <table><thead><tr><th>Confidence bucket</th><th class=num>Bets</th><th class=num>Predicted</th>
@@ -320,11 +326,11 @@ td.num,th.num{text-align:right}
 <h2>Open positions (marked to market)</h2>
 <table><thead><tr><th>Market</th><th>Side</th><th>Model</th><th class=num>Our prob</th>
 <th class=num>Entry</th><th class=num>Mark</th><th class=num>Qty</th>
-<th class=num>Cost</th><th class=num>Value</th><th class=num>Unrl P&amp;L</th></tr></thead>
+<th class=num>Cost</th><th class=num>Fee</th><th class=num>Value</th><th class=num>Unrl P&amp;L</th></tr></thead>
 <tbody id=open></tbody></table>
 <h2>Settled (most recent)</h2>
 <table><thead><tr><th>Market</th><th>Side</th><th>Model</th><th class=num>Our prob</th>
-<th class=num>Entry</th><th class=num>Qty</th><th>Result</th><th class=num>P&amp;L</th></tr></thead>
+<th class=num>Entry</th><th class=num>Qty</th><th class=num>Fee</th><th>Result</th><th class=num>P&amp;L</th></tr></thead>
 <tbody id=settled></tbody></table>
 <div class=foot id=foot></div>
 </div>
@@ -334,10 +340,11 @@ const F=x=>'$'+Number(x||0).toFixed(2);
 const M=x=>{const n=Number(x||0);return (n>=0?'+':'-')+'$'+Math.abs(n).toFixed(2);};
 const C=x=>Number(x||0)>=0?'pos':'neg';
 const NA='<span class=mut>&ndash;</span>';
+const feeC=f=>(f==null)?NA:(Number(f).toFixed(0)+'&cent;');
 function mkt(b){return '<td><span class=mkt>'+(b.city||'')+' '+b.strike+'&deg; '+((b.hl==='lo')?'low':'high')+'</span></td>';}
 function side(s){s=(s||'').toLowerCase();return '<td><span class="chip '+(s==='yes'?'yes':'no')+'">'+s.toUpperCase()+'</span></td>';}
-function era(b){const cur=(b.era==='v5-cal');
-  return '<td><span class="chip '+(cur?'era':'leg')+'">'+(cur?'v5':'legacy')+'</span></td>';}
+function era(b){const cur=(b.era==='v6-ens');
+  return '<td><span class="chip '+(cur?'era':'leg')+'">'+(cur?'v6':'legacy')+'</span></td>';}
 function prob(p){return '<td class=num>'+Math.round((Number(p)||0)*100)+'%</td>';}
 function tile(k,v,s){return '<div class=tile><div class=k>'+k+'</div><div class=v>'+v+'</div>'+(s?'<div class=s>'+s+'</div>':'')+'</div>';}
 function drawCurve(el,curve){
@@ -402,6 +409,7 @@ async function load(){
   const chg=nav-start;
   $('navd').innerHTML='<span class="'+C(chg)+'">'+M(chg)+' ('+(start?((100*chg/start).toFixed(1)):'0')+'%)</span> <span class=mut>vs $'+start.toFixed(0)+' inception</span>';
   $('banked').innerHTML='<span class="'+C(banked)+'">'+M(banked)+'</span>';
+  $('today').innerHTML=(k.today_pnl==null)?NA:'<span class="'+C(k.today_pnl)+'">'+M(k.today_pnl)+'</span>';
   $('unrl').innerHTML=unrl==null?NA:'<span class="'+C(unrl)+'">'+M(unrl)+'</span>';
   $('cash').textContent=F(s.cash);
   $('stake').textContent=F(s.open_exposure);
@@ -443,16 +451,18 @@ async function load(){
     +'<td class=num>'+(h?b.now+'&cent;':'&ndash;')+'</td>'
     +'<td class=num>'+b.count+'</td>'
     +'<td class=num>'+F(b.entry*b.count/100)+'</td>'
+    +'<td class=num>'+feeC(b.fee)+'</td>'
     +'<td class=num>'+(h?F(b.value):'&ndash;')+'</td>'
     +'<td class=num>'+(h?'<span class="'+C(b.upnl)+'">'+M(b.upnl)+'</span>':'&ndash;')+'</td></tr>';
-  }).join('')||'<tr><td colspan=10 class=empty>No open positions &mdash; waiting for a disciplined edge.</td></tr>';
+  }).join('')||'<tr><td colspan=11 class=empty>No open positions &mdash; waiting for a disciplined edge.</td></tr>';
   $('settled').innerHTML=(d.settled||[]).slice(0,30).map(b=>{
     const won=Number(b.outcome)===1;
     return '<tr>'+mkt(b)+side(b.side)+era(b)+prob(b.pside)
     +'<td class=num>'+b.entry+'&cent;</td><td class=num>'+b.count+'</td>'
-    +'<td><span class="'+(won?'won':'lost')+'">'+(won?'WON':'LOST')+'</span></td>'
+    +'<td class=num>'+feeC(b.fee)+'</td>'
+    +'<td>'+(b.exited?'<span class=chip style="background:rgba(232,180,76,.13);color:var(--amb)">EXIT</span>':'<span class="'+(won?'won':'lost')+'">'+(won?'WON':'LOST')+'</span>')+'</td>'
     +'<td class=num><span class="'+C(b.pnl)+'">'+M(b.pnl)+'</span></td></tr>';
-  }).join('')||'<tr><td colspan=8 class=empty>No settled bets yet.</td></tr>';
+  }).join('')||'<tr><td colspan=9 class=empty>No settled bets yet.</td></tr>';
   $('foot').innerHTML='Paper account &mdash; no real money at risk. NAV = cash + open positions at current market bid (marks refresh ~60s). '
     +'Banked P&amp;L = settled bets only; positions are held to settlement. Performance and calibration KPIs computed on the last '
     +(k.window_n||0)+' settled bets; win rate and totals are all-time. Judge the edge on the v4-ensemble era only &mdash; legacy bets predate the current model. Auto-refreshes every 20s.';

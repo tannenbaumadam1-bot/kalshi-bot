@@ -14,6 +14,7 @@ import os, json, csv, datetime
 import requests
 from kalshibot.fees import fee_cents
 import weather_edge as we
+import weather_ensemble as wx
 
 WSIM = os.path.join("logs", "weather_sim.json")
 WBETS = os.path.join("logs", "weather_bets.csv")
@@ -82,6 +83,7 @@ class WeatherPaper:
                   "open": [{"ticker": tk, "city": b["city"], "strike": b["strike"],
                             "hl": b["hl"], "side": b["side"], "entry": b["entry"],
                             "count": b["count"], "pside": round(b["pside"], 2),
+                            "fee": b.get("fee", 0),
                             "ots": b.get("ots", ""), "era": b.get("era", "v2")}
                            for tk, b in self.bets.items()],
                   "settled": list(reversed(self.history[-100:]))}
@@ -136,6 +138,7 @@ class WeatherPaper:
             self.history.append({"city": b["city"], "strike": b["strike"], "hl": b["hl"],
                                  "side": b["side"], "pside": round(b["pside"], 3),
                                  "entry": b["entry"], "count": b["count"],
+                                 "fee": b.get("fee", 0),
                                  "outcome": (1 if won else 0), "pnl": round(net / 100.0, 2),
                                  "ts": datetime.datetime.now().isoformat(timespec="seconds"),
                                  "ots": b.get("ots", ""), "era": b.get("era", "v2")})
@@ -149,7 +152,8 @@ class WeatherPaper:
         """('probe'|'scale', n): scale only when the CURRENT era has proven
         itself on >= GATE_MIN_N settled bets: positive expectancy AND
         predicted win rate within GATE_MAX_GAP of actual."""
-        cur = [h for h in self.history if h.get("era") == ERA][-60:]
+        cur = [h for h in self.history
+               if h.get("era") == ERA and h.get("outcome") in (0, 1)][-60:]
         n = len(cur)
         if n < GATE_MIN_N:
             return "probe", n
@@ -210,15 +214,80 @@ class WeatherPaper:
                              "pside": pside, "city": mk["city"], "strike": mk["strike"],
                              "hl": ("lo" if mk["is_low"] else "hi"),
                              "ots": datetime.datetime.now().isoformat(timespec="seconds"),
-                             "era": ERA, "maker": maker,
+                             "era": ERA, "maker": maker, "date": mk.get("date", ""),
                              "mkt_bid": mk["yes_bid"], "mkt_ask": mk["yes_ask"]}
             self.placed += 1
             self._log([datetime.datetime.now().isoformat(timespec="seconds"), "OPEN",
                        mk["city"], mk["strike"], ("lo" if mk["is_low"] else "hi"), s,
                        round(pside, 3), price, size, "", ""])
 
+    def _quote(self, ticker):
+        """Current (yes_bid, yes_ask) in cents, or (None, None)."""
+        try:
+            d = requests.get(we.KALSHI + "/markets/" + ticker, timeout=15).json()
+            mk = d.get("market", d)
+            yb = int(round(float(mk.get("yes_bid_dollars") or 0) * 100))
+            ya = int(round(float(mk.get("yes_ask_dollars") or 0) * 100))
+            return yb, ya
+        except Exception:
+            return None, None
+
+    def exit_check(self, margin_c=2):
+        """SMART stop-loss: NOT a price stop. For each underwater position we
+        RE-FORECAST with the live ensemble; if the market's bid now exceeds our
+        UPDATED fair value (+ a churn margin, after the taker exit fee), we sell
+        - the market is paying more than the bet is now worth to us. If our
+        model still believes, we HOLD even if the price fell (a price drop alone
+        is not a reason to sell an underpriced contract). Winners are left to
+        settle so they keep feeding calibration data."""
+        for tk, b in list(self.bets.items()):
+            city, strike, is_low, side = b["city"], b["strike"], b["hl"] == "lo", b["side"]
+            date = b.get("date", "")
+            if not date or city not in we.CITY_COORDS:
+                continue
+            lat, lon = we.CITY_COORDS[city]
+            try:
+                dd = datetime.datetime.strptime(date, "%Y-%m-%d")
+                hrs = max(1.0, ((dd + datetime.timedelta(days=1)) -
+                                datetime.datetime.now()).total_seconds() / 3600)
+            except Exception:
+                hrs = 6.0
+            p_new, _, nsrc = wx.prob(city, date, lat, lon, strike, is_low, hrs, log=False)
+            if p_new is None or nsrc < wx.MIN_SOURCES:
+                continue                      # can't re-evaluate -> hold
+            yb, ya = self._quote(tk)
+            if yb is None:
+                continue
+            bid = yb if side == "yes" else (100 - ya)   # price we can sell our side into
+            if bid <= 0 or bid >= b["entry"]:           # only CUT LOSSES (underwater)
+                continue
+            exit_fee_per = fee_cents(bid, 1, taker=True)
+            exit_ev = bid - exit_fee_per                # per-contract net if we sell now
+            hold_ev = p_new * 100                        # per-contract value if we hold
+            if exit_ev > hold_ev + margin_c:
+                cnt = b["count"]
+                exit_fee = fee_cents(bid, cnt, taker=True)
+                net = (bid - b["entry"]) * cnt - b.get("fee", 0) - exit_fee
+                self.cash += bid * cnt - exit_fee
+                self.realized += net
+                self.fees += exit_fee
+                self.history.append({"city": city, "strike": strike,
+                                     "hl": b["hl"], "side": side, "pside": round(b["pside"], 3),
+                                     "entry": b["entry"], "count": cnt, "fee": b.get("fee", 0),
+                                     "outcome": None, "exited": True,
+                                     "pnl": round(net / 100.0, 2), "p_new": round(p_new, 3),
+                                     "exit_px": bid,
+                                     "ts": datetime.datetime.now().isoformat(timespec="seconds"),
+                                     "ots": b.get("ots", ""), "era": b.get("era", "v2")})
+                self.history = self.history[-100:]
+                self._log([datetime.datetime.now().isoformat(timespec="seconds"), "EXIT",
+                           city, strike, b["hl"], side, round(p_new, 3), bid, cnt, "",
+                           round(net / 100.0, 2)])
+                del self.bets[tk]
+
     def step(self):
         self.settle()
+        self.exit_check()
         self.place()
         self.save()
 
