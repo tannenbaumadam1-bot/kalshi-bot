@@ -32,7 +32,7 @@ MAX_BOOK_FRAC = 0.30
 # STAKES ("probe mode") until the current model demonstrates, on its own
 # settled bets, that (a) expectancy is positive and (b) predicted-vs-actual
 # calibration gap is within GATE_MAX_GAP. Only then scale to Kelly sizing.
-ERA = "v5-cal"
+ERA = "v6-ens"   # multi-model ensemble forecast (bumped 2026-07-05)
 PER_BET_CAP = 0.015        # max bankroll fraction per bet once proven (was 3%)
 PROBE_COST_CENTS = 60      # max cost basis per bet while unproven
 GATE_MIN_N = 30            # settled current-era bets needed before scaling

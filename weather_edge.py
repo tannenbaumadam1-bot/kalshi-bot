@@ -26,6 +26,7 @@ from __future__ import annotations
 import math, re, sys, datetime
 import requests
 from kalshibot.fees import fee_cents
+import weather_ensemble as wx
 
 KALSHI = "https://api.elections.kalshi.com/trade-api/v2"
 ENSEMBLE_API = "https://ensemble-api.open-meteo.com/v1/ensemble"
@@ -210,31 +211,27 @@ def find_temp_markets(max_days=2):
 
 def scan(min_edge_cents=4, max_edge_cents=20, verbose=True):
     mkts = find_temp_markets()
-    ens_cache, det_cache = {}, {}
+    fc_cache = {}
     edges = []
-    n_ens = 0
+    src_tot = 0
     for mk in mkts:
         if mk["yes_bid"] <= 0 or mk["yes_ask"] <= 0:
             continue
         key = (mk["city"], mk["date"])
         lat, lon = CITY_COORDS[mk["city"]]
-        if key not in ens_cache:
-            ens_cache[key] = fetch_ensemble(lat, lon, mk["date"])
-        ens = ens_cache[key]
-        if ens is not None:
-            temps = ens["min"] if mk["is_low"] else ens["max"]
-            model = prob_from_members(temps, mk["strike"])
-            ftemp = sum(temps) / len(temps)
-            n_ens += 1
-        else:
-            # ensemble API down -> deterministic forecast + sigma model
-            if key not in det_cache:
-                det_cache[key] = fetch_forecast(lat, lon, mk["date"])
-            fc = det_cache[key]
-            ftemp = fc["min"] if mk["is_low"] else fc["max"]
-            if ftemp is None:
-                continue
-            model = prob_at_least(ftemp, mk["strike"], sigma_for_lead(mk["hrs"]))
+        if key not in fc_cache:
+            # MULTI-MODEL ENSEMBLE: fuse ECMWF/GFS/ICON/GEM/MeteoFrance/JMA/UKMO
+            # + GFS ensemble + NWS into one calibrated distribution.
+            fc_cache[key] = wx.forecast(mk["city"], mk["date"], lat, lon, mk["hrs"])
+        fc = fc_cache[key]
+        dist = fc["min"] if mk["is_low"] else fc["max"]
+        nsrc = fc["n_sources"]
+        # need enough INDEPENDENT models to trust the ensemble; else skip
+        if not dist.ok() or nsrc < wx.MIN_SOURCES:
+            continue
+        model = dist.prob_at_least(mk["strike"])
+        ftemp = dist.center
+        src_tot += nsrc
         if model is None:
             continue
         # stay out of the tails: extreme strikes are where any model is least
@@ -275,8 +272,10 @@ def scan(min_edge_cents=4, max_edge_cents=20, verbose=True):
         edges.append((ev, side, mk, fair, ftemp))
     edges.sort(key=lambda e: -e[0])
     if verbose:
-        print(f"Scanned {len(mkts)} temp markets across {len(ens_cache)} city-days "
-              f"({n_ens} priced off the 31-member ensemble).")
+        cd = len(fc_cache)
+        avg = (src_tot / cd) if cd else 0
+        print(f"Scanned {len(mkts)} temp markets across {cd} city-days "
+              f"(multi-model ensemble, ~{avg:.1f} sources/city).")
         print(f"Found {len(edges)} bets with edge >= {min_edge_cents}c:\n")
         for ev, side, mk, fair, ftemp in edges[:25]:
             print(f"  +{ev:4.1f}c  {side:3} {mk['city']:>13} {mk['strike']}{'(lo)' if mk['is_low'] else '(hi)'}"

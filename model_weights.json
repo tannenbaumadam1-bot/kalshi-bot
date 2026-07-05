@@ -1,0 +1,9 @@
+{
+  "ecmwf_ifs025": 1.82,
+  "gfs_seamless": 1.22,
+  "icon_seamless": 0.892,
+  "gem_seamless": 0.742,
+  "meteofrance_seamless": 0.911,
+  "jma_seamless": 0.536,
+  "ukmo_seamless": 0.88
+}

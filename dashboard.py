@@ -29,7 +29,7 @@ PORT = int(os.environ.get("DASH_PORT", "8765"))
 TOKEN = os.environ.get("DASH_TOKEN", "")
 KALSHI = "https://api.elections.kalshi.com/trade-api/v2"
 
-CUR_ERA = "v5-cal"      # bets from the current model; everything else = legacy
+CUR_ERA = "v6-ens"      # bets from the current model; everything else = legacy
 
 _PRICES = {"ts": 0.0, "by_ticker": {}}
 _PRICES_LOCK = threading.Lock()
