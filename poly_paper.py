@@ -45,6 +45,7 @@ class PolyPaper:
         self.cash = START_USDC
         self.days = 0
         self.earned = 0.0
+        self.last_date = ""
         self.history = []
         self.load()
 
@@ -53,6 +54,7 @@ class PolyPaper:
             d = json.load(open(PSTATE))
             self.start = d.get("start", self.start); self.cash = d.get("cash", self.cash)
             self.days = d.get("days", 0); self.earned = d.get("earned", 0.0)
+            self.last_date = d.get("last_date", "")
             self.history = d.get("history", [])
         except Exception:
             pass
@@ -63,6 +65,7 @@ class PolyPaper:
             json.dump({"updated": datetime.datetime.now().isoformat(timespec="seconds"),
                        "start": self.start, "cash": round(self.cash, 4), "days": self.days,
                        "earned": round(self.earned, 4), "apy_annualized": self.apy(),
+                       "last_date": self.last_date,
                        "history": self.history[-120:]}, open(PSTATE, "w"))
         except Exception:
             pass
@@ -98,15 +101,22 @@ class PolyPaper:
             picks.append((m, alloc, comp, net)); used += alloc
         return picks
 
-    def step(self, markets=None, comp_fn=None):
-        """One paper day: allocate to reward markets, accrue modeled net rewards."""
-        markets = markets if markets is not None else pc.reward_markets()
+    def step(self, markets=None, comp_fn=None, force=False):
+        """One paper DAY: allocate to reward markets, accrue modeled net rewards.
+        Idempotent within a calendar day (safe to call every loop cycle)."""
+        today = datetime.date.today().isoformat()
+        if not force and markets is None and self.last_date == today:
+            return 0.0, []                       # already accrued today
+        if markets is None:
+            markets = pc.reward_markets()
+            markets = sorted(markets, key=lambda m: -m.get("pool_daily", 0))[:15]  # bound network
         comp_fn = comp_fn or pc.market_competition
         picks = self._pick(markets, comp_fn)
         day_net = sum(net for _m, _a, _c, net in picks)
         self.cash += day_net
         self.earned += day_net
         self.days += 1
+        self.last_date = today
         self.history.append({"day": self.days,
                              "ts": datetime.datetime.now().isoformat(timespec="seconds"),
                              "markets": len(picks), "net": round(day_net, 4),

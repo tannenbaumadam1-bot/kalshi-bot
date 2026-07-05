@@ -38,6 +38,10 @@ try:
     import weather_paper
 except Exception:
     weather_paper = None
+try:
+    import poly_paper
+except Exception:
+    poly_paper = None
 
 from kalshibot.config import load_config
 from kalshibot.fees import fee_cents
@@ -462,6 +466,12 @@ def main():
             wp = weather_paper.WeatherPaper()
         except Exception:
             wp = None
+    pp_bot = None
+    if poly_paper is not None:
+        try:
+            pp_bot = poly_paper.PolyPaper()
+        except Exception:
+            pp_bot = None
     if sim.load(SIM_PATH):
         print(f"Resumed previous session: ${sim.cash/100:.2f} cash, "
               f"{len(sim.pos)} positions held, {len(sim.resting)} resting orders, "
@@ -548,6 +558,15 @@ def main():
                           f"settled {s['wins']}W/{s['losses']}L | placed {s['placed']}")
                 except Exception as e:
                     print(f"  weather step skipped: {e}")
+            if pp_bot is not None and n % 20 == 1:
+                try:
+                    net, picks = pp_bot.step()
+                    ps = pp_bot.summary()
+                    if picks:
+                        print(f"  POLY(paper): +${net:.3f} today | bank ${ps['cash']:.2f} | "
+                              f"{ps['days']}d | APY~{ps['apy']}% | {len(picks)} mkts")
+                except Exception as e:
+                    print(f"  poly step skipped: {e}")
             if cycles == 0 or n < cycles:
                 time.sleep(cfg.engine.cycle_seconds)
     except KeyboardInterrupt:

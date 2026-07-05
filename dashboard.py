@@ -232,6 +232,12 @@ def build_data():
                            "balance_c": lv.get("balance_c")}
         except Exception:
             pass
+    poly_path = os.path.join("logs", "poly_state.json")
+    if os.path.exists(poly_path):
+        try:
+            out["poly"] = json.load(open(poly_path))
+        except Exception:
+            pass
     return out
 
 
@@ -332,6 +338,8 @@ td.num,th.num{text-align:right}
 <table><thead><tr><th>Market</th><th>Side</th><th>Model</th><th class=num>Our prob</th>
 <th class=num>Entry</th><th class=num>Qty</th><th class=num>Fee</th><th>Result</th><th class=num>P&amp;L</th></tr></thead>
 <tbody id=settled></tbody></table>
+<h2>Polymarket reward farming <span style="text-transform:none;letter-spacing:0">(paper &mdash; modeled, reinvesting)</span></h2>
+<div class=grid id=poly></div>
 <div class=foot id=foot></div>
 </div>
 <script>
@@ -463,6 +471,15 @@ async function load(){
     +'<td>'+(b.exited?'<span class=chip style="background:rgba(232,180,76,.13);color:var(--amb)">EXIT</span>':'<span class="'+(won?'won':'lost')+'">'+(won?'WON':'LOST')+'</span>')+'</td>'
     +'<td class=num><span class="'+C(b.pnl)+'">'+M(b.pnl)+'</span></td></tr>';
   }).join('')||'<tr><td colspan=9 class=empty>No settled bets yet.</td></tr>';
+  if(d.poly){const P=d.poly;const H=P.history||[];const last=H.length?H[H.length-1]:null;
+    $('poly').innerHTML=[
+      tile('Bank (paper)',F(P.cash||P.start||0),'started '+F(P.start||0)),
+      tile('Rewards earned','<span class=pos>'+M(P.earned||0)+'</span>',(P.days||0)+' paper days'),
+      tile('Annualized (modeled)','~'+(P.apy_annualized!=null?P.apy_annualized:'&ndash;')+'%','net, reinvested'),
+      tile('Last-day reward',last?M(last.net):NA,last?(last.markets+' markets')+'':''),
+      tile('Reinvest','ON','rewards &rarr; more liquidity'),
+    ].join('');
+  } else { $('poly').innerHTML='<div class=tile><div class=k>Polymarket</div><div class=v>&ndash;</div><div class=s>paper sim starting&hellip;</div></div>'; }
   $('foot').innerHTML='Paper account &mdash; no real money at risk. NAV = cash + open positions at current market bid (marks refresh ~60s). '
     +'Banked P&amp;L = settled bets only; positions are held to settlement. Performance and calibration KPIs computed on the last '
     +(k.window_n||0)+' settled bets; win rate and totals are all-time. Judge the edge on the v4-ensemble era only &mdash; legacy bets predate the current model. Auto-refreshes every 20s.';
