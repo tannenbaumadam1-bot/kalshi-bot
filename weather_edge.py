@@ -241,25 +241,37 @@ def scan(min_edge_cents=4, max_edge_cents=20, verbose=True):
         # reliable; only bet genuinely-uncertain strikes.
         if model < 0.20 or model > 0.80:
             continue
-        yes_ask, no_ask = mk["yes_ask"], 100 - mk["yes_bid"]
         # the MARKET must also see a real contest (15-85c). A 10x disagreement
         # on a tail is our data being wrong, not free money.
         if not (15 <= mk["yes_ask"] <= 85 or 15 <= mk["yes_bid"] <= 85):
             continue
-        # shrink toward the market's implied probability (mid of bid/ask)
+        # shrink toward the market's implied probability (mid of bid/ask):
+        # calibration showed the raw model is ~2x overconfident, so we bet only
+        # the residual disagreement that survives the blend.
         mkt_prob = ((mk["yes_bid"] + mk["yes_ask"]) / 2.0) / 100.0
         fair = MODEL_WEIGHT * model + (1 - MODEL_WEIGHT) * mkt_prob
-        ev_yes = fair * 100 - yes_ask - fee_cents(yes_ask, 1, taker=True)
-        ev_no = (1 - fair) * 100 - no_ask - fee_cents(no_ask, 1, taker=True)
-        raw_yes = fair * 100 - yes_ask              # disagreement vs market
-        raw_no = (1 - fair) * 100 - no_ask
+        # MAKER entries: instead of crossing the spread (taker, ~7% fee), we
+        # REST at the best bid to provide liquidity -> ~1/4 the fee AND a better
+        # entry price. YES maker buys at yes_bid; NO maker buys at the no-bid
+        # (= 100 - yes_ask). Held to settlement, so this is the only fee leg.
+        yes_entry = mk["yes_bid"]
+        no_entry = 100 - mk["yes_ask"]
+        ev_yes = fair * 100 - yes_entry - fee_cents(yes_entry, 1, taker=False)
+        ev_no = (1 - fair) * 100 - no_entry - fee_cents(no_entry, 1, taker=False)
+        raw_yes = fair * 100 - yes_entry            # disagreement vs our entry
+        raw_no = (1 - fair) * 100 - no_entry
         if ev_yes >= ev_no:
-            side, ev, raw = "YES", ev_yes, raw_yes
+            side, ev, raw, entry = "YES", ev_yes, raw_yes, yes_entry
         else:
-            side, ev, raw = "NO", ev_no, raw_no
-        # must beat fees, but skip "too good to be true" gaps
+            side, ev, raw, entry = "NO", ev_no, raw_no, no_entry
+        if entry < 1 or entry > 99:                 # need a real price to rest at
+            continue
+        # POST-FEE EDGE FLOOR: only bet when expected profit AFTER the (maker)
+        # fee clears the bar; skip "too good to be true" gaps (data errors).
         if ev < min_edge_cents or raw > max_edge_cents:
             continue
+        mk["entry_price"] = entry                   # maker price place() will use
+        mk["maker"] = True
         edges.append((ev, side, mk, fair, ftemp))
     edges.sort(key=lambda e: -e[0])
     if verbose:

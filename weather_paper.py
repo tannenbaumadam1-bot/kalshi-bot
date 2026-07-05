@@ -171,7 +171,11 @@ class WeatherPaper:
             if tk in self.bets:
                 continue
             s = "yes" if side == "YES" else "no"
-            price = mk["yes_ask"] if s == "yes" else (100 - mk["yes_bid"])
+            # maker entry (rest at the bid) chosen by the scanner; fall back to
+            # the taker touch only if an older scan didn't tag one.
+            maker = bool(mk.get("maker", False))
+            price = int(mk.get("entry_price",
+                               mk["yes_ask"] if s == "yes" else (100 - mk["yes_bid"])))
             if price < MIN_PRICE or price > MAX_PRICE:
                 continue
             # direction check via Kelly; sizing depends on gate mode
@@ -190,7 +194,7 @@ class WeatherPaper:
                 size = int((frac * bankroll) // price)
             if size < 1:
                 continue
-            fee = fee_cents(price, size, taker=True)
+            fee = fee_cents(price, size, taker=not maker)
             cost = price * size + fee
             # total-book cap: never let open cost basis exceed MAX_BOOK_FRAC
             # of bankroll (edges are sorted best-first, so the best fit first)
@@ -206,7 +210,7 @@ class WeatherPaper:
                              "pside": pside, "city": mk["city"], "strike": mk["strike"],
                              "hl": ("lo" if mk["is_low"] else "hi"),
                              "ots": datetime.datetime.now().isoformat(timespec="seconds"),
-                             "era": ERA,
+                             "era": ERA, "maker": maker,
                              "mkt_bid": mk["yes_bid"], "mkt_ask": mk["yes_ask"]}
             self.placed += 1
             self._log([datetime.datetime.now().isoformat(timespec="seconds"), "OPEN",
