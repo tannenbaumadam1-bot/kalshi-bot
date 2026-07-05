@@ -42,6 +42,10 @@ try:
     import poly_paper
 except Exception:
     poly_paper = None
+try:
+    import funding_arb
+except Exception:
+    funding_arb = None
 
 from kalshibot.config import load_config
 from kalshibot.fees import fee_cents
@@ -472,6 +476,12 @@ def main():
             pp_bot = poly_paper.PolyPaper()
         except Exception:
             pp_bot = None
+    fund_bot = None
+    if funding_arb is not None:
+        try:
+            fund_bot = funding_arb.FundingPaper()
+        except Exception:
+            fund_bot = None
     if sim.load(SIM_PATH):
         print(f"Resumed previous session: ${sim.cash/100:.2f} cash, "
               f"{len(sim.pos)} positions held, {len(sim.resting)} resting orders, "
@@ -567,6 +577,15 @@ def main():
                               f"{ps['days']}d | APY~{ps['apy']}% | {len(picks)} mkts")
                 except Exception as e:
                     print(f"  poly step skipped: {e}")
+            if fund_bot is not None and n % 20 == 1:
+                try:
+                    fnet, fp = fund_bot.step()
+                    fs = fund_bot.summary()
+                    if fp:
+                        print(f"  FUNDING(paper): +${fnet:.4f} today | bank ${fs['cash']:.2f} | "
+                              f"{fs['days']}d | APY~{fs['apy']}% | {len(fp)} legs")
+                except Exception as e:
+                    print(f"  funding step skipped: {e}")
             if cycles == 0 or n < cycles:
                 time.sleep(cfg.engine.cycle_seconds)
     except KeyboardInterrupt:

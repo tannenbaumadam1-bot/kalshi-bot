@@ -109,7 +109,10 @@ class PolyPaper:
             return 0.0, []                       # already accrued today
         if markets is None:
             markets = pc.reward_markets()
-            markets = sorted(markets, key=lambda m: -m.get("pool_daily", 0))[:15]  # bound network
+            # REWARD-EFFICIENCY targeting: rank by pool per unit of volume - lower
+            # volume = fewer competing LPs = a bigger share of the pool for us.
+            markets = sorted(markets,
+                             key=lambda m: -m.get("pool_daily", 0) / (m.get("vol24", 0) + 1000.0))[:15]
         comp_fn = comp_fn or pc.market_competition
         picks = self._pick(markets, comp_fn)
         day_net = sum(net for _m, _a, _c, net in picks)

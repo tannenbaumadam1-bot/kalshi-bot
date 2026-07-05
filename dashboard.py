@@ -238,6 +238,12 @@ def build_data():
             out["poly"] = json.load(open(poly_path))
         except Exception:
             pass
+    fund_path = os.path.join("logs", "funding_state.json")
+    if os.path.exists(fund_path):
+        try:
+            out["funding"] = json.load(open(fund_path))
+        except Exception:
+            pass
     return out
 
 
@@ -340,6 +346,8 @@ td.num,th.num{text-align:right}
 <tbody id=settled></tbody></table>
 <h2>Polymarket reward farming <span style="text-transform:none;letter-spacing:0">(paper &mdash; modeled, reinvesting)</span></h2>
 <div class=grid id=poly></div>
+<h2>Crypto funding carry <span style="text-transform:none;letter-spacing:0">(paper &mdash; delta-neutral, uncorrelated)</span></h2>
+<div class=grid id=fund></div>
 <div class=foot id=foot></div>
 </div>
 <script>
@@ -480,6 +488,15 @@ async function load(){
       tile('Reinvest','ON','rewards &rarr; more liquidity'),
     ].join('');
   } else { $('poly').innerHTML='<div class=tile><div class=k>Polymarket</div><div class=v>&ndash;</div><div class=s>paper sim starting&hellip;</div></div>'; }
+  if(d.funding){const G=d.funding;const legs=(G.positions||[]).length;
+    $('fund').innerHTML=[
+      tile('Bank (paper)',F(G.cash||G.start||0),'started '+F(G.start||0)),
+      tile('Carry earned','<span class=pos>'+M(G.earned||0)+'</span>',(G.days||0)+' paper days'),
+      tile('Annualized (net)','~'+(G.apy_annualized!=null?G.apy_annualized:'&ndash;')+'%','after fee/basis haircut'),
+      tile('Open legs',legs,'delta-neutral'),
+      tile('Correlation','~0','independent of markets'),
+    ].join('');
+  } else { $('fund').innerHTML='<div class=tile><div class=k>Funding carry</div><div class=v>&ndash;</div><div class=s>paper sim starting&hellip;</div></div>'; }
   $('foot').innerHTML='Paper account &mdash; no real money at risk. NAV = cash + open positions at current market bid (marks refresh ~60s). '
     +'Banked P&amp;L = settled bets only; positions are held to settlement. Performance and calibration KPIs computed on the last '
     +(k.window_n||0)+' settled bets; win rate and totals are all-time. Judge the edge on the v4-ensemble era only &mdash; legacy bets predate the current model. Auto-refreshes every 20s.';
