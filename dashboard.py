@@ -260,6 +260,12 @@ def build_data():
             out["poly"] = json.load(open(poly_path))
         except Exception:
             pass
+    sev_path = os.path.join("logs", "sharpev_state.json")
+    if os.path.exists(sev_path):
+        try:
+            out["sharpev"] = json.load(open(sev_path))
+        except Exception:
+            pass
     fund_path = os.path.join("logs", "funding_state.json")
     if os.path.exists(fund_path):
         try:
@@ -380,6 +386,11 @@ td.num,th.num{text-align:right}
 <div style="margin-top:10px"><table><thead><tr><th>Date</th><th>Leg / activity</th>
 <th class=num>Alloc</th><th class=num>Net</th><th class=num>Bank after</th></tr></thead>
 <tbody id=fundtbl></tbody></table></div>
+<h2>Sharp +EV sports <span style="text-transform:none;letter-spacing:0">(paper &mdash; sharp-book fair value vs Kalshi price, maker-only, gated)</span></h2>
+<div class=grid id=sev></div>
+<div style="margin-top:10px"><table><thead><tr><th>Start</th><th>Game</th><th>Our team</th>
+<th class=num>Fair</th><th class=num>Entry</th><th class=num>Edge</th><th class=num>Qty</th>
+<th>Result</th><th class=num>P&amp;L</th></tr></thead><tbody id=sevtbl></tbody></table></div>
 <div class=foot id=foot></div>
 </div>
 <script>
@@ -473,7 +484,10 @@ async function load(){
     const wStart=Number(s.start||0);
     const wNav=(k.nav!=null?Number(k.nav):(wStart+Number(s.total||0)));
     const wSettled=Number((k.era_current&&k.era_current.n)||0);
-    const P=d.poly||null, G=d.funding||null;
+    const P=d.poly||null, G=d.funding||null, E=d.sharpev||null;
+    const eSum=E?(E.summary||{}):{};
+    const eOpenStake=E?(E.open||[]).reduce((a,b)=>a+(b.entry||0)*(b.count||0)/100,0):0;
+    const eBank=E?(Number(eSum.cash||0)+eOpenStake):null, eStart=E?Number(eSum.start||0):0;
     const pBank=P?Number(P.cash||P.start||0):null, pStart=P?Number(P.start||0):0;
     const gBank=G?Number(G.cash||G.start||0):null, gStart=G?Number(G.start||0):0;
     const cards=[
@@ -489,10 +503,15 @@ async function load(){
         G?F(gBank):NA, G?'<span class="'+C(G.earned)+'">'+M(G.earned)+'</span>':NA,
         G?('&middot; '+(G.days||0)+'d &middot; APY ~'+(G.apy_annualized!=null?G.apy_annualized:'&ndash;')+'%'):'&middot; starting',
         G?('probing '+(G.days||0)+'/20'):'starting','leg'),
+      stratCard('Sharp +EV sports','anchor','era',
+        E?F(eBank):NA, E?'<span class="'+C(eSum.realized)+'">'+M(eSum.realized)+'</span>':NA,
+        E?('&middot; '+(eSum.wins||0)+'W/'+(eSum.losses||0)+'L &middot; '+(eSum.open_bets||0)+' open'):'&middot; starting',
+        E?((eSum.gate==='scale'?'gate: passed':'probing '+(eSum.gate_n||0)+'/30')):'starting','leg'),
     ];
     $('strat').innerHTML=cards.join('');
     let tStart=wStart, tNav=wNav, nb=1;
     if(P){tStart+=pStart;tNav+=pBank;nb++;} if(G){tStart+=gStart;tNav+=gBank;nb++;}
+    if(E){tStart+=eStart;tNav+=eBank;nb++;}
     $('combined').innerHTML='<div style="display:flex;align-items:baseline;gap:12px;flex-wrap:wrap;">'
       +'<span style="font-size:11px;color:var(--mut);text-transform:uppercase;letter-spacing:.12em;">Combined paper NAV</span>'
       +'<span style="font-size:33px;font-weight:800;letter-spacing:-1px;">'+F(tNav)+'</span>'
@@ -594,6 +613,25 @@ async function load(){
   } else { $('fund').innerHTML='<div class=tile><div class=k>Funding carry</div><div class=v>&ndash;</div><div class=s>paper sim starting&hellip;</div></div>'; }
   $('fundtbl').innerHTML=actRows(d.funding,(d.funding&&d.funding.positions||[]).map(p=>({name:p.asset+' \u00b7 '+p.side+' \u00b7 '+p.apy+'% APY',alloc:p.alloc,net:p.net})),'legs')
     ||'<tr><td colspan=5 class=empty>No activity yet \u2014 legs rebalance once per day.</td></tr>';
+  if(d.sharpev){const S=d.sharpev,ss=S.summary||{};
+    $('sev').innerHTML=[
+      tile('Bank (paper)',F(ss.cash),'started '+F(ss.start)),
+      tile('Realized P&L','<span class="'+C(ss.realized)+'">'+M(ss.realized)+'</span>',(ss.wins||0)+'W / '+(ss.losses||0)+'L'),
+      tile('Open bets',(ss.open_bets||0),''),
+      tile('Calibration gate',(ss.gate||'probe')+' '+(ss.gate_n||0)+'/30','sizing is earned'),
+      tile('Placed',(ss.placed||0),'since inception'),
+    ].join('');
+    const rows=[];
+    (S.open||[]).forEach(b=>rows.push('<tr><td class=mut>'+((b.start||'').slice(5,16).replace('T',' '))+'</td><td><span class=mkt>'+(b.game||'')+'</span></td><td>'+(b.team||'')+'</td>'
+      +'<td class=num>'+Math.round((b.pside||0)*100)+'%</td><td class=num>'+b.entry+'&cent;</td><td class=num>+'+(b.edge||0)+'&cent;</td><td class=num>'+b.count+'</td>'
+      +'<td><span class=chip style="background:rgba(91,141,239,.13);color:var(--acc)">OPEN</span></td><td class=num>&ndash;</td></tr>'));
+    (S.settled||[]).slice(0,10).forEach(b=>{const won=Number(b.outcome)===1;
+      rows.push('<tr><td class=mut>'+((b.ts||'').slice(5,16).replace('T',' '))+'</td><td><span class=mkt>'+(b.game||'')+'</span></td><td>'+(b.team||'')+'</td>'
+      +'<td class=num>'+Math.round((b.pside||0)*100)+'%</td><td class=num>'+b.entry+'&cent;</td><td class=num>+'+(b.edge||0)+'&cent;</td><td class=num>'+b.count+'</td>'
+      +'<td><span class="'+(won?'won':'lost')+'">'+(won?'WON':'LOST')+'</span></td><td class=num><span class="'+C(b.pnl)+'">'+M(b.pnl)+'</span></td></tr>');});
+    $('sevtbl').innerHTML=rows.join('')||'<tr><td colspan=9 class=empty>No qualifying edges yet '+((ss.placed||0)===0?'\u2014 waiting for ODDS_API_KEY + first scan.':'.')+'</td></tr>';
+  } else { $('sev').innerHTML='<div class=tile><div class=k>Sharp +EV</div><div class=v>&ndash;</div><div class=s>starting&hellip;</div></div>';
+    $('sevtbl').innerHTML='<tr><td colspan=9 class=empty>No state yet.</td></tr>'; }
   $('foot').innerHTML='Paper account &mdash; no real money at risk. NAV = cash + open positions at current market bid (marks refresh ~60s). '
     +'Banked P&amp;L = settled bets only; positions are held to settlement. Performance and calibration KPIs computed on the last '
     +(k.window_n||0)+' settled bets; win rate and totals are all-time. Judge the edge on the v4-ensemble era only &mdash; legacy bets predate the current model. Auto-refreshes every 20s.';

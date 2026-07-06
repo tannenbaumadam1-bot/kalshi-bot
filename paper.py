@@ -72,6 +72,10 @@ try:
 except Exception:
     poly_paper = None
 try:
+    import sharp_ev
+except Exception:
+    sharp_ev = None
+try:
     import funding_arb
 except Exception:
     funding_arb = None
@@ -511,6 +515,12 @@ def main():
             fund_bot = funding_arb.FundingPaper()
         except Exception:
             fund_bot = None
+    sev_bot = None
+    if sharp_ev is not None:
+        try:
+            sev_bot = sharp_ev.SharpEV()
+        except Exception:
+            sev_bot = None
     _serve_dashboard()
     if sim.load(SIM_PATH):
         print(f"Resumed previous session: ${sim.cash/100:.2f} cash, "
@@ -616,6 +626,15 @@ def main():
                               f"{fs['days']}d | APY~{fs['apy']}% | {len(fp)} legs")
                 except Exception as e:
                     print(f"  funding step skipped: {e}")
+            if sev_bot is not None and n % 20 == 1:
+                try:
+                    nc, npl = sev_bot.step()
+                    es = sev_bot.summary()
+                    if nc or npl or es["open_bets"]:
+                        print(f"  SHARP-EV(paper): {nc} cands, {npl} placed | bank ${es['cash']:.2f} | "
+                              f"{es['wins']}W/{es['losses']}L | open {es['open_bets']} | gate {es['gate']} {es['gate_n']}/30")
+                except Exception as e:
+                    print(f"  sharp-ev step skipped: {e}")
             if cycles == 0 or n < cycles:
                 time.sleep(cfg.engine.cycle_seconds)
     except KeyboardInterrupt:
