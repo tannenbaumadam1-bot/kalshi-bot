@@ -46,6 +46,7 @@ class PolyPaper:
         self.days = 0
         self.earned = 0.0
         self.last_date = ""
+        self.positions = []          # last day's allocations (for the dashboard)
         self.history = []
         self.load()
 
@@ -55,6 +56,7 @@ class PolyPaper:
             self.start = d.get("start", self.start); self.cash = d.get("cash", self.cash)
             self.days = d.get("days", 0); self.earned = d.get("earned", 0.0)
             self.last_date = d.get("last_date", "")
+            self.positions = d.get("positions", [])
             self.history = d.get("history", [])
         except Exception:
             pass
@@ -65,7 +67,7 @@ class PolyPaper:
             json.dump({"updated": datetime.datetime.now().isoformat(timespec="seconds"),
                        "start": self.start, "cash": round(self.cash, 4), "days": self.days,
                        "earned": round(self.earned, 4), "apy_annualized": self.apy(),
-                       "last_date": self.last_date,
+                       "last_date": self.last_date, "positions": self.positions[:10],
                        "history": self.history[-120:]}, open(PSTATE, "w"))
         except Exception:
             pass
@@ -116,6 +118,8 @@ class PolyPaper:
         comp_fn = comp_fn or pc.market_competition
         picks = self._pick(markets, comp_fn)
         day_net = sum(net for _m, _a, _c, net in picks)
+        self.positions = [{"q": (m.get("q") or "?")[:60], "alloc": round(a, 2),
+                           "net": round(net, 4)} for m, a, _c, net in picks]
         self.cash += day_net
         self.earned += day_net
         self.days += 1

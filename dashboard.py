@@ -366,14 +366,20 @@ td.num,th.num{text-align:right}
 <th class=num>Entry</th><th class=num>Mark</th><th class=num>Qty</th>
 <th class=num>Cost</th><th class=num>Fee</th><th class=num>Value</th><th class=num>Unrl P&amp;L</th></tr></thead>
 <tbody id=open></tbody></table>
-<h2>Settled (most recent)</h2>
+<h2>Settled (15 most recent &mdash; current model) <span style="text-transform:none;letter-spacing:0" id=legnote></span></h2>
 <table><thead><tr><th>Market</th><th>Side</th><th>Model</th><th class=num>Our prob</th>
 <th class=num>Entry</th><th class=num>Qty</th><th class=num>Fee</th><th>Result</th><th class=num>P&amp;L</th></tr></thead>
 <tbody id=settled></tbody></table>
 <h2>Polymarket reward farming <span style="text-transform:none;letter-spacing:0">(paper &mdash; modeled, reinvesting)</span></h2>
 <div class=grid id=poly></div>
+<div style="margin-top:10px"><table><thead><tr><th>Date</th><th>Market / activity</th>
+<th class=num>Alloc</th><th class=num>Net</th><th class=num>Bank after</th></tr></thead>
+<tbody id=polytbl></tbody></table></div>
 <h2>Crypto funding carry <span style="text-transform:none;letter-spacing:0">(paper &mdash; delta-neutral, uncorrelated)</span></h2>
 <div class=grid id=fund></div>
+<div style="margin-top:10px"><table><thead><tr><th>Date</th><th>Leg / activity</th>
+<th class=num>Alloc</th><th class=num>Net</th><th class=num>Bank after</th></tr></thead>
+<tbody id=fundtbl></tbody></table></div>
 <div class=foot id=foot></div>
 </div>
 <script>
@@ -431,6 +437,18 @@ function drawDaily(el,daily){
     g+='<rect x="'+x.toFixed(1)+'" y="'+y.toFixed(1)+'" width="'+bw.toFixed(1)+'" height="'+Math.max(1,h).toFixed(1)+'" rx="2" fill="'+col+'" opacity=".85"/>'
       +'<text x="'+(x+bw/2).toFixed(1)+'" y="'+(H-8)+'" fill="#7d90ad" font-size="8.5" text-anchor="middle">'+d[0].slice(5)+'</text>';});
   el.innerHTML=g;
+}
+function actRows(st,legs,unit){
+  if(!st)return '';
+  const rows=[];
+  const day=st.last_date||'today';
+  (legs||[]).forEach(p=>rows.push('<tr><td class=mut>'+day+'</td><td><span class=mkt>'+p.name+'</span> <span class="chip yes">OPEN</span></td>'
+    +'<td class=num>'+F(p.alloc)+'</td><td class=num><span class="'+C(p.net)+'">'+M(p.net)+'</span><span class=mut>/day</span></td><td class=num>&ndash;</td></tr>'));
+  const H=(st.history||[]).slice(-15).reverse();
+  H.forEach(h=>{const n=(h.markets!=null?h.markets:h.assets)||0;
+    rows.push('<tr><td class=mut>'+(h.ts||'').slice(0,10)+'</td><td class=mut>daily accrual &middot; '+n+' '+unit+'</td>'
+    +'<td class=num>&ndash;</td><td class=num><span class="'+C(h.net)+'">'+M(h.net)+'</span></td><td class=num>'+F(h.cash)+'</td></tr>');});
+  return rows.slice(0,15+(legs||[]).length).join('');
 }
 function eraRows(e){
   const rows=[['Settled bets',e.n+(e.open!=null?'  ('+e.open+' open)':'')],
@@ -536,14 +554,20 @@ async function load(){
     +'<td class=num>'+(h?F(b.value):'&ndash;')+'</td>'
     +'<td class=num>'+(h?'<span class="'+C(b.upnl)+'">'+M(b.upnl)+'</span>':'&ndash;')+'</td></tr>';
   }).join('')||'<tr><td colspan=11 class=empty>No open positions &mdash; waiting for a disciplined edge.</td></tr>';
-  $('settled').innerHTML=(d.settled||[]).slice(0,30).map(b=>{
-    const won=Number(b.outcome)===1;
-    return '<tr>'+mkt(b)+side(b.side)+era(b)+prob(b.pside)
-    +'<td class=num>'+b.entry+'&cent;</td><td class=num>'+b.count+'</td>'
-    +'<td class=num>'+feeC(b.fee)+'</td>'
-    +'<td>'+(b.exited?'<span class=chip style="background:rgba(232,180,76,.13);color:var(--amb)">EXIT</span>':'<span class="'+(won?'won':'lost')+'">'+(won?'WON':'LOST')+'</span>')+'</td>'
-    +'<td class=num><span class="'+C(b.pnl)+'">'+M(b.pnl)+'</span></td></tr>';
-  }).join('')||'<tr><td colspan=9 class=empty>No settled bets yet.</td></tr>';
+  {
+    const all=d.settled||[];
+    const cur=all.filter(b=>b.era==='v6-ens');
+    const nleg=all.length-cur.length;
+    $('legnote').textContent=nleg>0?'('+nleg+' older legacy-model bets hidden \u2014 still counted in totals)':'';
+    $('settled').innerHTML=cur.slice(0,15).map(b=>{
+      const won=Number(b.outcome)===1;
+      return '<tr>'+mkt(b)+side(b.side)+era(b)+prob(b.pside)
+      +'<td class=num>'+b.entry+'&cent;</td><td class=num>'+b.count+'</td>'
+      +'<td class=num>'+feeC(b.fee)+'</td>'
+      +'<td>'+(b.exited?'<span class=chip style="background:rgba(232,180,76,.13);color:var(--amb)">EXIT</span>':'<span class="'+(won?'won':'lost')+'">'+(won?'WON':'LOST')+'</span>')+'</td>'
+      +'<td class=num><span class="'+C(b.pnl)+'">'+M(b.pnl)+'</span></td></tr>';
+    }).join('')||'<tr><td colspan=9 class=empty>No current-model bets settled yet \u2014 the open v6-ens positions settle daily.</td></tr>';
+  }
   if(d.poly){const P=d.poly;const H=P.history||[];const last=H.length?H[H.length-1]:null;
     $('poly').innerHTML=[
       tile('Bank (paper)',F(P.cash||P.start||0),'started '+F(P.start||0)),
@@ -553,6 +577,8 @@ async function load(){
       tile('Reinvest','ON','rewards &rarr; more liquidity'),
     ].join('');
   } else { $('poly').innerHTML='<div class=tile><div class=k>Polymarket</div><div class=v>&ndash;</div><div class=s>paper sim starting&hellip;</div></div>'; }
+  $('polytbl').innerHTML=actRows(d.poly,(d.poly&&d.poly.positions||[]).map(p=>({name:p.q,alloc:p.alloc,net:p.net})),'markets')
+    ||'<tr><td colspan=5 class=empty>No activity yet \u2014 allocations post once per day.</td></tr>';
   if(d.funding){const G=d.funding;const legs=(G.positions||[]).length;
     $('fund').innerHTML=[
       tile('Bank (paper)',F(G.cash||G.start||0),'started '+F(G.start||0)),
@@ -562,6 +588,8 @@ async function load(){
       tile('Correlation','~0','independent of markets'),
     ].join('');
   } else { $('fund').innerHTML='<div class=tile><div class=k>Funding carry</div><div class=v>&ndash;</div><div class=s>paper sim starting&hellip;</div></div>'; }
+  $('fundtbl').innerHTML=actRows(d.funding,(d.funding&&d.funding.positions||[]).map(p=>({name:p.asset+' \u00b7 '+p.side+' \u00b7 '+p.apy+'% APY',alloc:p.alloc,net:p.net})),'legs')
+    ||'<tr><td colspan=5 class=empty>No activity yet \u2014 legs rebalance once per day.</td></tr>';
   $('foot').innerHTML='Paper account &mdash; no real money at risk. NAV = cash + open positions at current market bid (marks refresh ~60s). '
     +'Banked P&amp;L = settled bets only; positions are held to settlement. Performance and calibration KPIs computed on the last '
     +(k.window_n||0)+' settled bets; win rate and totals are all-time. Judge the edge on the v4-ensemble era only &mdash; legacy bets predate the current model. Auto-refreshes every 20s.';
@@ -630,4 +658,4 @@ def main():
 
 
 if __name__ == "__main__":
-    raise S
+    raise SystemExit(main())
