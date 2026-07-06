@@ -462,6 +462,10 @@ async function load(){
   const tk=new URLSearchParams(location.search).get('token')||'';
   let d;try{d=await(await fetch('/data?token='+encodeURIComponent(tk),{cache:'no-store'})).json();}
   catch(e){$('upd').textContent='cannot reach bot';return;}
+  if(d.auth===false){ // stale/missing token: fall back to the tokenless public feed
+    try{d=await(await fetch('/public',{cache:'no-store'})).json();}
+    catch(e){$('upd').textContent='cannot reach bot';return;}
+  }
   if(d.auth===false){$('upd').textContent='bad token';return;}
   if(!d.running){$('upd').textContent='waiting for first state...';return;}
   const s=d.summary||{},k=d.kpi||{};
