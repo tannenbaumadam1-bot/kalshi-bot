@@ -1,49 +1,62 @@
-# Strategy queue (updated 2026-07-06)
+# Strategy rankings (updated 2026-07-06)
 
-Ranked candidates. Rule: nothing goes live without (1) a historical backtest
-clearing positive expectancy net of real fees, then (2) the standard paper
-calibration gate. Sizing is earned, not assumed.
+ALL strategies - running paper books AND candidates - ranked for viability,
+return, and scalability toward Adam's $2k/week income target. Rule: nothing
+goes live (and nothing running scales up) without a backtest/calibration gate
+clearing positive expectancy net of real fees. Sizing is earned, not assumed.
 
-## 1. +EV sharp-line anchoring on prediction markets  <- QUEUED: backtest first
-Use devigged sharp-sportsbook consensus (Pinnacle-style) as fair value; buy
-Kalshi/Polymarket sports contracts priced > (edge threshold + fees + spread)
-away from it. No forecasting model needed. Exchanges don't ban winners, so the
-classic +EV death (soft books limiting accounts) doesn't apply.
-- Venue preference: Polymarket first (taker fees ~0 vs Kalshi's 0.07*P*(1-P)
-  ~= 1.75c/contract at 50c, ~3.5% of basis - brutal exactly where sports trade).
-  VERIFY current fee schedules + Polymarket US access before build.
-  Kalshi leg only via resting maker orders (zero maker fee).
-- Cost: odds-feed API (~$0-100/mo). Backtest: historical sharp closes vs
-  venue price history; edge must clear fees with margin.
-- Capacity: best of all candidates (liquid major-sport markets).
-- Subsumes the favorite-longshot bias play (that's one slice of this).
+## 1. +EV sharp-line anchoring  [CANDIDATE - QUEUED: backtest next]
+Devigged sharp-sportsbook consensus as fair value; buy Kalshi/Poly sports
+contracts priced away from it beyond fees+spread. No forecasting model needed;
+exchanges don't ban winners (kills classic +EV death at soft books).
+- Venue: Polymarket first (maker $0 + rebates; Kalshi taker 1.75c@50c ~3.5% of
+  basis is brutal where sports trade; Kalshi legs = resting maker only).
+- VERIFY at build: both fee schedules; Polymarket state-block list (8 states).
+- Cost: odds-feed API ~$0-100/mo. Capacity: best on the board (liquid sports).
+- Subsumes favorite-longshot bias as a special case.
 
-## 2. Cross-venue arb (Kalshi <-> Polymarket, sports/crypto, <48h resolution)
-Locked-in spread when the same event prices differently. Mechanical edge,
-highest certainty, LOW capacity (flow-limited; fine at $1k, thin by $10k+).
-Legging risk is the killer: unwind-at-loss-cap rule required before trade #1.
-Scanner shares matcher/client infra with #1. Pre-game + short-dated crypto
-only; live in-game is a latency war - skip until infra proves out.
+## 2. Polymarket reward farming  [RUNNING - paper, day 1]
+Structural subsidy (~$5M/mo pool), the most credible income stream currently
+running. Modeled 20-70% APY but CAPTURE_EFF=0.08 is a guess that could be off
+20x either way - the gate here is calibrating vs a FIRST REAL PAYOUT on tiny
+live stake before scaling. Capacity: good (dilutes gently with size).
 
-## 3. Weather model -> Polymarket weather markets
-Reuse v6-ens if/when it passes the Kalshi calibration gate. Lowest effort,
-highest return-per-effort IF gate passes; tiny capacity (thin markets).
-Conditional - wait for the gate, don't pre-build.
+## 3. Cross-venue arb, sports/crypto <48h  [CANDIDATE]
+Locked-in spread, mechanical, highest certainty per trade, LOW capacity
+(flow-limited; fine at $1k, thin by $10k+). Legging risk needs an
+unwind-at-loss-cap rule before trade #1. Shares matcher/client infra with #1
+- build as its sidecar, not standalone. Pre-game + short-dated crypto only;
+live in-game is a latency war - skip.
 
-## 4. Favorite-longshot harvesting (standalone)
-Documented bias, fee-sensitive, scales well (liquid favorites). Only worth
-building standalone if #1's backtest fails but shows the bias slice works.
+## 4. Weather edge on Kalshi (v6-ens)  [RUNNING - paper, gate 0/30]
+The proving ground. Legacy record is negative (fees + overconfidence);
+v6 ensemble unproven until the 30-bet calibration gate answers (~1-2 wks).
+Capacity tiny (~$400 ceiling) - its real value is testing whether our
+model-building pipeline can produce calibrated edge AT ALL. Don't scale; let
+the gate decide. If gate fails: park weather, keep the ensemble tooling.
 
-## 5. NegRisk / multi-outcome arb scanner
-Scraps behind pro bots; one-day build as an add-on to #2's scanner. Free option.
+## 5. Weather model -> Polymarket weather markets  [CANDIDATE - conditional]
+Reuse v6-ens iff #4's gate passes. Lowest effort, tiny capacity. Wait.
 
-## 6. Copy-trading top Polymarket wallets
-Weakest: you get their direction without their price; leaderboards are full of
-lucky concentrated bettors + reward farmers. Only the flow-as-signal variant
-is even testable. Park it.
+## 6. Crypto funding carry  [RUNNING - paper, day 1]
+Math is real and uncorrelated, but the live US path is only ~11% APY majors
+carry (Coinbase Derivatives/Kraken/CME) - Hyperliquid alt rates are
+DATA-ONLY for US persons. Scalable but low %. Keep as paper research +
+diversifier; not a path to the income target.
+
+## 7. Favorite-longshot harvesting  [CANDIDATE - subsumed by #1]
+Only revisit standalone if #1's backtest fails overall but this slice works.
+
+## 8. NegRisk / multi-outcome arb scanner  [CANDIDATE - add-on]
+One-day build on #3's scanner. Scraps behind pro bots. Free option.
+
+## 9. Copy-trading top Polymarket wallets  [PARKED]
+Direction without price; leaderboards = lucky bettors + MMs + reward farmers.
+Only the flow-as-signal variant is even testable. Not worth build time now.
 
 ## Scale reality check ($2k/week target)
-These are 0.5-2%/week strategies. $2k/wk needs ~$100k+ working capital OR a
-products/business route (terminal/scanner SaaS - arb-alert-only product self-
-cannibalizes; broader terminal doesn't). Near-term goal: prove any edge at
-1%+/week paper->small-live, compound, revisit.
+These are 0.5-2%/week strategies; $2k/wk needs ~$100k+ working capital OR the
+product route (broad "prediction-markets terminal" SaaS; arb-alert-only
+self-cannibalizes). Near-term: prove ANY edge at 1%+/wk paper->small-live
+(#1 backtest + #2 payout calibration + #4 gate are the three live questions),
+compound, then revisit scale.
