@@ -12,6 +12,12 @@ amortized fees + basis/slippage. LIVE execution needs a US-accessible perp venue
 (Hyperliquid) with a real spot hedge - a separate lift behind the usual gate.
 Risks modeled/monitored: funding can flip (forcing a costly rotation), basis can
 gap, and extreme-funding meme coins are excluded as blowup risk.
+
+US-LEGALITY: Hyperliquid is used here for DATA ONLY - it is geoblocked to US
+persons and forbids VPN workarounds, so a US person CANNOT legally execute the
+perp leg there. A live US path needs a US-regulated derivatives venue (Coinbase
+Derivatives, Kraken, or CME BTC/ETH basis) - which mostly offers the ~11% majors
+carry, not the high alt rates. Treat this paper book as research until then.
 """
 from __future__ import annotations
 import os, json, datetime

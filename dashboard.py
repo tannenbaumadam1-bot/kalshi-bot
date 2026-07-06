@@ -307,10 +307,14 @@ td.num,th.num{text-align:right}
 .eras table{font-size:12.5px}
 </style></head><body><div class=wrap>
 <div class=hdr>
-  <h1>Weather Book &middot; Kalshi</h1><span class=tag>Paper</span>
+  <h1>Trading Bot &middot; Paper</h1><span class=tag>3 strategies</span>
   <span class=live id=live></span>
   <span class=upd id=upd><span class=dot id=dot></span>loading&hellip;</span>
 </div>
+<div id=combined style="margin:14px 0 2px;"></div>
+<h2>Strategy portfolio <span style="text-transform:none;letter-spacing:0">(3 uncorrelated paper books)</span></h2>
+<div id=strat style="display:grid;grid-template-columns:repeat(auto-fit,minmax(205px,1fr));gap:12px;"></div>
+<h2>Weather book <span style="text-transform:none;letter-spacing:0">(forecast edge &mdash; calibration-gated)</span></h2>
 <div class=hero>
   <div class=nav><div class=k>Marked equity (NAV)</div><div class=v id=nav>&ndash;</div>
     <div class=d id=navd></div></div>
@@ -363,6 +367,15 @@ function era(b){const cur=(b.era==='v6-ens');
   return '<td><span class="chip '+(cur?'era':'leg')+'">'+(cur?'v6':'legacy')+'</span></td>';}
 function prob(p){return '<td class=num>'+Math.round((Number(p)||0)*100)+'%</td>';}
 function tile(k,v,s){return '<div class=tile><div class=k>'+k+'</div><div class=v>'+v+'</div>'+(s?'<div class=s>'+s+'</div>':'')+'</div>';}
+function stratCard(name,kind,kindcls,bank,pnl,sub,status,statuscls){
+  return '<div style="background:var(--panel);border:.5px solid var(--line);border-radius:12px;padding:14px 16px;">'
+    +'<div style="display:flex;justify-content:space-between;align-items:center;gap:8px;">'
+    +'<span style="font-weight:500;font-size:13.5px;">'+name+'</span>'
+    +'<span class="chip '+kindcls+'">'+kind+'</span></div>'
+    +'<div style="font-size:25px;font-weight:700;margin-top:8px;letter-spacing:-.5px;">'+bank+'</div>'
+    +'<div style="font-size:12px;margin-top:2px;">'+pnl+' <span class=mut>'+sub+'</span></div>'
+    +'<div style="margin-top:9px;"><span class="chip '+statuscls+'">'+status+'</span></div></div>';
+}
 function drawCurve(el,curve){
   if(!curve||curve.length<2){el.innerHTML='';return;}
   const W=520,H=150,pl=34,pr=8,pt=10,pb=16;
@@ -412,6 +425,36 @@ async function load(){
   if(d.auth===false){$('upd').textContent='bad token';return;}
   if(!d.running){$('upd').textContent='waiting for first state...';return;}
   const s=d.summary||{},k=d.kpi||{};
+  {
+    const wStart=Number(s.start||0);
+    const wNav=(k.nav!=null?Number(k.nav):(wStart+Number(s.total||0)));
+    const wSettled=Number((k.era_current&&k.era_current.n)||0);
+    const P=d.poly||null, G=d.funding||null;
+    const pBank=P?Number(P.cash||P.start||0):null, pStart=P?Number(P.start||0):0;
+    const gBank=G?Number(G.cash||G.start||0):null, gStart=G?Number(G.start||0):0;
+    const cards=[
+      stratCard('Weather edge','forecast','era',F(wNav),
+        '<span class="'+C(wNav-wStart)+'">'+M(wNav-wStart)+'</span>',
+        '&middot; '+(s.settled||0)+' settled',
+        wSettled>=30?'gate: passed':'probing '+wSettled+'/30','leg'),
+      stratCard('Polymarket rewards','liquidity','yes',
+        P?F(pBank):NA, P?'<span class="'+C(P.earned)+'">'+M(P.earned)+'</span>':NA,
+        P?('&middot; '+(P.days||0)+'d &middot; APY ~'+(P.apy_annualized!=null?P.apy_annualized:'&ndash;')+'%'):'&middot; starting',
+        'reinvesting','era'),
+      stratCard('Crypto funding carry','neutral','no',
+        G?F(gBank):NA, G?'<span class="'+C(G.earned)+'">'+M(G.earned)+'</span>':NA,
+        G?('&middot; '+(G.days||0)+'d &middot; APY ~'+(G.apy_annualized!=null?G.apy_annualized:'&ndash;')+'%'):'&middot; starting',
+        G?('probing '+(G.days||0)+'/20'):'starting','leg'),
+    ];
+    $('strat').innerHTML=cards.join('');
+    let tStart=wStart, tNav=wNav, nb=1;
+    if(P){tStart+=pStart;tNav+=pBank;nb++;} if(G){tStart+=gStart;tNav+=gBank;nb++;}
+    $('combined').innerHTML='<div style="display:flex;align-items:baseline;gap:12px;flex-wrap:wrap;">'
+      +'<span style="font-size:11px;color:var(--mut);text-transform:uppercase;letter-spacing:.12em;">Combined paper NAV</span>'
+      +'<span style="font-size:33px;font-weight:800;letter-spacing:-1px;">'+F(tNav)+'</span>'
+      +'<span class="'+C(tNav-tStart)+'" style="font-size:15px;">'+M(tNav-tStart)+'</span>'
+      +'<span class=mut style="font-size:12px;">across '+nb+' paper strategies &middot; started '+F(tStart)+'</span></div>';
+  }
   const ageMin=(Date.now()-new Date(d.updated).getTime())/60000;
   $('upd').innerHTML='<span class="dot'+(ageMin>30?' stale':'')+'"></span>'
     +(ageMin>30?'STALE &middot; ':'')+'updated '+(d.updated?d.updated.replace('T',' ').slice(0,16):'-');
