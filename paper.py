@@ -33,11 +33,40 @@ import sys
 import json
 import time
 import datetime
+import threading
 import requests
 try:
     import weather_paper
 except Exception:
     weather_paper = None
+
+
+def _serve_dashboard():
+    """Serve the dashboard from INSIDE the bot process, so it stays up as long as
+    the bot runs - independent of the flaky standalone kalshi-dashboard service.
+    If that service already holds the port, we simply no-op."""
+    try:
+        import dashboard as _dash
+    except Exception as e:
+        print(f"  in-process dashboard unavailable: {e}")
+        return
+    _dash.HOST = os.environ.get("DASH_HOST", "0.0.0.0")
+    _dash.PORT = int(os.environ.get("DASH_PORT", "8765"))
+    _dash.TOKEN = os.environ.get("DASH_TOKEN", "")   # no token -> existing links still work
+
+    def _run():
+        try:
+            srv = _dash.ThreadingHTTPServer((_dash.HOST, _dash.PORT), _dash.H)
+        except OSError:
+            return   # port already served by the standalone service - fine
+        threading.Thread(target=_dash._price_loop, daemon=True).start()
+        try:
+            srv.serve_forever()
+        except Exception:
+            pass
+
+    threading.Thread(target=_run, daemon=True).start()
+    print(f"  dashboard served in-process on {_dash.HOST}:{_dash.PORT}")
 try:
     import poly_paper
 except Exception:
@@ -482,6 +511,7 @@ def main():
             fund_bot = funding_arb.FundingPaper()
         except Exception:
             fund_bot = None
+    _serve_dashboard()
     if sim.load(SIM_PATH):
         print(f"Resumed previous session: ${sim.cash/100:.2f} cash, "
               f"{len(sim.pos)} positions held, {len(sim.resting)} resting orders, "
