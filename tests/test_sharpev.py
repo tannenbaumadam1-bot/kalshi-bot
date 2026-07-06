@@ -95,3 +95,48 @@ def test_one_bet_per_game():
     mk = _mk(start)
     p.bets[mk["ticker"].rsplit("-", 1)[0] + "-ATL"] = {"entry": 40, "count": 1}
     assert p.candidates([_ev(start)], [mk], now=now) == []
+
+
+def test_totals_candidate_and_no_side():
+    now = datetime.datetime.now(se.ET)
+    start = now + datetime.timedelta(hours=3)
+    ev = _ev(start)
+    ev["bookmakers"][0]["markets"].append({"key": "totals", "outcomes": [
+        {"name": "Over", "price": 2.30, "point": 8.5},
+        {"name": "Under", "price": 1.66, "point": 8.5}]})   # fair over ~ 41.7%
+    mons = ["JAN","FEB","MAR","APR","MAY","JUN","JUL","AUG","SEP","OCT","NOV","DEC"]
+    tk = "KXMLBTOTAL-26%s%02d%02d%02dATLPIT-9" % (
+        mons[start.month-1], start.day, start.hour, start.minute)
+    mk = {"ticker": tk, "title": "Atlanta vs Pittsburgh: total runs",
+          "yes_sub_title": "Over 8.5 runs scored", "floor_strike": 8.5,
+          "strike_type": "greater", "yes_bid": 52, "yes_ask": 55,
+          "_sport": "baseball_mlb", "_kind": "total"}
+    p = _bot()
+    cands = p.candidates([ev], [mk], now=now)
+    # market says 53.5 mid, sharp says 41.7 -> NO (under) side has the edge
+    assert len(cands) == 1 and cands[0][2] == "no" and cands[0][3] >= se.MIN_EDGE_C
+    assert p.place(cands) == 1
+    b = list(p.bets.values())[0]
+    assert b["side"] == "no" and b["entry"] == 100 - 55
+    p.fetch_result = lambda tk: "no"
+    p.settle()
+    assert p.wins == 1 and p.realized > 0
+
+
+def test_integer_total_lines_skipped():
+    now = datetime.datetime.now(se.ET)
+    start = now + datetime.timedelta(hours=3)
+    ev = _ev(start)
+    ev["bookmakers"][0]["markets"].append({"key": "totals", "outcomes": [
+        {"name": "Over", "price": 1.91, "point": 9.0},
+        {"name": "Under", "price": 1.91, "point": 9.0}]})
+    mk = {"ticker": "KXMLBTOTAL-26JUL091235ATLPIT-9", "title": "Atlanta vs Pittsburgh",
+          "yes_sub_title": "Over 9 runs", "floor_strike": 9.0, "strike_type": "greater",
+          "yes_bid": 40, "yes_ask": 42, "_sport": "baseball_mlb", "_kind": "total"}
+    assert _bot().candidates([ev], [mk], now=now) == []   # push risk -> skip
+
+
+def test_dollars_fields_normalized():
+    assert se._cents({"yes_bid_dollars": "0.6800"}, "yes_bid") == 68
+    assert se._cents({"yes_bid": 41}, "yes_bid") == 41
+    assert se._cents({}, "yes_bid") == 0

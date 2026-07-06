@@ -24,9 +24,17 @@ Deliberate scope (the "smart" filters - each one earned by a past loss):
 - One bet per game, MAX_PER_DAY/day, MAX_OPEN open, probe stakes (<=60c/bet)
   until the 30-bet calibration gate passes (same contract as the weather book).
 
-Needs ODDS_API_KEY (the-odds-api.com free tier ~500 credits/mo). Without it
-the module idles gracefully (settles/opens nothing new, logs once).
-Credit budget: 1 fetch per active sport per ODDS_SCAN_HOURS (default 3h).
+Markets: moneyline (h2h) + game totals (Kalshi totals use half-point strikes,
+e.g. 'Over 8.5 runs' = book Over 8.5 exactly - no push risk). Both sides
+tradeable (YES=team/over, NO=other/under). Spreads/halves/props: later phases -
+Kalshi period markets are in-game (excluded by the no-in-play rule) and prop
+anchors carry the widest vig; totals+ml are where sharp anchors are strongest.
+
+Odds source: The Odds API, region 'eu' only = Pinnacle + Euro sharps (Pinnacle
+preferred when present; median >=MIN_BOOKS fallback). Credit math (free tier
+500/mo): 2 markets x 1 region = 2 credits/sport/scan; 2 in-season sports at
+ODDS_SCAN_HOURS=6 -> ~480/mo. Paid tier ($30/mo, 20k) lifts all limits.
+Without ODDS_API_KEY the module idles gracefully.
 """
 from __future__ import annotations
 import os, json, csv, re, datetime, statistics
@@ -60,18 +68,31 @@ PROBE_COST_CENTS = 60
 GATE_MIN_N = 30
 GATE_MAX_GAP = 0.05
 PER_BET_CAP = 0.015                # post-gate quarter-Kelly cap
-SCAN_HOURS = float(os.environ.get("ODDS_SCAN_HOURS", "3"))
+SCAN_HOURS = float(os.environ.get("ODDS_SCAN_HOURS", "6"))
+ODDS_MARKETS = os.environ.get("ODDS_MARKETS", "h2h,totals")
+ODDS_REGIONS = os.environ.get("ODDS_REGIONS", "eu")   # eu = Pinnacle & co
 
-SPORTS = {   # odds-api key -> kalshi series (only 2-way winner markets)
-    "baseball_mlb":        "KXMLBGAME",
-    "basketball_wnba":     "KXWNBAGAME",
-    "americanfootball_nfl": "KXNFLGAME",
-    "basketball_nba":      "KXNBAGAME",
-    "icehockey_nhl":       "KXNHLGAME",
+SPORTS = {   # odds-api key -> kalshi series (ml = winner, total = game total)
+    "baseball_mlb":        {"ml": "KXMLBGAME",  "total": "KXMLBTOTAL"},
+    "basketball_wnba":     {"ml": "KXWNBAGAME", "total": "KXWNBATOTAL"},
+    "americanfootball_nfl": {"ml": "KXNFLGAME", "total": "KXNFLTOTAL"},
+    "basketball_nba":      {"ml": "KXNBAGAME",  "total": "KXNBATOTAL"},
+    "icehockey_nhl":       {"ml": "KXNHLGAME",  "total": "KXNHLTOTAL"},
 }
+
+
+def _cents(mk, key):
+    """Kalshi sports markets quote in *_dollars strings; normalize to int cents."""
+    v = mk.get(key)
+    if isinstance(v, (int, float)) and v > 0:
+        return int(round(float(v)))
+    try:
+        return int(round(float(mk.get(key + "_dollars") or 0) * 100))
+    except (TypeError, ValueError):
+        return 0
 _MON = {m: i + 1 for i, m in enumerate(
     ["JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV", "DEC"])}
-_TKRE = re.compile(r"-(\d{2})([A-Z]{3})(\d{2})(\d{4})?([A-Z]+)-([A-Z]+)$")
+_TKRE = re.compile(r"-(\d{2})([A-Z]{3})(\d{2})(\d{4})?([A-Z]+)-([A-Z0-9]+)$")
 
 
 def devig(prices):
@@ -83,37 +104,68 @@ def devig(prices):
     return {t: v / s for t, v in raw.items()}
 
 
+def _consensus(per_book, pinn):
+    """[{k: p}] book probs + optional pinnacle -> (fair {k: p}, src) or ({}, '')."""
+    if not per_book:
+        return {}, ""
+    keys = set(per_book[0].keys())
+    per_book = [f for f in per_book if set(f.keys()) == keys]
+    k0 = sorted(keys)[0]
+    ps = [f[k0] for f in per_book]
+    if len(ps) >= 2 and (max(ps) - min(ps)) > DISAGREE_MAX:
+        return {}, ""                    # books disagree -> fair not trustworthy
+    if pinn is not None and set(pinn.keys()) == keys:
+        return pinn, "pinnacle"
+    if len(per_book) >= MIN_BOOKS:
+        med = statistics.median(ps)
+        other = (keys - {k0}).pop()
+        return {k0: med, other: 1 - med}, "median%d" % len(per_book)
+    return {}, ""
+
+
 def fair_from_books(event):
-    """(fair {team: p}, source) from one odds-api event; {} if untrustworthy."""
-    per_book = []
-    pinn = None
+    """(ml_fair {team:p}, src) - moneyline consensus for one event."""
+    per_book, pinn = [], None
     for bk in event.get("bookmakers") or []:
         for m in bk.get("markets") or []:
             if m.get("key") != "h2h":
                 continue
-            prices = {o["name"]: float(o["price"]) for o in m.get("outcomes") or []
-                      if o.get("price")}
-            f = devig(prices)
-            if not f:
+            f = devig({o["name"]: float(o["price"]) for o in m.get("outcomes") or []
+                       if o.get("price")})
+            if f:
+                per_book.append(f)
+                if bk.get("key") == "pinnacle":
+                    pinn = f
+    return _consensus(per_book, pinn)
+
+
+def totals_from_books(event):
+    """{point: (p_over, src)} - devigged game-total consensus per line."""
+    by_pt = {}
+    for bk in event.get("bookmakers") or []:
+        for m in bk.get("markets") or []:
+            if m.get("key") != "totals":
                 continue
-            per_book.append(f)
-            if bk.get("key") == "pinnacle":
-                pinn = f
-    if not per_book:
-        return {}, ""
-    teams = list(per_book[0].keys())
-    if any(set(f.keys()) != set(teams) for f in per_book):
-        return {}, ""
-    t0 = teams[0]
-    ps = [f[t0] for f in per_book]
-    if len(ps) >= 2 and (max(ps) - min(ps)) > DISAGREE_MAX:
-        return {}, ""                    # books disagree -> fair not trustworthy
-    if pinn is not None:
-        return pinn, "pinnacle"
-    if len(per_book) >= MIN_BOOKS:
-        med = statistics.median(ps)
-        return {t0: med, teams[1]: 1 - med}, "median%d" % len(per_book)
-    return {}, ""
+            pts = {}
+            for o in m.get("outcomes") or []:
+                pt, pr, nm = o.get("point"), o.get("price"), (o.get("name") or "").lower()
+                if pt is None or not pr or nm not in ("over", "under"):
+                    continue
+                pts.setdefault(float(pt), {})[nm] = float(pr)
+            for pt, pair in pts.items():
+                if "over" in pair and "under" in pair:
+                    f = devig(pair)
+                    if f:
+                        by_pt.setdefault(pt, []).append(
+                            ({"over": f["over"], "under": f["under"]},
+                             bk.get("key") == "pinnacle"))
+    out = {}
+    for pt, lst in by_pt.items():
+        pinn = next((f for f, isp in lst if isp), None)
+        fair, src = _consensus([f for f, _ in lst], pinn)
+        if fair:
+            out[pt] = (fair["over"], src)
+    return out
 
 
 def parse_ticker(tk):
@@ -145,6 +197,30 @@ def team_matches(sub, full):
             return nick.startswith(letter)
         return False
     return full.startswith(sub) or sub in full
+
+
+def match_event_by_time(mk, events):
+    """Match a totals market to an odds event by ticker datetime + title teams."""
+    start, has_time, _ = parse_ticker(mk.get("ticker", ""))
+    if start is None:
+        return None
+    title = (mk.get("title") or "").lower()
+    for ev in events:
+        try:
+            c = datetime.datetime.fromisoformat(
+                (ev.get("commence_time") or "").replace("Z", "+00:00")).astimezone(ET)
+        except Exception:
+            continue
+        if has_time:
+            if abs((c - start).total_seconds()) > 900:
+                continue
+        elif c.date() != start:
+            continue
+        w1 = (ev.get("home_team") or "").split()[0].lower()
+        w2 = (ev.get("away_team") or "").split()[0].lower()
+        if title and w1 and w2 and w1 in title and w2 in title:
+            return ev
+    return None
 
 
 def match_event(mk, events):
@@ -263,8 +339,8 @@ class SharpEV:
             return None
         try:
             r = requests.get(ODDS.format(sport=sport),
-                             params={"apiKey": key, "regions": "eu,us",
-                                     "markets": "h2h", "oddsFormat": "decimal"},
+                             params={"apiKey": key, "regions": ODDS_REGIONS,
+                                     "markets": ODDS_MARKETS, "oddsFormat": "decimal"},
                              timeout=20)
             if r.status_code != 200:
                 return None
@@ -277,7 +353,11 @@ class SharpEV:
             d = requests.get(KALSHI + "/markets",
                              params={"series_ticker": series, "status": "open",
                                      "limit": 200}, timeout=15).json()
-            return d.get("markets") or []
+            ms = d.get("markets") or []
+            for m in ms:                       # sports quotes arrive as *_dollars
+                m["yes_bid"] = _cents(m, "yes_bid")
+                m["yes_ask"] = _cents(m, "yes_ask")
+            return ms
         except Exception:
             return []
 
@@ -295,7 +375,7 @@ class SharpEV:
             res = self.fetch_result(tk)
             if res is None:
                 continue
-            won = (res == "yes")                       # we only ever buy YES sides
+            won = (res == b.get("side", "yes"))
             net = ((100 if won else 0) - b["entry"]) * b["count"] - b.get("fee", 0)
             self.cash += (100 if won else 0) * b["count"]
             self.realized += net
@@ -316,45 +396,89 @@ class SharpEV:
         n += sum(1 for h in self.history if (h.get("ots") or "")[:10] == today)
         return n
 
+    def _sided(self, mk, fair_yes, src, start_iso, label):
+        """Try both sides of one market -> best qualifying (cand tuple) or None.
+        YES entry = join yes_bid; NO entry = join no_bid = 100 - yes_ask."""
+        bid, ask = mk.get("yes_bid") or 0, mk.get("yes_ask") or 0
+        if not bid or not ask or ask - bid > MAX_SPREAD_C:
+            return None                                 # illiquid / wide
+        mid = (bid + ask) / 2.0
+        fair = FAIR_W * fair_yes + (1 - FAIR_W) * (mid / 100.0)
+        best = None
+        for side, p, entry in (("yes", fair, bid), ("no", 1 - fair, 100 - ask)):
+            if not (MIN_P <= p <= MAX_P):               # no longshots (either side)
+                continue
+            if not (MIN_PRICE <= entry <= MAX_PRICE):
+                continue
+            edge_c = p * 100 - entry                    # maker fee ~ $0 at our size
+            if edge_c < MIN_EDGE_C:
+                continue
+            if best is None or edge_c > best[3]:
+                best = (mk, label, side, edge_c, p, src, start_iso)
+        return best
+
+    @staticmethod
+    def _start_of(ev):
+        try:
+            return datetime.datetime.fromisoformat(
+                ev["commence_time"].replace("Z", "+00:00")).astimezone(ET)
+        except Exception:
+            return None
+
     def candidates(self, events, markets, now=None):
-        """Filter pipeline -> [(market, team, fair_shrunk, edge_c)] best-first."""
+        """Filter pipeline -> [(mk, label, side, edge_c, fair_side, src, start)]."""
         now = now or datetime.datetime.now(ET)
         out = []
         open_events = {tk.rsplit("-", 1)[0] for tk in self.bets}
         for mk in markets:
             tk = mk.get("ticker", "")
-            ev_key = tk.rsplit("-", 1)[0]
-            if tk in self.bets or ev_key in open_events:
-                continue                                # one bet per game
-            ev, team = match_event(mk, events)
-            if ev is None:
-                continue
-            try:
-                start = datetime.datetime.fromisoformat(
-                    ev["commence_time"].replace("Z", "+00:00")).astimezone(ET)
-            except Exception:
-                continue
-            if not (start - datetime.timedelta(hours=HOURS_BEFORE) <= now
-                    <= start - datetime.timedelta(minutes=LOCKOUT_MIN)):
-                continue                                # pregame window only
-            fair_all, src = fair_from_books(ev)
-            if not fair_all or team not in fair_all:
-                continue
-            bid, ask = mk.get("yes_bid") or 0, mk.get("yes_ask") or 0
-            if not bid or not ask or ask - bid > MAX_SPREAD_C:
-                continue                                # illiquid / wide
-            mid = (bid + ask) / 2.0
-            fair = FAIR_W * fair_all[team] + (1 - FAIR_W) * (mid / 100.0)
-            if not (MIN_P <= fair <= MAX_P):
-                continue                                # no longshots
-            entry = bid                                 # maker: join the bid
-            if not (MIN_PRICE <= entry <= MAX_PRICE):
-                continue
-            edge_c = fair * 100 - entry                 # maker fee ~ $0 at our size
-            if edge_c < MIN_EDGE_C:
-                continue
-            out.append((mk, team, fair, edge_c, src,
-                        start.isoformat(timespec="minutes")))
+            if tk in self.bets or tk.rsplit("-", 1)[0] in open_events:
+                continue                                # one bet per game per series
+            kind = mk.get("_kind", "ml")
+            if kind == "ml":
+                ev, team = match_event(mk, events)
+                if ev is None:
+                    continue
+                start = self._start_of(ev)
+                if start is None:
+                    continue
+                if not (start - datetime.timedelta(hours=HOURS_BEFORE) <= now
+                        <= start - datetime.timedelta(minutes=LOCKOUT_MIN)):
+                    continue                            # pregame window only
+                fair_all, src = fair_from_books(ev)
+                if not fair_all or team not in fair_all:
+                    continue
+                c = self._sided(mk, fair_all[team], src,
+                                start.isoformat(timespec="minutes"),
+                                team)
+                if c:
+                    out.append(c)
+            elif kind == "total":
+                pt = mk.get("floor_strike")
+                if pt is None or (mk.get("strike_type") or "greater") != "greater":
+                    continue
+                if abs(float(pt) * 2 - round(float(pt) * 2)) > 1e-6 \
+                        or float(pt) == int(float(pt)):
+                    continue                            # half-point lines only (no pushes)
+                ev = match_event_by_time(mk, events)
+                if ev is None:
+                    continue
+                start = self._start_of(ev)
+                if start is None:
+                    continue
+                if not (start - datetime.timedelta(hours=HOURS_BEFORE) <= now
+                        <= start - datetime.timedelta(minutes=LOCKOUT_MIN)):
+                    continue
+                tf = totals_from_books(ev)
+                got = tf.get(float(pt))
+                if not got:
+                    continue                            # need the SAME line at the books
+                p_over, src = got
+                c = self._sided(mk, p_over, src,
+                                start.isoformat(timespec="minutes"),
+                                "Over %.1f" % float(pt))
+                if c:
+                    out.append(c)
         out.sort(key=lambda t: -t[3])
         return out
 
@@ -364,10 +488,12 @@ class SharpEV:
         bankroll = self.cash + open_stake
         placed = 0
         budget = MAX_PER_DAY - self._placed_today()
-        for mk, team, fair, edge_c, src, start_iso in cands:
+        for mk, label, side, edge_c, fair, src, start_iso in cands:
             if placed >= budget or len(self.bets) >= MAX_OPEN:
                 break
-            entry = mk["yes_bid"]
+            if mk["ticker"].rsplit("-", 1)[0] in {t.rsplit("-", 1)[0] for t in self.bets}:
+                continue                                 # filled a sibling this pass
+            entry = mk["yes_bid"] if side == "yes" else 100 - mk["yes_ask"]
             if mode == "probe":
                 count = max(1, PROBE_COST_CENTS // entry)
             else:
@@ -382,9 +508,11 @@ class SharpEV:
             self.cash -= cost
             self.placed += 1
             ots = datetime.datetime.now().isoformat(timespec="seconds")
+            team = label if side == "yes" else (
+                "not " + label if label.startswith("Over") else label + " (fade)")
             self.bets[mk["ticker"]] = {
                 "sport": mk.get("_sport", ""), "game": (mk.get("title") or "")[:60],
-                "team": team, "side": "yes", "entry": entry, "count": count,
+                "team": team, "side": side, "entry": entry, "count": count,
                 "pside": round(fair, 3), "edge": round(edge_c, 1), "fee": 0,
                 "src": src, "start": start_iso, "ots": ots, "era": ERA}
             self._log([ots, "PLACE", mk.get("_sport", ""), (mk.get("title") or "")[:60],
@@ -413,13 +541,18 @@ class SharpEV:
                 self.save()
                 return 0, 0
             self.last_fetch = now.isoformat(timespec="seconds")
-            for sport, series in SPORTS.items():
+            for sport, series_map in SPORTS.items():
                 events = self.fetch_odds(sport)
                 if not events:
                     continue
-                markets = self.kalshi_markets(series)
-                for mk in markets:
-                    mk["_sport"] = sport
+                markets = []
+                for kind, series in series_map.items():
+                    if kind == "total" and "totals" not in ODDS_MARKETS:
+                        continue
+                    for mk in self.kalshi_markets(series):
+                        mk["_sport"] = sport
+                        mk["_kind"] = kind
+                        markets.append(mk)
                 cands = self.candidates(events, markets)
                 n_cand += len(cands)
                 n_placed += self.place(cands)
