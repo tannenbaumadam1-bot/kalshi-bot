@@ -27,6 +27,7 @@ Wants=network-online.target
 [Service]
 WorkingDirectory=$APP
 ExecStart=/usr/bin/python3 $APP/paper.py --config=config_cloud.yaml --start=100
+StartLimitIntervalSec=0
 Restart=always
 RestartSec=10
 [Install]
@@ -44,6 +45,7 @@ Environment=DASH_HOST=0.0.0.0
 Environment=DASH_PORT=8765
 Environment=DASH_TOKEN=$TOKEN
 ExecStart=/usr/bin/python3 $APP/dashboard.py
+StartLimitIntervalSec=0
 Restart=always
 RestartSec=10
 [Install]
