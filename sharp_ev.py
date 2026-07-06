@@ -542,9 +542,8 @@ class SharpEV:
                 return 0, 0
             self.last_fetch = now.isoformat(timespec="seconds")
             for sport, series_map in SPORTS.items():
-                events = self.fetch_odds(sport)
-                if not events:
-                    continue
+                # credit guard: Kalshi first (free) - only spend odds credits on
+                # sports that have QUOTED near-term Kalshi markets right now
                 markets = []
                 for kind, series in series_map.items():
                     if kind == "total" and "totals" not in ODDS_MARKETS:
@@ -553,6 +552,11 @@ class SharpEV:
                         mk["_sport"] = sport
                         mk["_kind"] = kind
                         markets.append(mk)
+                if not any(m.get("yes_bid") for m in markets):
+                    continue                       # out of season / nothing live
+                events = self.fetch_odds(sport)
+                if not events:
+                    continue
                 cands = self.candidates(events, markets)
                 n_cand += len(cands)
                 n_placed += self.place(cands)
