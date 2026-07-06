@@ -16,7 +16,7 @@ import os
 import threading
 import time
 import webbrowser
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler, HTTPServer, ThreadingHTTPServer
 
 try:
     import requests
@@ -33,6 +33,27 @@ CUR_ERA = "v6-ens"      # bets from the current model; everything else = legacy
 
 _PRICES = {"ts": 0.0, "by_ticker": {}}
 _PRICES_LOCK = threading.Lock()
+_WANT = {"tickers": []}   # open tickers a background thread keeps marks fresh for
+
+
+def _price_loop():
+    """Refresh marks OFF the request path so a slow Kalshi call never hangs a
+    page load (the #1 cause of the dashboard looking 'down')."""
+    while True:
+        try:
+            ts = list(_WANT["tickers"])
+            if ts:
+                fetch_prices(ts)
+        except Exception:
+            pass
+        time.sleep(30)
+
+
+def _safe_data():
+    try:
+        return build_data()
+    except Exception as e:
+        return {"running": False, "error": str(e)[:200]}
 
 
 def _cents(mk, key):
@@ -198,7 +219,8 @@ def build_data():
             pass
     # live marks on open positions
     tickers = [b.get("ticker") for b in out["open"] if b.get("ticker")]
-    prices = fetch_prices(tickers)
+    _WANT["tickers"] = tickers
+    prices = dict(_PRICES["by_ticker"])
     unreal, priced = 0.0, 0
     for b in out["open"]:
         px = prices.get(b.get("ticker") or "")
@@ -554,7 +576,7 @@ class H(BaseHTTPRequestHandler):
 
     def do_GET(self):
         if self.path.startswith("/public"):
-            body = json.dumps(build_data()).encode()
+            body = json.dumps(_safe_data()).encode()
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(body)))
@@ -571,7 +593,7 @@ class H(BaseHTTPRequestHandler):
                     self.end_headers()
                     self.wfile.write(b'{"auth":false}')
                     return
-            body = json.dumps(build_data()).encode()
+            body = json.dumps(_safe_data()).encode()
             ctype = "application/json"
         else:
             body = PAGE.encode()
@@ -586,12 +608,11 @@ class H(BaseHTTPRequestHandler):
 def main():
     url = f"http://127.0.0.1:{PORT}"
     try:
-        srv = HTTPServer((HOST, PORT), H)
+        srv = ThreadingHTTPServer((HOST, PORT), H)
     except OSError as e:
         print(f"Could not start dashboard on {url}: {e}")
         print("If it says 'address already in use', a dashboard is already")
         print("running - just open the address in your browser.")
-        input("Press Enter to close...")
         return 1
     shown = url + (f"/?token={TOKEN}" if TOKEN else "")
     print(f"Dashboard running at {shown}")
@@ -600,6 +621,7 @@ def main():
         threading.Timer(1.0, lambda: webbrowser.open(shown)).start()
     else:
         print("(Public mode - open the address above from any device.)")
+    threading.Thread(target=_price_loop, daemon=True).start()
     try:
         srv.serve_forever()
     except KeyboardInterrupt:
