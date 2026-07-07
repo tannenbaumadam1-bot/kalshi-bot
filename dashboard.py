@@ -277,7 +277,7 @@ def build_data():
 
 PAGE = r"""<!doctype html><html><head><meta charset=utf-8>
 <meta name=viewport content="width=device-width,initial-scale=1">
-<title>Weather Book &mdash; Kalshi</title>
+<title>Leonard the Bot</title>
 <style>
 :root{--bg:#0a0f1a;--panel:#0f1624;--panel2:#0c1220;--ink:#e6ecf7;--mut:#7d90ad;
 --line:#1c2739;--grn:#2fd08c;--red:#f4695f;--amb:#e8b44c;--acc:#5b8def}
@@ -335,12 +335,12 @@ td.num,th.num{text-align:right}
 .eras table{font-size:12.5px}
 </style></head><body><div class=wrap>
 <div class=hdr>
-  <h1>Trading Bot &middot; Paper</h1><span class=tag>3 strategies</span>
+  <h1>Leonard the Bot &middot; Paper</h1><span class=tag>4 strategies</span>
   <span class=live id=live></span>
   <span class=upd id=upd><span class=dot id=dot></span>loading&hellip;</span>
 </div>
 <div id=combined style="margin:14px 0 2px;"></div>
-<h2>Strategy portfolio <span style="text-transform:none;letter-spacing:0">(3 uncorrelated paper books)</span></h2>
+<h2>Strategy portfolio <span style="text-transform:none;letter-spacing:0">(4 uncorrelated paper books)</span></h2>
 <div id=strat style="display:grid;grid-template-columns:repeat(auto-fit,minmax(205px,1fr));gap:12px;"></div>
 <h2>Weather book <span style="text-transform:none;letter-spacing:0">(forecast edge &mdash; calibration-gated)</span></h2>
 <div class=hero>
@@ -620,6 +620,10 @@ async function load(){
       tile('Open bets',(ss.open_bets||0),''),
       tile('Calibration gate',(ss.gate||'probe')+' '+(ss.gate_n||0)+'/30','sizing is earned'),
       tile('Placed',(ss.placed||0),'since inception'),
+      tile('Last scan',(S.last_scan&&S.last_scan.ts)?S.last_scan.ts.replace('T',' ').slice(5,16):'\u2013',
+        (S.last_scan&&S.last_scan.ts)?((S.last_scan.evaluated||0)+' edges eval \u00b7 best '
+          +(S.last_scan.best_edge!=null?S.last_scan.best_edge+'\u00a2':'\u2013')
+          +(S.last_scan.bar!=null?' vs '+S.last_scan.bar+'\u00a2 bar':'')):'no scan yet'),
     ].join('');
     const rows=[];
     (S.open||[]).forEach(b=>rows.push('<tr><td class=mut>'+((b.start||'').slice(5,16).replace('T',' '))+'</td><td><span class=mkt>'+(b.game||'')+'</span></td><td>'+(b.team||'')+'</td>'
@@ -629,7 +633,7 @@ async function load(){
       rows.push('<tr><td class=mut>'+((b.ts||'').slice(5,16).replace('T',' '))+'</td><td><span class=mkt>'+(b.game||'')+'</span></td><td>'+(b.team||'')+'</td>'
       +'<td class=num>'+Math.round((b.pside||0)*100)+'%</td><td class=num>'+b.entry+'&cent;</td><td class=num>+'+(b.edge||0)+'&cent;</td><td class=num>'+b.count+'</td>'
       +'<td><span class="'+(won?'won':'lost')+'">'+(won?'WON':'LOST')+'</span></td><td class=num><span class="'+C(b.pnl)+'">'+M(b.pnl)+'</span></td></tr>');});
-    $('sevtbl').innerHTML=rows.join('')||'<tr><td colspan=9 class=empty>No qualifying edges yet '+((ss.placed||0)===0?'\u2014 waiting for ODDS_API_KEY + first scan.':'.')+'</td></tr>';
+    $('sevtbl').innerHTML=rows.join('')||'<tr><td colspan=9 class=empty>No qualifying edges yet'+((S.last_scan&&S.last_scan.ts)?' \u2014 scanning; Kalshi is tracking the sharp books inside the edge bar.':' \u2014 waiting for first scan.')+'</td></tr>';
   } else { $('sev').innerHTML='<div class=tile><div class=k>Sharp +EV</div><div class=v>&ndash;</div><div class=s>starting&hellip;</div></div>';
     $('sevtbl').innerHTML='<tr><td colspan=9 class=empty>No state yet.</td></tr>'; }
   $('foot').innerHTML='Paper account &mdash; no real money at risk. NAV = cash + open positions at current market bid (marks refresh ~60s). '

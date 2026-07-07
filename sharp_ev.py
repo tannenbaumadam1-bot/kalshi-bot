@@ -50,10 +50,16 @@ ODDS = "https://api.the-odds-api.com/v4/sports/{sport}/odds"
 SSIM = os.path.join("logs", "sharpev_sim.json")
 SSTATE = os.path.join("logs", "sharpev_state.json")
 SLOG = os.path.join("logs", "sharpev_bets.csv")
+SSHADOW = os.path.join("logs", "sharpev_shadow.csv")   # every evaluated edge, bet or not
 
 ERA = "ev1-sharp"
 START_CENTS = int(os.environ.get("SEV_START_C", "10000"))
-MIN_EDGE_C = float(os.environ.get("SEV_MIN_EDGE_C", "4"))      # net edge to act
+MIN_EDGE_C = float(os.environ.get("SEV_MIN_EDGE_C", "4"))      # net edge to act (post-gate)
+# Probe mode uses a LOWER bar: maker fee ~$0 and stakes <=60c mean any positive
+# shrunk edge is +EV in expectation; the point of probe is COLLECTING calibration
+# data, and a 4c bar after 0.70 shrinkage (~5.7c raw sharp-vs-mid disagreement)
+# produced ZERO bets against pro-anchored Kalshi MLB lines. 2c shrunk = ~2.9c raw.
+PROBE_MIN_EDGE_C = float(os.environ.get("SEV_PROBE_MIN_EDGE_C", "2"))
 MIN_P, MAX_P = 0.20, 0.80          # fair-prob band: no longshots (Adam's rule)
 MIN_PRICE, MAX_PRICE = 20, 80      # entry-price band
 MAX_SPREAD_C = int(os.environ.get("SEV_MAX_SPREAD_C", "6"))
@@ -266,6 +272,8 @@ class SharpEV:
         self.history = []
         self.last_fetch = ""           # iso ts of last odds pull
         self.warned_no_key = False
+        self._shadow_rows = []         # per-scan: every band-qualifying edge seen
+        self.last_scan = {}            # diagnostics for the dashboard
         self.load()
 
     # ---- persistence (same contract as the other books) ----
@@ -273,7 +281,8 @@ class SharpEV:
         return {"start": self.start, "cash": self.cash, "bets": self.bets,
                 "realized": self.realized, "wins": self.wins, "losses": self.losses,
                 "fees": self.fees, "placed": self.placed,
-                "last_fetch": self.last_fetch, "history": self.history[-100:]}
+                "last_fetch": self.last_fetch, "last_scan": self.last_scan,
+                "history": self.history[-100:]}
 
     def load(self):
         try:
@@ -283,6 +292,7 @@ class SharpEV:
             self.bets = d.get("bets", {})
             self.history = d.get("history", [])
             self.last_fetch = d.get("last_fetch", "")
+            self.last_scan = d.get("last_scan", {})
         except Exception:
             pass
 
@@ -292,6 +302,7 @@ class SharpEV:
             json.dump(self.to_dict(), open(SSIM, "w"))
             st = {"updated": datetime.datetime.now().isoformat(timespec="seconds"),
                   "summary": self.summary(),
+                  "last_scan": self.last_scan,
                   "open": [dict(b, ticker=tk) for tk, b in self.bets.items()],
                   "settled": list(reversed(self.history[-50:]))}
             json.dump(st, open(SSTATE, "w"))
@@ -396,9 +407,12 @@ class SharpEV:
         n += sum(1 for h in self.history if (h.get("ots") or "")[:10] == today)
         return n
 
-    def _sided(self, mk, fair_yes, src, start_iso, label):
+    def _sided(self, mk, fair_yes, src, start_iso, label, min_edge=None):
         """Try both sides of one market -> best qualifying (cand tuple) or None.
-        YES entry = join yes_bid; NO entry = join no_bid = 100 - yes_ask."""
+        YES entry = join yes_bid; NO entry = join no_bid = 100 - yes_ask.
+        Every band-qualifying side is shadow-logged (edge distribution data)."""
+        if min_edge is None:
+            min_edge = MIN_EDGE_C
         bid, ask = mk.get("yes_bid") or 0, mk.get("yes_ask") or 0
         if not bid or not ask or ask - bid > MAX_SPREAD_C:
             return None                                 # illiquid / wide
@@ -411,7 +425,13 @@ class SharpEV:
             if not (MIN_PRICE <= entry <= MAX_PRICE):
                 continue
             edge_c = p * 100 - entry                    # maker fee ~ $0 at our size
-            if edge_c < MIN_EDGE_C:
+            if getattr(self, "_shadow_rows", None) is None:
+                self._shadow_rows = []                  # tolerate bare __new__ (tests)
+            self._shadow_rows.append(
+                [datetime.datetime.now().isoformat(timespec="seconds"),
+                 mk.get("_sport", ""), mk.get("_kind", ""), mk.get("ticker", ""),
+                 side, round(p, 4), entry, mid, round(edge_c, 2), src, start_iso])
+            if edge_c < min_edge:
                 continue
             if best is None or edge_c > best[3]:
                 best = (mk, label, side, edge_c, p, src, start_iso)
@@ -429,6 +449,8 @@ class SharpEV:
         """Filter pipeline -> [(mk, label, side, edge_c, fair_side, src, start)]."""
         now = now or datetime.datetime.now(ET)
         out = []
+        mode, _ = self._gate()
+        min_edge = MIN_EDGE_C if mode == "scale" else PROBE_MIN_EDGE_C
         open_events = {tk.rsplit("-", 1)[0] for tk in self.bets}
         for mk in markets:
             tk = mk.get("ticker", "")
@@ -450,7 +472,7 @@ class SharpEV:
                     continue
                 c = self._sided(mk, fair_all[team], src,
                                 start.isoformat(timespec="minutes"),
-                                team)
+                                team, min_edge=min_edge)
                 if c:
                     out.append(c)
             elif kind == "total":
@@ -476,7 +498,7 @@ class SharpEV:
                 p_over, src = got
                 c = self._sided(mk, p_over, src,
                                 start.isoformat(timespec="minutes"),
-                                "Over %.1f" % float(pt))
+                                "Over %.1f" % float(pt), min_edge=min_edge)
                 if c:
                     out.append(c)
         out.sort(key=lambda t: -t[3])
@@ -541,6 +563,9 @@ class SharpEV:
                 self.save()
                 return 0, 0
             self.last_fetch = now.isoformat(timespec="seconds")
+            self._shadow_rows = []
+            scan = {"ts": self.last_fetch, "sports": [], "evaluated": 0,
+                    "best_edge": None, "bar": None}
             for sport, series_map in SPORTS.items():
                 # credit guard: Kalshi first (free) - only spend odds credits on
                 # sports that have QUOTED near-term Kalshi markets right now
@@ -557,11 +582,42 @@ class SharpEV:
                 events = self.fetch_odds(sport)
                 if not events:
                     continue
+                before = len(self._shadow_rows)
                 cands = self.candidates(events, markets)
                 n_cand += len(cands)
                 n_placed += self.place(cands)
+                scan["sports"].append(
+                    {"sport": sport, "kalshi_mkts": len(markets),
+                     "events": len(events),
+                     "evaluated": len(self._shadow_rows) - before,
+                     "cands": len(cands)})
+            scan["evaluated"] = len(self._shadow_rows)
+            if self._shadow_rows:
+                scan["best_edge"] = max(r[8] for r in self._shadow_rows)
+            mode, _ = self._gate()
+            scan["bar"] = MIN_EDGE_C if mode == "scale" else PROBE_MIN_EDGE_C
+            self.last_scan = scan
+            self._flush_shadow()
         self.save()
         return n_cand, n_placed
+
+    def _flush_shadow(self):
+        """Append this scan's evaluated edges to the shadow CSV - free
+        calibration data (edge distribution) whether or not we bet."""
+        if not self._shadow_rows:
+            return
+        try:
+            os.makedirs("logs", exist_ok=True)
+            new = not os.path.exists(SSHADOW)
+            with open(SSHADOW, "a", newline="") as f:
+                w = csv.writer(f)
+                if new:
+                    w.writerow(["ts", "sport", "kind", "ticker", "side", "fair",
+                                "entry_c", "mid_c", "edge_c", "src", "start"])
+                w.writerows(self._shadow_rows)
+        except Exception:
+            pass
+        self._shadow_rows = []
 
 
 if __name__ == "__main__":
@@ -599,6 +655,7 @@ if __name__ == "__main__":
         p.start = 10000; p.cash = 10000.0; p.bets = {}; p.realized = 0.0
         p.wins = p.losses = p.placed = 0; p.fees = 0.0; p.history = []
         p.last_fetch = ""; p.warned_no_key = False
+        p._shadow_rows = []; p.last_scan = {}
         cands = p.candidates([ev], [mk], now=now)
         assert len(cands) == 1 and cands[0][3] >= MIN_EDGE_C     # pinnacle 62% vs 50c bid
         # longshot rejected even with huge edge
@@ -611,6 +668,22 @@ if __name__ == "__main__":
         assert p.candidates([dict(ev, commence_time=(now - datetime.timedelta(minutes=5))
                              .astimezone(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"))],
                             [mk], now=now) == []
+        # probe-mode bar: a 2-4c edge is bettable while probing (data collection)
+        # pinnacle fair 61.9% -> blended fair vs bid 58 = ~3.1c edge
+        mk4 = dict(mk, yes_bid=58, yes_ask=60)
+        c4 = p.candidates([ev], [mk4], now=now)
+        assert len(c4) == 1 and PROBE_MIN_EDGE_C <= c4[0][3] < MIN_EDGE_C
+        # ...but the SAME market is rejected once the gate passes (scale mode)
+        p2 = SharpEV.__new__(SharpEV)
+        p2.start = 10000; p2.cash = 10000.0; p2.bets = {}; p2.realized = 0.0
+        p2.wins = p2.losses = p2.placed = 0; p2.fees = 0.0
+        p2.last_fetch = ""; p2.warned_no_key = False
+        p2._shadow_rows = []; p2.last_scan = {}
+        p2.history = [{"era": ERA, "outcome": 1, "pnl": 10, "pside": 0.97}] * 30
+        assert p2._gate()[0] == "scale"
+        assert p2.candidates([ev], [mk4], now=now) == []
+        # shadow rows were recorded for evaluated sides regardless of betting
+        assert any(r[3] == mk4["ticker"] for r in p._shadow_rows)
         # disagreement guard
         ev2 = dict(ev, bookmakers=[
             {"key": "bk1", "markets": [{"key": "h2h", "outcomes": [
@@ -632,7 +705,7 @@ if __name__ == "__main__":
         os.makedirs("logs", exist_ok=True)
         p.settle()
         assert p.wins == 1 and p.realized > 0
-        print("sharp_ev self-test PASSED (devig, parse, match, filters, probe, settle)")
+        print("sharp_ev self-test PASSED (devig, parse, match, filters, probe bar, shadow, settle)")
     else:
         p = SharpEV()
         nc, np_ = p.step(force=True)
