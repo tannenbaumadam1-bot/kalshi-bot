@@ -15,6 +15,7 @@ import requests
 from kalshibot.fees import fee_cents
 import weather_edge as we
 import weather_ensemble as wx
+import weather_shadow as ws
 
 WSIM = os.path.join("logs", "weather_sim.json")
 WBETS = os.path.join("logs", "weather_bets.csv")
@@ -289,6 +290,10 @@ class WeatherPaper:
         self.settle()
         self.exit_check()
         self.place()
+        try:
+            ws.settle_daily()   # resolve shadow-logged markets (1x/day, bounded)
+        except Exception:
+            pass
         self.save()
 
     def summary(self):

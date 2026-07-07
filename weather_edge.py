@@ -27,6 +27,7 @@ import math, re, sys, datetime
 import requests
 from kalshibot.fees import fee_cents
 import weather_ensemble as wx
+import weather_shadow as ws
 
 KALSHI = "https://api.elections.kalshi.com/trade-api/v2"
 ENSEMBLE_API = "https://ensemble-api.open-meteo.com/v1/ensemble"
@@ -213,6 +214,7 @@ def scan(min_edge_cents=4, max_edge_cents=20, verbose=True):
     mkts = find_temp_markets()
     fc_cache = {}
     edges = []
+    shadow_rows = []
     src_tot = 0
     for mk in mkts:
         if mk["yes_bid"] <= 0 or mk["yes_ask"] <= 0:
@@ -234,6 +236,15 @@ def scan(min_edge_cents=4, max_edge_cents=20, verbose=True):
         src_tot += nsrc
         if model is None:
             continue
+        # SHADOW LOG: record the RAW model prob for EVERY evaluated market
+        # (bet or not, tails included) - free calibration data at ~10x the
+        # rate of settled bets. Joined to outcomes by weather_shadow.settle.
+        shadow_rows.append({
+            "ticker": mk["ticker"], "city": mk["city"], "date": mk["date"],
+            "strike": mk["strike"], "hl": "lo" if mk["is_low"] else "hi",
+            "hrs": round(mk["hrs"], 1), "n_sources": nsrc,
+            "model_p": round(model, 4),
+            "mkt_bid": mk["yes_bid"], "mkt_ask": mk["yes_ask"]})
         # stay out of the tails: extreme strikes are where any model is least
         # reliable; only bet genuinely-uncertain strikes.
         if model < 0.20 or model > 0.80:
@@ -270,6 +281,10 @@ def scan(min_edge_cents=4, max_edge_cents=20, verbose=True):
         mk["entry_price"] = entry                   # maker price place() will use
         mk["maker"] = True
         edges.append((ev, side, mk, fair, ftemp))
+    try:
+        ws.log(shadow_rows)
+    except Exception:
+        pass
     edges.sort(key=lambda e: -e[0])
     if verbose:
         cd = len(fc_cache)
