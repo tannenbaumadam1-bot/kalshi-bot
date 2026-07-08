@@ -91,6 +91,8 @@ TRADES_PATH = os.path.join("logs", "paper_trades.csv")
 STATE_PATH = os.path.join("logs", "paper_state.json")
 SIM_PATH = os.path.join("logs", "paper_sim.json")   # persisted portfolio (survives restarts)
 LOCK_PATH = os.path.join("logs", "paper.lock")     # single-instance guard
+WATCHDOG_SEC = int(os.environ.get("PAPER_WATCHDOG_SEC", "1800"))  # hang guard; 0 disables
+_HEARTBEAT = {"ts": time.time()}                   # last main-loop progress
 
 
 def _f(v):
@@ -420,11 +422,33 @@ def _lock_fresh():
 
 
 def touch_lock():
+    _HEARTBEAT["ts"] = time.time()
     try:
         with open(LOCK_PATH, "w") as f:
             f.write(str(os.getpid()))
     except Exception:
         pass
+
+
+def _watchdog_tripped(last_beat, now, limit):
+    """Pure decision: has the main loop been silent past the limit?"""
+    return limit > 0 and (now - last_beat) > limit
+
+
+def _watchdog():
+    """Daemon thread: if the main loop stops heartbeating (hung network call,
+    deadlock - the 2026-07-07 overnight wedge), force-exit so systemd
+    Restart=always brings up a fresh process. The PID-aware lock ignores the
+    dead owner, so restart is clean."""
+    while True:
+        time.sleep(60)
+        if _watchdog_tripped(_HEARTBEAT["ts"], time.time(), WATCHDOG_SEC):
+            print(f"WATCHDOG: no heartbeat for >{WATCHDOG_SEC}s - forcing restart")
+            try:
+                os.remove(LOCK_PATH)
+            except OSError:
+                pass
+            os._exit(86)   # skip finally/atexit; systemd restarts us
 
 
 def write_state(sim, book, enabled=True):
@@ -491,6 +515,8 @@ def main():
         print(f"If you're certain none is running, delete {LOCK_PATH} and retry.")
         return 1
     touch_lock()
+    if WATCHDOG_SEC > 0:
+        threading.Thread(target=_watchdog, daemon=True).start()
 
     cfg = load_config(cfg_path)
     m = cfg.markets
