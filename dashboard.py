@@ -445,7 +445,11 @@ function drawDaily(el,daily){
     const h=half*Math.abs(d[1])/mx;
     const y=d[1]>=0?zero-h:zero;
     const col=d[1]>=0?'#2fd08c':'#f4695f';
+    const lab=(d[1]>=0?'+':'\u2212')+Math.abs(d[1]).toFixed(2);
+    let ly=d[1]>=0?y-4:zero+h+9;
+    if(d[1]>=0&&ly<pt+7)ly=y+9; if(d[1]<0&&ly>H-pb+7)ly=H-pb+7;
     g+='<rect x="'+x.toFixed(1)+'" y="'+y.toFixed(1)+'" width="'+bw.toFixed(1)+'" height="'+Math.max(1,h).toFixed(1)+'" rx="2" fill="'+col+'" opacity=".85"/>'
+      +'<text x="'+(x+bw/2).toFixed(1)+'" y="'+ly.toFixed(1)+'" fill="'+col+'" font-size="8" text-anchor="middle">'+lab+'</text>'
       +'<text x="'+(x+bw/2).toFixed(1)+'" y="'+(H-8)+'" fill="#7d90ad" font-size="8.5" text-anchor="middle">'+d[0].slice(5)+'</text>';});
   el.innerHTML=g;
 }
