@@ -31,6 +31,9 @@ SHADOW = os.path.join("logs", "weather_shadow.csv")
 RESULTS = os.path.join("logs", "weather_shadow_results.csv")
 STATE = os.path.join("logs", "weather_shadow_state.json")
 LEARNED = os.path.join("logs", "learned_weight.json")
+# v7: shadow rows logged BEFORE the ticker-date fix priced the WRONG day -
+# they must not teach the blend weight. Only fit on rows after the deploy.
+FIT_SINCE = os.environ.get("WX_FIT_SINCE", "2026-07-10T16:30")
 DEDUPE_HOURS = 3
 MAX_LOOKUPS = 80
 COLS = ["ts", "ticker", "city", "date", "strike", "hl", "hrs",
@@ -167,8 +170,9 @@ def settle_daily():
     return settle()
 
 
-def joined():
-    """Earliest shadow row per settled ticker: [{'mp','out','mid'}, ...]."""
+def joined(since=None):
+    """Earliest shadow row per settled ticker: [{'mp','out','mid'}, ...].
+    since: ISO ts - skip prediction rows logged before it."""
     res = {}
     if os.path.exists(RESULTS):
         for r in csv.DictReader(open(RESULTS)):
@@ -180,6 +184,8 @@ def joined():
     if os.path.exists(SHADOW):
         for r in csv.DictReader(open(SHADOW)):
             tk = r.get("ticker")
+            if since and (r.get("ts") or "") < since:
+                continue
             if tk in res and tk not in seen:
                 seen.add(tk)
                 try:
@@ -194,9 +200,10 @@ def fit_weight(rows=None):
     """Grid-search the Brier-minimizing blend weight w for
     fair = w*model + (1-w)*market_mid on the joined shadow data.
     This replaces per-era MODEL_WEIGHT guesses with measurement."""
-    rows = joined() if rows is None else rows
+    rows = joined(since=FIT_SINCE) if rows is None else rows
     n = len(rows)
-    out = {"n": n, "ts": datetime.datetime.now().isoformat(timespec="seconds")}
+    out = {"n": n, "since": FIT_SINCE,
+           "ts": datetime.datetime.now().isoformat(timespec="seconds")}
     if not n:
         return out
     def brier(w):
@@ -230,7 +237,7 @@ def fit_daily():
 
 def report_data():
     """Machine-readable shadow calibration (for the dashboard /public feed)."""
-    rows = joined()
+    rows = joined()          # buckets show ALL history (context)
     buckets = []
     for lo, hi in [(0, .2), (.2, .4), (.4, .6), (.6, .8), (.8, 1.01)]:
         sel = [r for r in rows if lo <= r["mp"] < hi]
