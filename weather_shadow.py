@@ -247,7 +247,8 @@ def report_data():
                 "model": round(100 * sum(r["mp"] for r in sel) / len(sel), 1),
                 "actual": round(100 * sum(r["out"] for r in sel) / len(sel), 1),
                 "mkt": round(100 * sum(r["mid"] for r in sel) / len(sel), 1)})
-    return {"n": len(rows), "buckets": buckets, "fit": fit_weight(rows)}
+    # fit uses its own POST-CUTOFF join (buckets above show full history)
+    return {"n": len(rows), "buckets": buckets, "fit": fit_weight()}
 
 
 def report():
