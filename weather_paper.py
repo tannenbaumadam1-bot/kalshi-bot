@@ -407,15 +407,36 @@ class WeatherPaper:
                 b["exit_streak"] = 0
 
     def step(self):
-        self.settle()
-        self.exit_check()
-        self.place()
+        """v7.1: each phase is isolated and state is saved after EVERY phase,
+        so one bad phase can neither lose the others' work nor hide - errors
+        land in logs/weather_err.txt, which the dashboard serves on /public."""
+        import traceback
+        errs = []
+        for name, fn in (("settle", self.settle),
+                         ("exit", self.exit_check),
+                         ("place", self.place)):
+            try:
+                fn()
+            except Exception:
+                errs.append("%s: %s" % (name, traceback.format_exc(limit=4)))
+            self.save()
         try:
             ws.settle_daily()   # resolve shadow-logged markets (1x/day, bounded)
         except Exception:
             pass
         try:
             ws.fit_daily()      # refresh learned blend weight (1x/day)
+        except Exception:
+            pass
+        try:
+            os.makedirs("logs", exist_ok=True)
+            ep = os.path.join("logs", "weather_err.txt")
+            if errs:
+                with open(ep, "w") as f:
+                    f.write(datetime.datetime.now().isoformat(timespec="seconds")
+                            + "\n" + "\n".join(errs))
+            elif os.path.exists(ep):
+                os.remove(ep)
         except Exception:
             pass
         self.save()

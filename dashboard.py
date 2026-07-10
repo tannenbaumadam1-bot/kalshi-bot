@@ -266,6 +266,13 @@ def build_data():
     out["curve"] = curve
     out["kpi"] = compute_kpis(out)
     out["shadow"] = _shadow_report()
+    # weather step errors (written by weather_paper.step; absent = healthy)
+    err_path = os.path.join("logs", "weather_err.txt")
+    if os.path.exists(err_path):
+        try:
+            out["weather_err"] = open(err_path).read()[:1200]
+        except Exception:
+            pass
     # live trader state (real money), if present
     live_path = os.path.join("logs", "weather_live_state.json")
     if os.path.exists(live_path):

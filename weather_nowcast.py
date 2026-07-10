@@ -20,7 +20,7 @@ indicator. Observation jitter is small (obs vs CLI rounding), so once the
 extreme is locked in the probability saturates - as it should.
 """
 from __future__ import annotations
-import datetime, math
+import datetime, math, time
 import requests
 
 try:
@@ -142,16 +142,28 @@ def final_prob(run, members, strike, is_low, jitter=OBS_JITTER):
     return max(0.0, min(1.0, p))
 
 
+_DS_CACHE = {}
+DS_TTL = 600      # one obs+ensemble fetch per city-day per 10 min
+
+
 def day_state(city, date_str, lat, lon, now_local=None):
     """Everything needed to price every strike of one city-day, one fetch set.
-    Returns {'run_max','run_min','n_obs','rem_max':[..],'rem_min':[..]} or None."""
+    Returns {'run_max','run_min','n_obs','rem_max':[..],'rem_min':[..]} or None.
+    Cached DS_TTL seconds so exit_check + scan share one fetch per city-day."""
+    key = (city, date_str)
+    hit = _DS_CACHE.get(key)
+    if hit and time.time() - hit[0] < DS_TTL:
+        return hit[1]
     nl = now_local or city_now(city)
     obs = fetch_obs(city, date_str, now_local=nl)
     if not obs:
-        return None
-    rmax, rmin = fetch_remaining_members(lat, lon, date_str, nl)
-    return {"run_max": obs["run_max"], "run_min": obs["run_min"],
-            "n_obs": obs["n_obs"], "rem_max": rmax, "rem_min": rmin}
+        st = None
+    else:
+        rmax, rmin = fetch_remaining_members(lat, lon, date_str, nl)
+        st = {"run_max": obs["run_max"], "run_min": obs["run_min"],
+              "n_obs": obs["n_obs"], "rem_max": rmax, "rem_min": rmin}
+    _DS_CACHE[key] = (time.time(), st)
+    return st
 
 
 def prob_from_state(st, strike, is_low, jitter=OBS_JITTER):
