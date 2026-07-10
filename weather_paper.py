@@ -16,6 +16,7 @@ from kalshibot.fees import fee_cents
 import weather_edge as we
 import weather_ensemble as wx
 import weather_shadow as ws
+import weather_nowcast as nc
 
 WSIM = os.path.join("logs", "weather_sim.json")
 WBETS = os.path.join("logs", "weather_bets.csv")
@@ -34,12 +35,31 @@ MAX_BOOK_FRAC = 0.30
 # STAKES ("probe mode") until the current model demonstrates, on its own
 # settled bets, that (a) expectancy is positive and (b) predicted-vs-actual
 # calibration gap is within GATE_MAX_GAP. Only then scale to Kelly sizing.
-ERA = "v6-ens"   # multi-model ensemble forecast (bumped 2026-07-05)
+ERA = "v7-obs"   # nowcast + ticker-date fix + learned blend (bumped 2026-07-10)
 PER_BET_CAP = 0.015        # max bankroll fraction per bet once proven (was 3%)
 PROBE_COST_CENTS = 60      # max cost basis per bet while unproven
 GATE_MIN_N = 30            # settled current-era bets needed before scaling
 GATE_MAX_GAP = 0.05        # max (mean pside - actual win rate) to scale
-MIN_PRICE, MAX_PRICE = 15, 85  # skip longshot tails: <30% bucket won 8% vs 23% predicted
+# v7: MIN_PRICE 15 -> 30. Across every era the 15-30c entries were the loss
+# center (v6: actual 15% win vs ~21c paid); the only +EV bucket was 30c+.
+MIN_PRICE, MAX_PRICE = 30, 85
+# v7: LOW-temp markets were 40/44 of v6 bets and carried all the losses
+# (act 20% vs pred 36.5%). Cap them to half the book allowance until the
+# shadow report proves lo-calibration.
+LO_BOOK_FRAC = 0.50
+# v7: churn killer - after a forecast-based exit, do NOT re-enter the same
+# ticker for this many hours (Phoenix was exit/re-entered 5x in one day).
+COOLDOWN_H = 12
+# v7: an exit must be confirmed on this many CONSECUTIVE checks before selling
+# (single-scan model swings caused -EV churn).
+EXIT_CONFIRMS = 2
+
+
+def _before(iso, cutoff):
+    try:
+        return datetime.datetime.fromisoformat(iso) < cutoff
+    except Exception:
+        return True
 
 
 def fetch_result(ticker):
@@ -65,6 +85,7 @@ class WeatherPaper:
         self.fees = 0.0
         self.placed = 0
         self.history = []   # recent settled bets (with outcomes)
+        self.cooldown = {}  # ticker -> iso ts of forecast-based exit (no re-entry)
         self.load()
 
     # ---- persistence ----
@@ -72,6 +93,7 @@ class WeatherPaper:
         return {"start": self.start, "cash": self.cash, "bets": self.bets,
                 "realized": self.realized, "wins": self.wins, "losses": self.losses,
                 "fees": self.fees, "placed": self.placed,
+                "cooldown": self.cooldown,
                 "history": self.history[-100:]}
 
     def save(self):
@@ -84,7 +106,7 @@ class WeatherPaper:
                   "open": [{"ticker": tk, "city": b["city"], "strike": b["strike"],
                             "hl": b["hl"], "side": b["side"], "entry": b["entry"],
                             "count": b["count"], "pside": round(b["pside"], 2),
-                            "fee": b.get("fee", 0),
+                            "fee": b.get("fee", 0), "src": b.get("src", ""),
                             "ots": b.get("ots", ""), "era": b.get("era", "v2")}
                            for tk, b in self.bets.items()],
                   "settled": list(reversed(self.history[-100:]))}
@@ -107,8 +129,26 @@ class WeatherPaper:
             self.fees = d.get("fees", 0.0)
             self.placed = d.get("placed", 0)
             self.history = d.get("history", [])
+            self.cooldown = d.get("cooldown", {})
         except Exception:
             pass
+
+    def _cooled(self, ticker, now=None):
+        """True if this ticker was forecast-exited within COOLDOWN_H hours."""
+        ts = self.cooldown.get(ticker)
+        if not ts:
+            return False
+        now = now or datetime.datetime.now()
+        try:
+            return (now - datetime.datetime.fromisoformat(ts)).total_seconds() < COOLDOWN_H * 3600
+        except Exception:
+            return False
+
+    def _prune_cooldown(self, now=None):
+        now = now or datetime.datetime.now()
+        cut = now - datetime.timedelta(hours=COOLDOWN_H * 2)
+        self.cooldown = {k: v for k, v in self.cooldown.items()
+                         if not _before(v, cut)}
 
     def _log(self, row):
         try:
@@ -165,15 +205,52 @@ class WeatherPaper:
             return "scale", n
         return "probe", n
 
+    def _calibrate(self, p):
+        """v7: map a model probability through this era's OWN settled
+        pred-vs-actual buckets (Laplace-smoothed, piecewise-linear). Raw psides
+        ran overconfident in every prior era, which inflates Kelly f* and
+        oversizes exactly the worst bets; sizing must use corrected probs."""
+        rows = [h for h in self.history
+                if h.get("era") == ERA and h.get("outcome") in (0, 1)]
+        if len(rows) < GATE_MIN_N:
+            return p
+        pts = []
+        for lo, hi in [(0, .3), (.3, .5), (.5, .7), (.7, 1.01)]:
+            sel = [h for h in rows if lo <= h["pside"] < hi]
+            if len(sel) >= 5:
+                c = sum(h["pside"] for h in sel) / len(sel)
+                a = (sum(h["outcome"] for h in sel) + 1.0) / (len(sel) + 2.0)
+                pts.append((c, a))
+        if not pts:
+            return p
+        pts.sort()
+        if p <= pts[0][0]:               # below first center: scale toward 0
+            c, a = pts[0]
+            return max(0.0, min(1.0, p * a / c)) if c > 0 else p
+        if p >= pts[-1][0]:              # above last center: scale toward 1
+            c, a = pts[-1]
+            return max(0.0, min(1.0, 1 - (1 - p) * (1 - a) / (1 - c))) if c < 1 else p
+        for (c0, a0), (c1, a1) in zip(pts, pts[1:]):
+            if c0 <= p <= c1:
+                t = (p - c0) / max(1e-9, c1 - c0)
+                return max(0.0, min(1.0, a0 + t * (a1 - a0)))
+        return p
+
     def place(self):
         edges = we.scan(min_edge_cents=4, max_edge_cents=20, verbose=False)
         # bankroll = cash + cost basis of open bets (so sizing scales with equity)
         open_stake = sum(b["entry"] * b["count"] for b in self.bets.values())
+        # v7: lo-market concentration cap (the loss center until proven)
+        lo_stake = sum(b["entry"] * b["count"] for b in self.bets.values()
+                       if b.get("hl") == "lo")
         bankroll = self.cash + open_stake
         mode, _gate_n = self._gate()
+        self._prune_cooldown()
         for ev, side, mk, fair, ftemp in edges:
             tk = mk["ticker"]
             if tk in self.bets:
+                continue
+            if self._cooled(tk):          # v7: no re-entry churn after an exit
                 continue
             s = "yes" if side == "YES" else "no"
             # maker entry (rest at the bid) chosen by the scanner; fall back to
@@ -194,8 +271,14 @@ class WeatherPaper:
                 # calibration data collection, not bankroll deployment
                 size = max(1, PROBE_COST_CENTS // price)
             else:
-                # proven (gated) model: quarter-Kelly, hard-capped per bet
-                frac = min(0.25 * f_star, PER_BET_CAP)
+                # proven (gated) model: quarter-Kelly on the CALIBRATION-
+                # CORRECTED probability (v7 - raw psides oversize bad bets),
+                # hard-capped per bet
+                p_cal = self._calibrate(p)
+                f_cal = p_cal - (1 - p_cal) / b_odds
+                if f_cal <= 0:
+                    continue
+                frac = min(0.25 * f_cal, PER_BET_CAP)
                 size = int((frac * bankroll) // price)
             if size < 1:
                 continue
@@ -205,10 +288,17 @@ class WeatherPaper:
             # of bankroll (edges are sorted best-first, so the best fit first)
             if open_stake + price * size > MAX_BOOK_FRAC * bankroll:
                 continue
+            # v7: lo-market cap - lows carried every loss so far; cap their
+            # share of the book allowance until shadow data clears them
+            is_lo = bool(mk["is_low"])
+            if is_lo and lo_stake + price * size > LO_BOOK_FRAC * MAX_BOOK_FRAC * bankroll:
+                continue
             if self.cash - cost < 100:        # keep a $1 reserve
                 continue
             self.cash -= cost
             open_stake += price * size
+            if is_lo:
+                lo_stake += price * size
             self.fees += fee
             pside = fair if s == "yes" else (1 - fair)
             self.bets[tk] = {"side": s, "entry": price, "count": size, "fee": fee,
@@ -216,6 +306,7 @@ class WeatherPaper:
                              "hl": ("lo" if mk["is_low"] else "hi"),
                              "ots": datetime.datetime.now().isoformat(timespec="seconds"),
                              "era": ERA, "maker": maker, "date": mk.get("date", ""),
+                             "src": mk.get("src", "forecast"), "w": mk.get("w", we.MODEL_WEIGHT),
                              "mkt_bid": mk["yes_bid"], "mkt_ask": mk["yes_ask"]}
             self.placed += 1
             self._log([datetime.datetime.now().isoformat(timespec="seconds"), "OPEN",
@@ -229,43 +320,69 @@ class WeatherPaper:
             mk = d.get("market", d)
             yb = int(round(float(mk.get("yes_bid_dollars") or 0) * 100))
             ya = int(round(float(mk.get("yes_ask_dollars") or 0) * 100))
-            return yb, ya
         except Exception:
             return None, None
 
+    def _reprice(self, city, date, lat, lon, strike, is_low):
+        """(p_side_yes, weight) re-forecast for one market. Same-day markets
+        use the OBS-anchored nowcast (hard data); else the forecast ensemble.
+        Returns (None, None) if we cannot re-evaluate."""
+        try:
+            stt = nc.day_state(city, date, lat, lon)
+        except Exception:
+            stt = None
+        if stt and stt.get("n_obs", 0) >= nc.MIN_OBS:
+            p = nc.prob_from_state(stt, strike, is_low)
+            if p is not None:
+                return p, we.NOWCAST_WEIGHT
+        try:
+            dd = datetime.datetime.strptime(date, "%Y-%m-%d")
+            hrs = max(1.0, ((dd + datetime.timedelta(days=1)) -
+                            datetime.datetime.now()).total_seconds() / 3600)
+        except Exception:
+            hrs = 6.0
+        p, _, nsrc = wx.prob(city, date, lat, lon, strike, is_low, hrs, log=False)
+        if p is None or nsrc < wx.MIN_SOURCES:
+            return None, None
+        return p, we.blend_weight()
+
     def exit_check(self, margin_c=2):
         """SMART stop-loss: NOT a price stop. For each underwater position we
-        RE-FORECAST with the live ensemble; if the market's bid now exceeds our
-        UPDATED fair value (+ a churn margin, after the taker exit fee), we sell
-        - the market is paying more than the bet is now worth to us. If our
-        model still believes, we HOLD even if the price fell (a price drop alone
-        is not a reason to sell an underpriced contract). Winners are left to
-        settle so they keep feeding calibration data."""
+        RE-FORECAST (nowcast on same-day markets); if the market's bid exceeds
+        our updated fair value (+ churn margin, after the taker exit fee), we
+        sell - the market is paying more than the bet is now worth to us.
+        v7 anti-churn: (1) hold value uses the SAME model/market blend as
+        entry (raw p_new alone whipsawed 0.9->0.3 within hours and caused
+        exit/re-enter loops); (2) an exit must be confirmed on EXIT_CONFIRMS
+        consecutive checks; (3) the ticker goes on a re-entry cooldown.
+        Winners still ride to settlement (calibration data)."""
         for tk, b in list(self.bets.items()):
             city, strike, is_low, side = b["city"], b["strike"], b["hl"] == "lo", b["side"]
             date = b.get("date", "")
             if not date or city not in we.CITY_COORDS:
                 continue
             lat, lon = we.CITY_COORDS[city]
-            try:
-                dd = datetime.datetime.strptime(date, "%Y-%m-%d")
-                hrs = max(1.0, ((dd + datetime.timedelta(days=1)) -
-                                datetime.datetime.now()).total_seconds() / 3600)
-            except Exception:
-                hrs = 6.0
-            p_new, _, nsrc = wx.prob(city, date, lat, lon, strike, is_low, hrs, log=False)
-            if p_new is None or nsrc < wx.MIN_SOURCES:
+            p_yes, wgt = self._reprice(city, date, lat, lon, strike, is_low)
+            if p_yes is None:
                 continue                      # can't re-evaluate -> hold
+            p_new = p_yes if side == "yes" else (1 - p_yes)
             yb, ya = self._quote(tk)
             if yb is None:
                 continue
             bid = yb if side == "yes" else (100 - ya)   # price we can sell our side into
+            ask = ya if side == "yes" else (100 - yb)
             if bid <= 0 or bid >= b["entry"]:           # only CUT LOSSES (underwater)
+                b["exit_streak"] = 0
                 continue
+            mid_p = max(0.0, min(1.0, (bid + ask) / 200.0))
             exit_fee_per = fee_cents(bid, 1, taker=True)
             exit_ev = bid - exit_fee_per                # per-contract net if we sell now
-            hold_ev = p_new * 100                        # per-contract value if we hold
+            # hold value = entry-consistent blend of updated model and market
+            hold_ev = (wgt * p_new + (1 - wgt) * mid_p) * 100
             if exit_ev > hold_ev + margin_c:
+                b["exit_streak"] = int(b.get("exit_streak", 0)) + 1
+                if b["exit_streak"] < EXIT_CONFIRMS:
+                    continue                  # flagged; confirm on the next check
                 cnt = b["count"]
                 exit_fee = fee_cents(bid, cnt, taker=True)
                 net = (bid - b["entry"]) * cnt - b.get("fee", 0) - exit_fee
@@ -284,7 +401,10 @@ class WeatherPaper:
                 self._log([datetime.datetime.now().isoformat(timespec="seconds"), "EXIT",
                            city, strike, b["hl"], side, round(p_new, 3), bid, cnt, "",
                            round(net / 100.0, 2)])
+                self.cooldown[tk] = datetime.datetime.now().isoformat(timespec="seconds")
                 del self.bets[tk]
+            else:
+                b["exit_streak"] = 0
 
     def step(self):
         self.settle()
@@ -292,6 +412,10 @@ class WeatherPaper:
         self.place()
         try:
             ws.settle_daily()   # resolve shadow-logged markets (1x/day, bounded)
+        except Exception:
+            pass
+        try:
+            ws.fit_daily()      # refresh learned blend weight (1x/day)
         except Exception:
             pass
         self.save()

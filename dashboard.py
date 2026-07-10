@@ -29,7 +29,28 @@ PORT = int(os.environ.get("DASH_PORT", "8765"))
 TOKEN = os.environ.get("DASH_TOKEN", "")
 KALSHI = "https://api.elections.kalshi.com/trade-api/v2"
 
-CUR_ERA = "v6-ens"      # bets from the current model; everything else = legacy
+CUR_ERA = "v7-obs"      # bets from the current model; everything else = legacy
+
+try:
+    import weather_shadow as _wsh
+except Exception:
+    _wsh = None
+
+_SHADOW_CACHE = {"ts": 0.0, "data": None}
+
+
+def _shadow_report():
+    """Shadow calibration for /public: raw model vs market vs outcomes, plus
+    the Brier-fit blend weight. Local CSV parse only; cached 10 min."""
+    now = time.time()
+    if now - _SHADOW_CACHE["ts"] > 600:
+        _SHADOW_CACHE["ts"] = now
+        try:
+            _SHADOW_CACHE["data"] = _wsh.report_data() if _wsh else None
+        except Exception:
+            _SHADOW_CACHE["data"] = None
+    return _SHADOW_CACHE["data"]
+
 
 _PRICES = {"ts": 0.0, "by_ticker": {}}
 _PRICES_LOCK = threading.Lock()
@@ -244,6 +265,7 @@ def build_data():
         curve.append(round(run, 2))
     out["curve"] = curve
     out["kpi"] = compute_kpis(out)
+    out["shadow"] = _shadow_report()
     # live trader state (real money), if present
     live_path = os.path.join("logs", "weather_live_state.json")
     if os.path.exists(live_path):
@@ -361,8 +383,8 @@ td.num,th.num{text-align:right}
 </div>
 <h2>Strategy attribution</h2>
 <div class=eras>
-  <div class=panel><div class=t>Current model &middot; v6 ensemble (calibration-gated)</div><table><tbody id=eracur></tbody></table></div>
-  <div class=panel><div class=t>Legacy (v2&ndash;v5 &mdash; pre-ensemble)</div><table><tbody id=eraleg></tbody></table></div>
+  <div class=panel><div class=t>Current model &middot; v7 obs-nowcast (calibration-gated)</div><table><tbody id=eracur></tbody></table></div>
+  <div class=panel><div class=t>Legacy (v2&ndash;v6 &mdash; wrong-day forecasts)</div><table><tbody id=eraleg></tbody></table></div>
 </div>
 <h2>Model calibration <span style="text-transform:none;letter-spacing:0">(predicted vs realized win rate &mdash; the go-live gate)</span></h2>
 <table><thead><tr><th>Confidence bucket</th><th class=num>Bets</th><th class=num>Predicted</th>
@@ -402,8 +424,8 @@ const NA='<span class=mut>&ndash;</span>';
 const feeC=f=>(f==null)?NA:(Number(f).toFixed(0)+'&cent;');
 function mkt(b){return '<td><span class=mkt>'+(b.city||'')+' '+b.strike+'&deg; '+((b.hl==='lo')?'low':'high')+'</span></td>';}
 function side(s){s=(s||'').toLowerCase();return '<td><span class="chip '+(s==='yes'?'yes':'no')+'">'+s.toUpperCase()+'</span></td>';}
-function era(b){const cur=(b.era==='v6-ens');
-  return '<td><span class="chip '+(cur?'era':'leg')+'">'+(cur?'v6':'legacy')+'</span></td>';}
+function era(b){const cur=(b.era==='v7-obs');
+  return '<td><span class="chip '+(cur?'era':'leg')+'">'+(cur?'v7':'legacy')+'</span></td>';}
 function prob(p){return '<td class=num>'+Math.round((Number(p)||0)*100)+'%</td>';}
 function tile(k,v,s){return '<div class=tile><div class=k>'+k+'</div><div class=v>'+v+'</div>'+(s?'<div class=s>'+s+'</div>':'')+'</div>';}
 function stratCard(name,kind,kindcls,bank,pnl,sub,status,statuscls){
@@ -583,7 +605,7 @@ async function load(){
   }).join('')||'<tr><td colspan=11 class=empty>No open positions &mdash; waiting for a disciplined edge.</td></tr>';
   {
     const all=d.settled||[];
-    const cur=all.filter(b=>b.era==='v6-ens');
+    const cur=all.filter(b=>b.era==='v7-obs');
     const nleg=all.length-cur.length;
     $('legnote').textContent=nleg>0?'('+nleg+' older legacy-model bets hidden \u2014 still counted in totals)':'';
     $('settled').innerHTML=cur.slice(0,15).map(b=>{
@@ -642,7 +664,7 @@ async function load(){
     $('sevtbl').innerHTML='<tr><td colspan=9 class=empty>No state yet.</td></tr>'; }
   $('foot').innerHTML='Paper account &mdash; no real money at risk. NAV = cash + open positions at current market bid (marks refresh ~60s). '
     +'Banked P&amp;L = settled bets only; positions are held to settlement. Performance and calibration KPIs computed on the last '
-    +(k.window_n||0)+' settled bets; win rate and totals are all-time. Judge the edge on the v4-ensemble era only &mdash; legacy bets predate the current model. Auto-refreshes every 20s.';
+    +(k.window_n||0)+' settled bets; win rate and totals are all-time. Judge the edge on the v7 era only &mdash; legacy bets predate the current model. Auto-refreshes every 20s.';
 }
 load();setInterval(load,20000);
 </script></body></html>"""

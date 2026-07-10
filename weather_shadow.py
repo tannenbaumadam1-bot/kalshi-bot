@@ -30,6 +30,7 @@ KALSHI = "https://api.elections.kalshi.com/trade-api/v2"
 SHADOW = os.path.join("logs", "weather_shadow.csv")
 RESULTS = os.path.join("logs", "weather_shadow_results.csv")
 STATE = os.path.join("logs", "weather_shadow_state.json")
+LEARNED = os.path.join("logs", "learned_weight.json")
 DEDUPE_HOURS = 3
 MAX_LOOKUPS = 80
 COLS = ["ts", "ticker", "city", "date", "strike", "hl", "hrs",
@@ -166,9 +167,8 @@ def settle_daily():
     return settle()
 
 
-def report():
-    """Calibration buckets on the joined shadow data: RAW model prob vs
-    actual outcome vs what the market mid believed. Earliest row per ticker."""
+def joined():
+    """Earliest shadow row per settled ticker: [{'mp','out','mid'}, ...]."""
     res = {}
     if os.path.exists(RESULTS):
         for r in csv.DictReader(open(RESULTS)):
@@ -183,29 +183,93 @@ def report():
             if tk in res and tk not in seen:
                 seen.add(tk)
                 try:
-                    rows.append((float(r["model_p"]), res[tk],
-                                 float(r["mkt_bid"]), float(r["mkt_ask"])))
+                    rows.append({"mp": float(r["model_p"]), "out": res[tk],
+                                 "mid": (float(r["mkt_bid"]) + float(r["mkt_ask"])) / 200.0})
                 except Exception:
                     pass
-    if not rows:
+    return rows
+
+
+def fit_weight(rows=None):
+    """Grid-search the Brier-minimizing blend weight w for
+    fair = w*model + (1-w)*market_mid on the joined shadow data.
+    This replaces per-era MODEL_WEIGHT guesses with measurement."""
+    rows = joined() if rows is None else rows
+    n = len(rows)
+    out = {"n": n, "ts": datetime.datetime.now().isoformat(timespec="seconds")}
+    if not n:
+        return out
+    def brier(w):
+        return sum((w * r["mp"] + (1 - w) * r["mid"] - r["out"]) ** 2
+                   for r in rows) / n
+    grid = [i / 100.0 for i in range(0, 101, 5)]
+    best = min(grid, key=brier)
+    out.update({"w_best": best, "brier_model": round(brier(1.0), 4),
+                "brier_market": round(brier(0.0), 4),
+                "brier_best": round(brier(best), 4)})
+    return out
+
+
+def fit_daily():
+    """Write logs/learned_weight.json at most once per calendar day (loop-safe).
+    weather_edge.blend_weight() picks it up when n is large enough."""
+    st = _load_state()
+    today = datetime.date.today().isoformat()
+    if st.get("last_fit") == today:
+        return None
+    st["last_fit"] = today
+    _save_state(st)
+    d = fit_weight()
+    try:
+        os.makedirs("logs", exist_ok=True)
+        json.dump(d, open(LEARNED, "w"))
+    except Exception:
+        pass
+    return d
+
+
+def report_data():
+    """Machine-readable shadow calibration (for the dashboard /public feed)."""
+    rows = joined()
+    buckets = []
+    for lo, hi in [(0, .2), (.2, .4), (.4, .6), (.6, .8), (.8, 1.01)]:
+        sel = [r for r in rows if lo <= r["mp"] < hi]
+        if sel:
+            buckets.append({
+                "bucket": "%d-%d%%" % (lo * 100, min(100, hi * 100)), "n": len(sel),
+                "model": round(100 * sum(r["mp"] for r in sel) / len(sel), 1),
+                "actual": round(100 * sum(r["out"] for r in sel) / len(sel), 1),
+                "mkt": round(100 * sum(r["mid"] for r in sel) / len(sel), 1)})
+    return {"n": len(rows), "buckets": buckets, "fit": fit_weight(rows)}
+
+
+def report():
+    """Calibration buckets on the joined shadow data: RAW model prob vs
+    actual outcome vs what the market mid believed. Earliest row per ticker."""
+    d = report_data()
+    if not d["n"]:
         print("no joined shadow data yet")
         return
-    print("shadow calibration (RAW model prob vs outcome, %d markets):" % len(rows))
-    for lo, hi in [(0, .2), (.2, .4), (.4, .6), (.6, .8), (.8, 1.01)]:
-        sel = [t for t in rows if lo <= t[0] < hi]
-        if not sel:
-            continue
-        mp = sum(t[0] for t in sel) / len(sel)
-        ao = sum(t[1] for t in sel) / len(sel)
-        mm = sum((t[2] + t[3]) / 200.0 for t in sel) / len(sel)
-        print("  %3.0f-%3.0f%%: n=%3d  model %5.1f%%  actual %5.1f%%  mkt-mid %5.1f%%"
-              % (lo * 100, hi * 100, len(sel), mp * 100, ao * 100, mm * 100))
+    print("shadow calibration (RAW model prob vs outcome, %d markets):" % d["n"])
+    for b in d["buckets"]:
+        print("  %8s: n=%3d  model %5.1f%%  actual %5.1f%%  mkt-mid %5.1f%%"
+              % (b["bucket"], b["n"], b["model"], b["actual"], b["mkt"]))
+    f = d["fit"]
+    if f.get("w_best") is not None:
+        print("blend fit: best w=%.2f  brier(model)=%.4f  brier(market)=%.4f  brier(best)=%.4f"
+              % (f["w_best"], f["brier_model"], f["brier_market"], f["brier_best"]))
 
 
 if __name__ == "__main__":
     import sys
     if "--report" in sys.argv:
         report()
+    elif "--fit-weight" in sys.argv:
+        d = fit_weight()
+        print(json.dumps(d, indent=2))
+        if d.get("n"):
+            json.dump(d, open(LEARNED, "w"))
+            print("saved -> " + LEARNED)
     elif "--settle" in sys.argv:
         print("settled %d shadow tickers" % settle())
     elif "--selftest" in sys.argv:
@@ -226,4 +290,15 @@ if __name__ == "__main__":
             globals()["fetch_result"] = fetch_result
             assert settle() == 1
             assert pending(today="2026-07-07") == []
-        print("weather_shadow self-test PASSED (dedupe, pending, settle)")
+        # fit_weight: market perfectly calibrated, model junk -> w_best == 0
+        rows = ([{"mp": 0.9, "out": 0, "mid": 0.2}] * 40 +
+                [{"mp": 0.1, "out": 1, "mid": 0.8}] * 40)
+        f = fit_weight(rows)
+        assert f["w_best"] == 0.0 and f["brier_market"] < f["brier_model"]
+        # model perfectly right, market wrong -> w_best == 1
+        rows = ([{"mp": 1.0, "out": 1, "mid": 0.5}] * 40 +
+                [{"mp": 0.0, "out": 0, "mid": 0.5}] * 40)
+        f = fit_weight(rows)
+        assert f["w_best"] == 1.0 and f["brier_model"] < f["brier_market"]
+        assert fit_weight([]) .get("w_best") is None
+        print("weather_shadow self-test PASSED (dedupe, pending, settle, fit)")

@@ -23,11 +23,12 @@ It is a HYPOTHESIS until proven: log every bet with our probability, then
 check calibration (do our 70% bets win ~70%?).
 """
 from __future__ import annotations
-import math, re, sys, datetime
+import os, json, math, re, sys, time, datetime
 import requests
 from kalshibot.fees import fee_cents
 import weather_ensemble as wx
 import weather_shadow as ws
+import weather_nowcast as nc
 
 KALSHI = "https://api.elections.kalshi.com/trade-api/v2"
 ENSEMBLE_API = "https://ensemble-api.open-meteo.com/v1/ensemble"
@@ -90,6 +91,51 @@ MODEL_WEIGHT = 0.35
 # Small noise smeared around each ensemble member: station micro-climate,
 # rounding, and the gap between model grid cell and the physical thermometer.
 OBS_JITTER = 1.5
+
+# v7: NOWCAST bets. Same-day markets are priced from station OBSERVATIONS
+# (running max/min so far) + remaining-hours ensemble - hard data, so it gets
+# a higher blend weight than a pure forecast.
+NOWCAST_WEIGHT = float(os.environ.get("WX_NOWCAST_WEIGHT", "0.60"))
+NOWCAST_MAX_HRS = float(os.environ.get("WX_NOWCAST_MAX_HRS", "26"))
+
+# v7: MODEL_WEIGHT learned from shadow data (weather_shadow.fit_weight writes
+# logs/learned_weight.json daily). Applied only once the sample is real;
+# clamped so a fluke fit can never swing sizing to extremes.
+LEARNED_W_PATH = os.path.join("logs", "learned_weight.json")
+W_MIN_N = 150
+W_CLAMP = (0.05, 0.60)
+_wcache = {"ts": 0.0, "w": None}
+
+
+def blend_weight():
+    """Forecast-blend weight: learned from shadow calibration when n >= W_MIN_N,
+    else the hand-set MODEL_WEIGHT. Reloads at most every 30 minutes."""
+    now = time.time()
+    if now - _wcache["ts"] > 1800:
+        _wcache["ts"] = now
+        _wcache["w"] = None
+        try:
+            d = json.load(open(LEARNED_W_PATH))
+            if int(d.get("n", 0)) >= W_MIN_N and d.get("w_best") is not None:
+                _wcache["w"] = max(W_CLAMP[0], min(W_CLAMP[1], float(d["w_best"])))
+        except Exception:
+            pass
+    return _wcache["w"] if _wcache["w"] is not None else MODEL_WEIGHT
+
+
+_MON = {"JAN": 1, "FEB": 2, "MAR": 3, "APR": 4, "MAY": 5, "JUN": 6,
+        "JUL": 7, "AUG": 8, "SEP": 9, "OCT": 10, "NOV": 11, "DEC": 12}
+
+
+def ticker_date(ticker):
+    """Settlement DAY from the ticker itself (e.g. KXLOWTCHI-26JUL11-T68 ->
+    2026-07-11). v7 CRITICAL FIX: these markets close ~midnight local = the
+    NEXT calendar day in UTC, so deriving the day from close_time on a UTC
+    server forecast the WRONG day (+1) for every bet in every prior era."""
+    m = re.search(r"-(\d{2})([A-Z]{3})(\d{2})-", ticker or "")
+    if not m or m.group(2) not in _MON:
+        return None
+    return "20%02d-%02d-%02d" % (int(m.group(1)), _MON[m.group(2)], int(m.group(3)))
 
 
 def norm_cdf(z):
@@ -201,7 +247,11 @@ def find_temp_markets(max_days=2):
                     "ticker": mk["ticker"], "city": city, "is_low": is_low,
                     "strike": int(m.group(1)),
                     "yes_bid": _c(mk.get("yes_bid_dollars")), "yes_ask": _c(mk.get("yes_ask_dollars")),
-                    "date": close.astimezone().strftime("%Y-%m-%d"), "hrs": hrs,
+                    # settlement day comes from the TICKER (unambiguous), not
+                    # close_time (which is the next UTC day -> v2-v6 forecast
+                    # the wrong day). Fallback keeps oddball tickers working.
+                    "date": ticker_date(mk["ticker"]) or close.astimezone().strftime("%Y-%m-%d"),
+                    "hrs": hrs,
                     "title": ev.get("title", ""), "sub": mk.get("yes_sub_title", ""),
                 })
         cursor = d.get("cursor")
@@ -213,6 +263,7 @@ def find_temp_markets(max_days=2):
 def scan(min_edge_cents=4, max_edge_cents=20, verbose=True):
     mkts = find_temp_markets()
     fc_cache = {}
+    nc_cache = {}
     edges = []
     shadow_rows = []
     src_tot = 0
@@ -239,15 +290,32 @@ def scan(min_edge_cents=4, max_edge_cents=20, verbose=True):
         # SHADOW LOG: record the RAW model prob for EVERY evaluated market
         # (bet or not, tails included) - free calibration data at ~10x the
         # rate of settled bets. Joined to outcomes by weather_shadow.settle.
+        # (Always the FORECAST prob, so learned MODEL_WEIGHT stays clean.)
         shadow_rows.append({
             "ticker": mk["ticker"], "city": mk["city"], "date": mk["date"],
             "strike": mk["strike"], "hl": "lo" if mk["is_low"] else "hi",
             "hrs": round(mk["hrs"], 1), "n_sources": nsrc,
             "model_p": round(model, 4),
             "mkt_bid": mk["yes_bid"], "mkt_ask": mk["yes_ask"]})
-        # stay out of the tails: extreme strikes are where any model is least
-        # reliable; only bet genuinely-uncertain strikes.
-        if model < 0.20 or model > 0.80:
+        # v7 NOWCAST: same-day markets are priced from station OBS (running
+        # max/min) + remaining-hours ensemble - hard data beats a forecast.
+        src, wgt = "forecast", blend_weight()
+        if mk["hrs"] <= NOWCAST_MAX_HRS:
+            if key not in nc_cache:
+                try:
+                    nc_cache[key] = nc.day_state(mk["city"], mk["date"], lat, lon)
+                except Exception:
+                    nc_cache[key] = None
+            stt = nc_cache[key]
+            if stt and stt.get("n_obs", 0) >= nc.MIN_OBS:
+                p_now = nc.prob_from_state(stt, mk["strike"], mk["is_low"])
+                if p_now is not None:
+                    model, src, wgt = p_now, "nowcast", NOWCAST_WEIGHT
+                    ftemp = stt["run_min"] if mk["is_low"] else stt["run_max"]
+        # stay out of the tails: extreme strikes are where a FORECAST is least
+        # reliable. A nowcast is grounded in observations, so its band is wide.
+        lo_band, hi_band = (0.05, 0.95) if src == "nowcast" else (0.20, 0.80)
+        if model < lo_band or model > hi_band:
             continue
         # the MARKET must also see a real contest (15-85c). A 10x disagreement
         # on a tail is our data being wrong, not free money.
@@ -257,7 +325,9 @@ def scan(min_edge_cents=4, max_edge_cents=20, verbose=True):
         # calibration showed the raw model is ~2x overconfident, so we bet only
         # the residual disagreement that survives the blend.
         mkt_prob = ((mk["yes_bid"] + mk["yes_ask"]) / 2.0) / 100.0
-        fair = MODEL_WEIGHT * model + (1 - MODEL_WEIGHT) * mkt_prob
+        fair = wgt * model + (1 - wgt) * mkt_prob
+        mk["src"] = src
+        mk["w"] = wgt
         # MAKER entries: instead of crossing the spread (taker, ~7% fee), we
         # REST at the best bid to provide liquidity -> ~1/4 the fee AND a better
         # entry price. YES maker buys at yes_bid; NO maker buys at the no-bid
@@ -294,7 +364,7 @@ def scan(min_edge_cents=4, max_edge_cents=20, verbose=True):
         print(f"Found {len(edges)} bets with edge >= {min_edge_cents}c:\n")
         for ev, side, mk, fair, ftemp in edges[:25]:
             print(f"  +{ev:4.1f}c  {side:3} {mk['city']:>13} {mk['strike']}{'(lo)' if mk['is_low'] else '(hi)'}"
-                  f"  forecast {ftemp:.0f}F  ourP {fair*100:4.1f}%  mkt {mk['yes_bid']}-{mk['yes_ask']}c  ({mk['hrs']:.0f}h)")
+                  f"  {mk.get('src','forecast'):8} {ftemp:.0f}F  ourP {fair*100:4.1f}%  mkt {mk['yes_bid']}-{mk['yes_ask']}c  ({mk['hrs']:.0f}h)")
         if not edges:
             print("  (no edges right now - market agrees with the forecast)")
     return edges
@@ -316,6 +386,15 @@ if __name__ == "__main__":
         # every whitelisted series maps to a station we have coords for
         for _st, (_city, _lo) in SERIES.items():
             assert _city in CITY_COORDS, _city
-        print("weather math self-test PASSED (v4 ensemble)")
+        # v7: settlement day parsed from the ticker, never the close time
+        assert ticker_date("KXLOWTCHI-26JUL11-T68") == "2026-07-11"
+        assert ticker_date("KXHIGHNY-26DEC03-T40") == "2026-12-03"
+        assert ticker_date("garbage") is None
+        # v7: blend_weight falls back to MODEL_WEIGHT with no learned file
+        _wcache["ts"] = 0.0
+        _tmp, LEARNED_W_PATH = LEARNED_W_PATH, "does_not_exist.json"
+        assert blend_weight() == MODEL_WEIGHT
+        LEARNED_W_PATH = _tmp
+        print("weather math self-test PASSED (v7 nowcast)")
     else:
         scan()

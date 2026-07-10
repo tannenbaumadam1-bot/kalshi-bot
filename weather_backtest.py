@@ -26,13 +26,51 @@ CITIES = {"phoenix": (33.428, -112.004), "chicago": (41.786, -87.752),
           "new york": (40.779, -73.969), "denver": (39.847, -104.656)}
 
 
-def _daily(url, lat, lon, d0, d1, models=None):
-    p = {"latitude": lat, "longitude": lon, "daily": "temperature_2m_max",
+def _daily(url, lat, lon, d0, d1, models=None, var="temperature_2m_max"):
+    p = {"latitude": lat, "longitude": lon, "daily": var,
          "temperature_unit": "fahrenheit", "timezone": "auto",
          "start_date": d0, "end_date": d1}
     if models:
         p["models"] = ",".join(models)
     return requests.get(url, params=p, timeout=25).json().get("daily", {})
+
+
+def bias(days=14, cities=None):
+    """v7: mean SIGNED forecast error (degF) per model for daily MAX and MIN.
+    MAE says how wrong; BIAS says which way. A systematic min-temp bias is the
+    prime suspect for the lo-market losses, so measure it, don't guess."""
+    cities = cities or CITIES
+    end = datetime.date.today() - datetime.timedelta(days=2)
+    start = end - datetime.timedelta(days=days - 1)
+    d0, d1 = start.isoformat(), end.isoformat()
+    print("\nBIAS (mean signed error, forecast - actual, degF; %s..%s)\n" % (d0, d1))
+    for var, label in [("temperature_2m_max", "DAILY MAX"),
+                       ("temperature_2m_min", "DAILY MIN")]:
+        errs = {m: [] for m in wx.DET_MODELS}
+        for city, (la, lo) in cities.items():
+            act = _daily(ARCHIVE, la, lo, d0, d1, var=var)
+            fc = _daily(HIST_FC, la, lo, d0, d1, models=wx.DET_MODELS, var=var)
+            actual = act.get(var, []) or []
+            for i, day in enumerate(act.get("time", []) or []):
+                a = actual[i] if i < len(actual) else None
+                if a is None:
+                    continue
+                for m in wx.DET_MODELS:
+                    arr = fc.get(var + "_" + m) or []
+                    v = arr[i] if i < len(arr) else None
+                    if v is not None:
+                        errs[m].append(v - a)
+        print("  %s:" % label)
+        pooled = []
+        for m in wx.DET_MODELS:
+            if errs[m]:
+                me = statistics.mean(errs[m])
+                pooled.extend(errs[m])
+                print("    %-22s bias %+.2f  (n=%d)" % (m, me, len(errs[m])))
+        if pooled:
+            print("    %-22s bias %+.2f" % ("POOLED", statistics.mean(pooled)))
+            if abs(statistics.mean(pooled)) > 1.0:
+                print("    ^^ systematic - correct the ensemble or stand down on this side")
 
 
 def backtest(cities=None, days=14):
@@ -87,6 +125,9 @@ def learn(days=30):
 
 
 def main():
+    if "--bias" in sys.argv:
+        rest = [a for a in sys.argv[1:] if a != "--bias"]
+        bias(int(rest[0]) if rest else 14); return
     if "--learn" in sys.argv:
         rest = [a for a in sys.argv[1:] if a != "--learn"]
         learn(int(rest[0]) if rest else 30); return

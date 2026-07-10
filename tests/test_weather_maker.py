@@ -17,11 +17,11 @@ def _fresh():
     w = wp.WeatherPaper.__new__(wp.WeatherPaper)
     w.start = 10000.0; w.cash = 10000.0; w.per_bet = 2.0
     w.bets = {}; w.realized = 0.0; w.wins = 0; w.losses = 0
-    w.fees = 0.0; w.placed = 0; w.history = []
+    w.fees = 0.0; w.placed = 0; w.history = []; w.cooldown = {}
     return w
 
 
-def _edge(entry_price, side="YES", fair=0.30, city="denver", strike=95):
+def _edge(entry_price, side="YES", fair=0.45, city="denver", strike=95):
     mk = {"ticker": "T-%s-%s" % (city, strike), "city": city, "is_low": False,
           "strike": strike, "yes_bid": entry_price, "yes_ask": entry_price + 8,
           "entry_price": entry_price, "maker": True}
@@ -45,20 +45,20 @@ def test_scan_prefers_maker_and_uses_maker_fee():
 
 def test_place_uses_maker_fee_and_entry_price(monkeypatch):
     w = _fresh()
-    monkeypatch.setattr(we, "scan", lambda **kw: _edge(20, "YES", fair=0.32))
+    monkeypatch.setattr(we, "scan", lambda **kw: _edge(35, "YES", fair=0.45))
     w.place()
     assert len(w.bets) == 1
     b = next(iter(w.bets.values()))
     assert b["maker"] is True
-    assert b["entry"] == 20                       # rested at the bid, not the ask
+    assert b["entry"] == 35                       # rested at the bid, not the ask
     # fee charged must be the MAKER fee, not taker
-    assert b["fee"] == fee_cents(20, b["count"], taker=False)
-    assert b["fee"] < fee_cents(20, b["count"], taker=True)
+    assert b["fee"] == fee_cents(35, b["count"], taker=False)
+    assert b["fee"] < fee_cents(35, b["count"], taker=True)
 
 
 def test_probe_mode_keeps_stakes_tiny_when_unproven(monkeypatch):
     w = _fresh()
-    monkeypatch.setattr(we, "scan", lambda **kw: _edge(20, "YES", fair=0.40))
+    monkeypatch.setattr(we, "scan", lambda **kw: _edge(35, "YES", fair=0.48))
     w.place()
     b = next(iter(w.bets.values()))
     # unproven era -> probe: cost basis capped near PROBE_COST_CENTS
