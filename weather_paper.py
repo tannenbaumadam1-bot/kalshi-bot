@@ -320,6 +320,7 @@ class WeatherPaper:
             mk = d.get("market", d)
             yb = int(round(float(mk.get("yes_bid_dollars") or 0) * 100))
             ya = int(round(float(mk.get("yes_ask_dollars") or 0) * 100))
+            return yb, ya
         except Exception:
             return None, None
 

@@ -172,3 +172,19 @@ def _run():
 
 if __name__ == "__main__":
     sys.exit(_run())
+
+
+def test_quote_returns_tuple_on_success_and_failure(monkeypatch):
+    # regression: a tail-rebuild once dropped the success return -> None
+    # unpack crash in exit_check on every live step. Exercise the REAL method.
+    import weather_paper as wpm
+    w = _fresh()
+    class _R:
+        def json(self):
+            return {"market": {"yes_bid_dollars": "0.4000", "yes_ask_dollars": "0.4400"}}
+    monkeypatch.setattr(wpm.requests, "get", lambda *a, **k: _R())
+    assert w._quote("T-x") == (40, 44)
+    def _boom(*a, **k):
+        raise RuntimeError("network down")
+    monkeypatch.setattr(wpm.requests, "get", _boom)
+    assert w._quote("T-x") == (None, None)
