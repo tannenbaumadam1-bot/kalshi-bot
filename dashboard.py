@@ -650,15 +650,18 @@ async function load(){
     $('sev').innerHTML=[
       tile('Bank (paper)',F(ss.cash),'started '+F(ss.start)),
       tile('Realized P&L','<span class="'+C(ss.realized)+'">'+M(ss.realized)+'</span>',(ss.wins||0)+'W / '+(ss.losses||0)+'L'),
-      tile('Open bets',(ss.open_bets||0),''),
+      tile('Open bets',(ss.open_bets||0),(ss.pending||0)+' resting \u00b7 '+(ss.canceled||0)+' expired'),
       tile('Calibration gate',(ss.gate||'probe')+' '+(ss.gate_n||0)+'/30','sizing is earned'),
-      tile('Placed',(ss.placed||0),'since inception'),
+      tile('Placed',(ss.placed||0),(S.last_scan&&S.last_scan.credits!=null)?(S.last_scan.credits+' odds credits left'):'since inception'),
       tile('Last scan',(S.last_scan&&S.last_scan.ts)?S.last_scan.ts.replace('T',' ').slice(5,16):'\u2013',
         (S.last_scan&&S.last_scan.ts)?((S.last_scan.evaluated||0)+' edges eval \u00b7 best '
           +(S.last_scan.best_edge!=null?S.last_scan.best_edge+'\u00a2':'\u2013')
           +(S.last_scan.bar!=null?' vs '+S.last_scan.bar+'\u00a2 bar':'')):'no scan yet'),
     ].join('');
     const rows=[];
+    (S.pending||[]).forEach(b=>rows.push('<tr><td class=mut>'+((b.start||'').slice(5,16).replace('T',' '))+'</td><td><span class=mkt>'+(b.game||'')+'</span></td><td>'+(b.team||'')+'</td>'
+      +'<td class=num>'+Math.round((b.pside||0)*100)+'%</td><td class=num>'+b.entry+'&cent;</td><td class=num>+'+(b.edge||0)+'&cent;</td><td class=num>'+b.count+'</td>'
+      +'<td><span class=chip style="background:rgba(230,180,60,.13);color:#e6b43c">RESTING</span></td><td class=num>&ndash;</td></tr>'));
     (S.open||[]).forEach(b=>rows.push('<tr><td class=mut>'+((b.start||'').slice(5,16).replace('T',' '))+'</td><td><span class=mkt>'+(b.game||'')+'</span></td><td>'+(b.team||'')+'</td>'
       +'<td class=num>'+Math.round((b.pside||0)*100)+'%</td><td class=num>'+b.entry+'&cent;</td><td class=num>+'+(b.edge||0)+'&cent;</td><td class=num>'+b.count+'</td>'
       +'<td><span class=chip style="background:rgba(91,141,239,.13);color:var(--acc)">OPEN</span></td><td class=num>&ndash;</td></tr>'));
@@ -666,6 +669,8 @@ async function load(){
       rows.push('<tr><td class=mut>'+((b.ts||'').slice(5,16).replace('T',' '))+'</td><td><span class=mkt>'+(b.game||'')+'</span></td><td>'+(b.team||'')+'</td>'
       +'<td class=num>'+Math.round((b.pside||0)*100)+'%</td><td class=num>'+b.entry+'&cent;</td><td class=num>+'+(b.edge||0)+'&cent;</td><td class=num>'+b.count+'</td>'
       +'<td><span class="'+(won?'won':'lost')+'">'+(won?'WON':'LOST')+'</span></td><td class=num><span class="'+C(b.pnl)+'">'+M(b.pnl)+'</span></td></tr>');});
+    if(S.shadow&&S.shadow.n){const bs=(S.shadow.buckets||[]).map(b=>b.edge+'\u00a2: n='+b.n+' act '+b.act+'% (fair '+b.fair+'%) EV '+(b.ev_c>0?'+':'')+b.ev_c+'\u00a2').join(' \u00b7 ');
+      rows.push('<tr><td colspan=9 class=mut>Shadow anchor calibration \u2014 '+S.shadow.n+' settled edges: '+bs+'</td></tr>');}
     $('sevtbl').innerHTML=rows.join('')||'<tr><td colspan=9 class=empty>No qualifying edges yet'+((S.last_scan&&S.last_scan.ts)?' \u2014 scanning; Kalshi is tracking the sharp books inside the edge bar.':' \u2014 waiting for first scan.')+'</td></tr>';
   } else { $('sev').innerHTML='<div class=tile><div class=k>Sharp +EV</div><div class=v>&ndash;</div><div class=s>starting&hellip;</div></div>';
     $('sevtbl').innerHTML='<tr><td colspan=9 class=empty>No state yet.</td></tr>'; }

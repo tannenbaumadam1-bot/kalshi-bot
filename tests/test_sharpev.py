@@ -1,3 +1,4 @@
+import csv
 import datetime
 import os
 import sys
@@ -27,10 +28,29 @@ def _mk(start, **kw):
 
 def _bot():
     p = se.SharpEV.__new__(se.SharpEV)
-    p.start = 10000; p.cash = 10000.0; p.bets = {}; p.realized = 0.0
-    p.wins = p.losses = p.placed = 0; p.fees = 0.0; p.history = []
-    p.last_fetch = ""; p.warned_no_key = False
+    p.start = 10000; p.cash = 10000.0; p.bets = {}; p.pending = {}
+    p.realized = 0.0; p.wins = p.losses = p.placed = p.canceled = 0
+    p.fees = 0.0; p.history = []; p.last_fetch = ""; p.warned_no_key = False
+    p.credits_remaining = None; p.next_starts = []; p.shadow_day = ""
+    p.shadow_cache = {}; p._shadow_rows = []; p.last_scan = {}
     return p
+
+
+def _fill(p, last=None):
+    """Force-fill every pending order via a synthetic trade-through print."""
+    quotes = {}
+    for tk, o in p.pending.items():
+        px = last if last is not None else (
+            o["entry"] if o["side"] == "yes" else 100 - o["entry"])
+        quotes[tk] = {"yes_bid": 0, "yes_ask": 0, "last_price": px}
+    return p.check_fills(quotes=quotes)
+
+
+def _backdate(p):
+    past = (datetime.datetime.now(se.ET)
+            - datetime.timedelta(hours=4)).isoformat(timespec="minutes")
+    for b in p.bets.values():
+        b["start"] = past
 
 
 def test_devig_removes_vig():
@@ -50,18 +70,71 @@ def test_team_disambiguator():
     assert not se.team_matches("Los Angeles D", "Los Angeles Angels")
 
 
-def test_pipeline_places_probe_and_settles():
+def test_pipeline_rests_fills_and_settles():
     now = datetime.datetime.now(se.ET)
     start = now + datetime.timedelta(hours=3)
     p = _bot()
     cands = p.candidates([_ev(start)], [_mk(start)], now=now)
     assert len(cands) == 1 and cands[0][3] >= se.MIN_EDGE_C
     assert p.place(cands) == 1
+    assert len(p.pending) == 1 and not p.bets and p.cash == 10000.0  # rests, no cash
+    assert _fill(p) == 1
+    assert len(p.bets) == 1 and not p.pending and p.cash < 10000.0
     b = list(p.bets.values())[0]
     assert b["entry"] * b["count"] <= se.PROBE_COST_CENTS   # probe stakes
     p.fetch_result = lambda tk: "yes"
     p.settle()
+    assert p.wins == 0 and p.bets           # start-guard: game not started yet
+    _backdate(p)
+    p.settle()
     assert p.wins == 1 and p.realized > 0 and not p.bets
+
+
+def test_pending_expires_unfilled_at_lockout():
+    now = datetime.datetime.now(se.ET)
+    start = now + datetime.timedelta(hours=3)
+    p = _bot()
+    cands = p.candidates([_ev(start)], [_mk(start)], now=now)
+    assert p.place(cands) == 1
+    tk = list(p.pending)[0]
+    p.pending[tk]["expire"] = (now - datetime.timedelta(minutes=1)
+                               ).isoformat(timespec="seconds")
+    # quote that never trades through our bid -> cancel at lockout
+    p.check_fills(quotes={tk: {"yes_bid": 51, "yes_ask": 53, "last_price": 52}})
+    assert not p.pending and not p.bets and p.canceled == 1 and p.cash == 10000.0
+
+
+def test_no_side_fill_logic():
+    now = datetime.datetime.now(se.ET)
+    start = now + datetime.timedelta(hours=3)
+    ev = _ev(start)
+    ev["bookmakers"][0]["markets"].append({"key": "totals", "outcomes": [
+        {"name": "Over", "price": 2.30, "point": 8.5},
+        {"name": "Under", "price": 1.66, "point": 8.5}]})   # fair over ~ 41.7%
+    mons = ["JAN","FEB","MAR","APR","MAY","JUN","JUL","AUG","SEP","OCT","NOV","DEC"]
+    tk = "KXMLBTOTAL-26%s%02d%02d%02dATLPIT-9" % (
+        mons[start.month-1], start.day, start.hour, start.minute)
+    mk = {"ticker": tk, "title": "Atlanta vs Pittsburgh: total runs",
+          "yes_sub_title": "Over 8.5 runs scored", "floor_strike": 8.5,
+          "strike_type": "greater", "yes_bid": 52, "yes_ask": 55,
+          "_sport": "baseball_mlb", "_kind": "total"}
+    p = _bot()
+    cands = p.candidates([ev], [mk], now=now)
+    # market says 53.5 mid, sharp says 41.7 -> NO (under) side has the edge
+    assert len(cands) == 1 and cands[0][2] == "no" and cands[0][3] >= se.MIN_EDGE_C
+    assert p.place(cands) == 1
+    o = p.pending[tk]
+    assert o["side"] == "no" and o["entry"] == 100 - 55
+    # a print BELOW 100-entry does not fill a NO bid...
+    p.check_fills(quotes={tk: {"yes_bid": 52, "yes_ask": 54, "last_price": 50}})
+    assert p.pending and not p.bets
+    # ...a print at/through 100-entry does
+    p.check_fills(quotes={tk: {"yes_bid": 52, "yes_ask": 54, "last_price": 56}})
+    assert not p.pending and len(p.bets) == 1
+    _backdate(p)
+    p.fetch_result = lambda tk: "no"
+    p.settle()
+    assert p.wins == 1 and p.realized > 0
 
 
 def test_filters_reject_bad_candidates():
@@ -88,39 +161,13 @@ def test_disagreeing_books_are_untrustworthy():
     assert se.fair_from_books(ev) == ({}, "")
 
 
-def test_one_bet_per_game():
+def test_one_bet_per_game_incl_pending():
     now = datetime.datetime.now(se.ET)
     start = now + datetime.timedelta(hours=3)
     p = _bot()
     mk = _mk(start)
-    p.bets[mk["ticker"].rsplit("-", 1)[0] + "-ATL"] = {"entry": 40, "count": 1}
+    p.pending[mk["ticker"].rsplit("-", 1)[0] + "-ATL"] = {"entry": 40, "count": 1}
     assert p.candidates([_ev(start)], [mk], now=now) == []
-
-
-def test_totals_candidate_and_no_side():
-    now = datetime.datetime.now(se.ET)
-    start = now + datetime.timedelta(hours=3)
-    ev = _ev(start)
-    ev["bookmakers"][0]["markets"].append({"key": "totals", "outcomes": [
-        {"name": "Over", "price": 2.30, "point": 8.5},
-        {"name": "Under", "price": 1.66, "point": 8.5}]})   # fair over ~ 41.7%
-    mons = ["JAN","FEB","MAR","APR","MAY","JUN","JUL","AUG","SEP","OCT","NOV","DEC"]
-    tk = "KXMLBTOTAL-26%s%02d%02d%02dATLPIT-9" % (
-        mons[start.month-1], start.day, start.hour, start.minute)
-    mk = {"ticker": tk, "title": "Atlanta vs Pittsburgh: total runs",
-          "yes_sub_title": "Over 8.5 runs scored", "floor_strike": 8.5,
-          "strike_type": "greater", "yes_bid": 52, "yes_ask": 55,
-          "_sport": "baseball_mlb", "_kind": "total"}
-    p = _bot()
-    cands = p.candidates([ev], [mk], now=now)
-    # market says 53.5 mid, sharp says 41.7 -> NO (under) side has the edge
-    assert len(cands) == 1 and cands[0][2] == "no" and cands[0][3] >= se.MIN_EDGE_C
-    assert p.place(cands) == 1
-    b = list(p.bets.values())[0]
-    assert b["side"] == "no" and b["entry"] == 100 - 55
-    p.fetch_result = lambda tk: "no"
-    p.settle()
-    assert p.wins == 1 and p.realized > 0
 
 
 def test_integer_total_lines_skipped():
@@ -140,3 +187,63 @@ def test_dollars_fields_normalized():
     assert se._cents({"yes_bid_dollars": "0.6800"}, "yes_bid") == 68
     assert se._cents({"yes_bid": 41}, "yes_bid") == 41
     assert se._cents({}, "yes_bid") == 0
+
+
+def test_near_game_guard_blocks_offseason():
+    now = datetime.datetime.now(se.ET)
+    soon = _mk(now + datetime.timedelta(hours=3))
+    far = _mk(now + datetime.timedelta(days=60))
+    assert se.SharpEV._near_game([soon], now)
+    assert not se.SharpEV._near_game([far], now)        # NFL-preseason pattern
+    assert not se.SharpEV._near_game([dict(soon, yes_bid=0)], now)  # unquoted
+    # date-only tickers (WNBA/NFL): today or tomorrow counts
+    d = now + datetime.timedelta(days=1)
+    mons = ["JAN","FEB","MAR","APR","MAY","JUN","JUL","AUG","SEP","OCT","NOV","DEC"]
+    dmk = {"ticker": "KXWNBAGAME-26%s%02dCHIPHX-PHX" % (mons[d.month-1], d.day),
+           "yes_bid": 40, "yes_ask": 43}
+    assert se.SharpEV._near_game([dmk], now)
+
+
+def test_adaptive_interval_and_pace():
+    p = _bot()
+    assert p._interval_h() == se.SCAN_HOURS              # unknown budget -> default
+    p.last_scan = {"sports": [{"sport": "a"}, {"sport": "b"}]}
+    p.credits_remaining = 1e9
+    assert p._interval_h() == 1.0                        # huge budget -> clamp fast
+    p.credits_remaining = se.CREDIT_RESERVE              # exhausted -> clamp slow
+    assert p._interval_h() == 24.0
+    p.credits_remaining = 0.0
+    assert not p._pace_ok()                              # no slack -> no bursts
+    p.credits_remaining = se.CREDITS_MO
+    assert p._pace_ok()                                  # untouched budget -> slack
+
+
+def test_burst_near_game_start():
+    p = _bot()
+    nowa = datetime.datetime.now(se.ET)
+    p.next_starts = [(nowa + datetime.timedelta(hours=8)).isoformat(timespec="minutes")]
+    assert not p._burst_near()
+    p.next_starts = [(nowa + datetime.timedelta(minutes=45)).isoformat(timespec="minutes")]
+    assert p._burst_near()
+    p.next_starts = [(nowa + datetime.timedelta(minutes=5)).isoformat(timespec="minutes")]
+    assert not p._burst_near()                           # inside lockout: pointless
+
+
+def test_shadow_report_buckets(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    os.makedirs("logs", exist_ok=True)
+    with open(se.SSHADOWR, "w", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(["ts", "sport", "kind", "ticker", "side", "fair", "entry_c",
+                    "mid_c", "edge_c", "src", "start", "outcome"])
+        for i in range(6):   # 2-3c bucket: 4/6 winners at entry 40
+            w.writerow(["t%d" % i, "mlb", "ml", "T%d" % i, "yes", 0.45, 40,
+                        41, 2.5, "pinnacle", "s", 1 if i < 4 else 0])
+        for i in range(4):   # <0 bucket: 1/4 winners
+            w.writerow(["u%d" % i, "mlb", "ml", "U%d" % i, "no", 0.40, 45,
+                        46, -3.0, "median4", "s", 1 if i < 1 else 0])
+    rep = _bot().shadow_report()
+    assert rep["n"] == 10
+    by = {b["edge"]: b for b in rep["buckets"]}
+    assert by["2-3"]["n"] == 6 and abs(by["2-3"]["act"] - 66.7) < 0.1
+    assert by["2-3"]["ev_c"] > 0 and by["<0"]["ev_c"] < 0

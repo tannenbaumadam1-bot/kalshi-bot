@@ -19,8 +19,12 @@ Deliberate scope (the "smart" filters - each one earned by a past loss):
   FAIR_W sharp + (1-FAIR_W) Kalshi mid, so we only act on big dislocations.
 - Maker-only entries (join the bid): Kalshi maker fee rounds to ~$0 at our
   size vs taker 7c*P*(1-P) (~1.75c at 50c = ~3.5% of basis - fatal to a 3c edge).
-  Paper assumes the resting order fills at the bid: OPTIMISTIC. Treat paper
-  results as an upper bound; the gate exists for exactly this reason.
+- REALISTIC FILLS (v2, 7/10): a placed order RESTS in self.pending and only
+  becomes a position when the market trades through our price (last_price at or
+  through us, or the book crosses us); unfilled orders CANCEL at the lockout.
+  This models the adverse selection a real resting order eats - the old
+  "instant fill at the bid" sim was an upper bound that could pass the gate on
+  fills that would never happen.
 - One bet per game, MAX_PER_DAY/day, MAX_OPEN open, probe stakes (<=60c/bet)
   until the 30-bet calibration gate passes (same contract as the weather book).
 
@@ -31,13 +35,28 @@ Kalshi period markets are in-game (excluded by the no-in-play rule) and prop
 anchors carry the widest vig; totals+ml are where sharp anchors are strongest.
 
 Odds source: The Odds API, region 'eu' only = Pinnacle + Euro sharps (Pinnacle
-preferred when present; median >=MIN_BOOKS fallback). Credit math (free tier
-500/mo): 2 markets x 1 region = 2 credits/sport/scan; 2 in-season sports at
-ODDS_SCAN_HOURS=6 -> ~480/mo. Paid tier ($30/mo, 20k) lifts all limits.
+preferred when present; median >=MIN_BOOKS fallback).
+
+Credit discipline (v2, 7/10 - the free tier is 500/mo and running dry mid-month
+silently idles the whole strategy):
+- x-requests-remaining response headers are tracked and shown on the dashboard.
+- A sport is only scanned if Kalshi has a QUOTED game inside the bet window
+  (ticker-parsed, free) - kills the NFL-preseason burn (quoted futures months
+  out => 2 credits/scan for 0 evaluable markets).
+- Scan interval adapts to the remaining monthly budget (credits left / days
+  left), clamped [1h, 24h].
+- BURST scans: when ahead of credit pace and a matched game starts within
+  ~100min, rescan after >=45min - edges cluster in the last look before start.
+
+Shadow calibration (v2, 7/10): every band-qualifying edge was already logged to
+logs/sharpev_shadow.csv; now a daily joiner fetches outcomes into
+sharpev_shadow_res.csv and buckets realized win rate by edge size - ~30x more
+calibration data per day than actual bets. Judge the anchor on this table.
+
 Without ODDS_API_KEY the module idles gracefully.
 """
 from __future__ import annotations
-import os, json, csv, re, datetime, statistics
+import os, json, csv, re, calendar, datetime, statistics
 try:
     from zoneinfo import ZoneInfo
     ET = ZoneInfo("America/New_York")
@@ -51,15 +70,16 @@ SSIM = os.path.join("logs", "sharpev_sim.json")
 SSTATE = os.path.join("logs", "sharpev_state.json")
 SLOG = os.path.join("logs", "sharpev_bets.csv")
 SSHADOW = os.path.join("logs", "sharpev_shadow.csv")   # every evaluated edge, bet or not
+SSHADOWR = os.path.join("logs", "sharpev_shadow_res.csv")  # shadow rows + outcome
 
 ERA = "ev1-sharp"
 START_CENTS = int(os.environ.get("SEV_START_C", "10000"))
 MIN_EDGE_C = float(os.environ.get("SEV_MIN_EDGE_C", "4"))      # net edge to act (post-gate)
 # Probe mode uses a LOWER bar: maker fee ~$0 and stakes <=60c mean any positive
-# shrunk edge is +EV in expectation; the point of probe is COLLECTING calibration
-# data, and a 4c bar after 0.70 shrinkage (~5.7c raw sharp-vs-mid disagreement)
-# produced ZERO bets against pro-anchored Kalshi MLB lines. 2c shrunk = ~2.9c raw.
-PROBE_MIN_EDGE_C = float(os.environ.get("SEV_PROBE_MIN_EDGE_C", "2"))
+# shrunk edge is +EV in expectation; probing exists to COLLECT calibration data.
+# 1.5c shrunk = ~2.1c raw sharp-vs-mid disagreement. The realistic fill sim
+# (cancel-at-lockout, trade-through fills) is what makes a low bar safe to run.
+PROBE_MIN_EDGE_C = float(os.environ.get("SEV_PROBE_MIN_EDGE_C", "1.5"))
 MIN_P, MAX_P = 0.20, 0.80          # fair-prob band: no longshots (Adam's rule)
 MIN_PRICE, MAX_PRICE = 20, 80      # entry-price band
 MAX_SPREAD_C = int(os.environ.get("SEV_MAX_SPREAD_C", "6"))
@@ -77,6 +97,11 @@ PER_BET_CAP = 0.015                # post-gate quarter-Kelly cap
 SCAN_HOURS = float(os.environ.get("ODDS_SCAN_HOURS", "6"))
 ODDS_MARKETS = os.environ.get("ODDS_MARKETS", "h2h,totals")
 ODDS_REGIONS = os.environ.get("ODDS_REGIONS", "eu")   # eu = Pinnacle & co
+CREDITS_MO = float(os.environ.get("SEV_CREDITS_MO", "500"))    # monthly odds budget
+CREDIT_RESERVE = float(os.environ.get("SEV_CREDIT_RESERVE", "40"))
+BURST_WITHIN_MIN = float(os.environ.get("SEV_BURST_WITHIN_MIN", "100"))
+BURST_GAP_H = float(os.environ.get("SEV_BURST_GAP_H", "0.75"))
+SHADOW_LOOKUPS_MAX = int(os.environ.get("SEV_SHADOW_LOOKUPS", "150"))
 
 SPORTS = {   # odds-api key -> kalshi series (ml = winner, total = game total)
     "baseball_mlb":        {"ml": "KXMLBGAME",  "total": "KXMLBTOTAL"},
@@ -264,13 +289,19 @@ class SharpEV:
         self.start = START_CENTS
         self.cash = float(START_CENTS)
         self.bets = {}
+        self.pending = {}              # resting maker orders awaiting a real fill
         self.realized = 0.0
         self.wins = 0
         self.losses = 0
         self.fees = 0.0
         self.placed = 0
+        self.canceled = 0              # resting orders that expired unfilled
         self.history = []
         self.last_fetch = ""           # iso ts of last odds pull
+        self.credits_remaining = None  # from x-requests-remaining header
+        self.next_starts = []          # upcoming matched game starts (iso, ET)
+        self.shadow_day = ""           # last date the shadow joiner ran
+        self.shadow_cache = {}         # cached shadow calibration report
         self.warned_no_key = False
         self._shadow_rows = []         # per-scan: every band-qualifying edge seen
         self.last_scan = {}            # diagnostics for the dashboard
@@ -279,20 +310,28 @@ class SharpEV:
     # ---- persistence (same contract as the other books) ----
     def to_dict(self):
         return {"start": self.start, "cash": self.cash, "bets": self.bets,
-                "realized": self.realized, "wins": self.wins, "losses": self.losses,
-                "fees": self.fees, "placed": self.placed,
+                "pending": self.pending, "realized": self.realized,
+                "wins": self.wins, "losses": self.losses,
+                "fees": self.fees, "placed": self.placed, "canceled": self.canceled,
                 "last_fetch": self.last_fetch, "last_scan": self.last_scan,
+                "credits_remaining": self.credits_remaining,
+                "next_starts": self.next_starts, "shadow_day": self.shadow_day,
                 "history": self.history[-100:]}
 
     def load(self):
         try:
             d = json.load(open(SSIM))
-            for k in ("start", "cash", "realized", "wins", "losses", "fees", "placed"):
+            for k in ("start", "cash", "realized", "wins", "losses", "fees",
+                      "placed", "canceled"):
                 setattr(self, k, d.get(k, getattr(self, k)))
             self.bets = d.get("bets", {})
+            self.pending = d.get("pending", {})
             self.history = d.get("history", [])
             self.last_fetch = d.get("last_fetch", "")
             self.last_scan = d.get("last_scan", {})
+            self.credits_remaining = d.get("credits_remaining")
+            self.next_starts = d.get("next_starts", [])
+            self.shadow_day = d.get("shadow_day", "")
         except Exception:
             pass
 
@@ -303,6 +342,8 @@ class SharpEV:
             st = {"updated": datetime.datetime.now().isoformat(timespec="seconds"),
                   "summary": self.summary(),
                   "last_scan": self.last_scan,
+                  "shadow": self.shadow_cache or {},
+                  "pending": [dict(o, ticker=tk) for tk, o in self.pending.items()],
                   "open": [dict(b, ticker=tk) for tk, b in self.bets.items()],
                   "settled": list(reversed(self.history[-50:]))}
             json.dump(st, open(SSTATE, "w"))
@@ -314,7 +355,8 @@ class SharpEV:
         return {"start": round(self.start / 100.0, 2), "cash": round(self.cash / 100.0, 2),
                 "realized": round(self.realized / 100.0, 2), "wins": self.wins,
                 "losses": self.losses, "fees": round(self.fees / 100.0, 2),
-                "placed": self.placed, "open_bets": len(self.bets),
+                "placed": self.placed, "canceled": self.canceled,
+                "open_bets": len(self.bets), "pending": len(self.pending),
                 "gate": mode, "gate_n": n}
 
     def _log(self, row):
@@ -353,6 +395,12 @@ class SharpEV:
                              params={"apiKey": key, "regions": ODDS_REGIONS,
                                      "markets": ODDS_MARKETS, "oddsFormat": "decimal"},
                              timeout=20)
+            rem = r.headers.get("x-requests-remaining")
+            if rem is not None:
+                try:
+                    self.credits_remaining = float(rem)
+                except (TypeError, ValueError):
+                    pass
             if r.status_code != 200:
                 return None
             return r.json()
@@ -380,9 +428,79 @@ class SharpEV:
         except Exception:
             return None
 
+    # ---- credit pacing ----
+    def _interval_h(self):
+        """Adaptive scan interval: stretch the remaining monthly credit budget
+        over the remaining days; clamp [1h, 24h]. Unknown budget -> SCAN_HOURS."""
+        rem = self.credits_remaining
+        if rem is None:
+            return SCAN_HOURS
+        today = datetime.date.today()
+        days_in = calendar.monthrange(today.year, today.month)[1]
+        days_left = max(1, days_in - today.day + 1)
+        n_sports = max(1, len((self.last_scan or {}).get("sports") or []) or 2)
+        per_scan = 2.0 * n_sports          # 2 markets x 1 region = 2 credits/sport
+        scans_left = max(1.0, (rem - CREDIT_RESERVE) / per_scan)
+        return min(max(24.0 * days_left / scans_left, 1.0), 24.0)
+
+    def _pace_ok(self):
+        """True when cumulative credit use is AHEAD of a uniform monthly pace
+        (i.e. we have slack to spend on a burst scan)."""
+        rem = self.credits_remaining
+        if rem is None:
+            return False
+        today = datetime.date.today()
+        days_in = calendar.monthrange(today.year, today.month)[1]
+        used = max(0.0, CREDITS_MO - rem)
+        return used < CREDITS_MO * (today.day / days_in) * 0.9
+
+    def _burst_near(self):
+        """A matched game starts soon: worth a last-look scan (edges cluster
+        just before start, when the books are sharpest and Kalshi most liquid)."""
+        nowa = datetime.datetime.now(ET)
+        for s in self.next_starts or []:
+            try:
+                st = datetime.datetime.fromisoformat(s)
+            except Exception:
+                continue
+            d = st - nowa
+            if datetime.timedelta(minutes=LOCKOUT_MIN) <= d <= \
+                    datetime.timedelta(minutes=BURST_WITHIN_MIN):
+                return True
+        return False
+
+    @staticmethod
+    def _near_game(markets, now=None):
+        """True if the series has a QUOTED game inside the bet window - the
+        free pre-check that stops odds credits burning on out-of-season sports
+        (e.g. NFL preseason: quoted futures months out, 0 evaluable markets)."""
+        now = now or datetime.datetime.now(ET)
+        for mk in markets:
+            if not mk.get("yes_bid"):
+                continue
+            st, has_time, _ = parse_ticker(mk.get("ticker", ""))
+            if st is None:
+                continue
+            if has_time:
+                if now - datetime.timedelta(hours=6) <= st \
+                        <= now + datetime.timedelta(hours=HOURS_BEFORE):
+                    return True
+            else:
+                if st in (now.date(), (now + datetime.timedelta(days=1)).date()):
+                    return True
+        return False
+
     # ---- core ----
     def settle(self):
+        now = datetime.datetime.now(ET)
         for tk, b in list(self.bets.items()):
+            st = b.get("start")
+            if st:
+                try:
+                    if now < datetime.datetime.fromisoformat(st):
+                        continue               # game not started: nothing to settle
+                except Exception:
+                    pass
             res = self.fetch_result(tk)
             if res is None:
                 continue
@@ -401,9 +519,70 @@ class SharpEV:
                        row["outcome"], row["pnl"]])
             del self.bets[tk]
 
+    def check_fills(self, quotes=None):
+        """Resting-order simulation. A pending order fills only when the market
+        actually trades through our price (or the book crosses us); it cancels
+        at the lockout if untouched. quotes: {ticker: {yes_bid,yes_ask,last_price}}
+        (fetched in one batch call when None)."""
+        if not self.pending:
+            return 0
+        now = datetime.datetime.now(ET)
+        if quotes is None:
+            quotes = {}
+            try:
+                tks = ",".join(list(self.pending)[:40])
+                d = requests.get(KALSHI + "/markets",
+                                 params={"tickers": tks, "limit": 100},
+                                 timeout=15).json()
+                for m in d.get("markets") or []:
+                    quotes[m.get("ticker")] = {
+                        k: _cents(m, k) for k in ("yes_bid", "yes_ask", "last_price")}
+            except Exception:
+                quotes = {}
+        filled = 0
+        for tk, o in list(self.pending.items()):
+            q = quotes.get(tk) or {}
+            last = q.get("last_price") or 0
+            yb, ya = q.get("yes_bid") or 0, q.get("yes_ask") or 0
+            e = o["entry"]
+            if o.get("side", "yes") == "yes":
+                # our YES bid at e: a print at/below e or the ask dropping to us
+                hit = (last and last <= e) or (ya and ya <= e)
+            else:
+                # our NO bid at e == YES offer at 100-e: print/bid at/through it
+                hit = (last and last >= 100 - e) or (yb and yb >= 100 - e)
+            if hit:
+                cost = e * o["count"]
+                if cost <= self.cash:
+                    self.cash -= cost
+                    b = {k: v for k, v in o.items() if k != "expire"}
+                    b["fts"] = now.isoformat(timespec="seconds")
+                    self.bets[tk] = b
+                    filled += 1
+                    self._log([b["fts"], "FILL", o.get("sport", ""), o.get("game", ""),
+                               o.get("team", ""), o.get("pside", 0), e, o["count"],
+                               "", ""])
+                    del self.pending[tk]
+                    continue
+            exp = o.get("expire")
+            expd = None
+            if exp:
+                try:
+                    expd = datetime.datetime.fromisoformat(exp)
+                except Exception:
+                    expd = None
+            if expd is not None and now >= expd:
+                self.canceled += 1
+                self._log([now.isoformat(timespec="seconds"), "CANCEL",
+                           o.get("sport", ""), o.get("game", ""), o.get("team", ""),
+                           o.get("pside", 0), e, o["count"], "unfilled", ""])
+                del self.pending[tk]
+        return filled
+
     def _placed_today(self):
         today = datetime.date.today().isoformat()
-        n = sum(1 for b in self.bets.values() if (b.get("ots") or "")[:10] == today)
+        n = sum(1 for b in list(self.bets.values()) + list(self.pending.values())
+                if (b.get("ots") or "")[:10] == today)
         n += sum(1 for h in self.history if (h.get("ots") or "")[:10] == today)
         return n
 
@@ -451,10 +630,12 @@ class SharpEV:
         out = []
         mode, _ = self._gate()
         min_edge = MIN_EDGE_C if mode == "scale" else PROBE_MIN_EDGE_C
-        open_events = {tk.rsplit("-", 1)[0] for tk in self.bets}
+        open_events = {tk.rsplit("-", 1)[0]
+                       for tk in list(self.bets) + list(getattr(self, "pending", {}))}
         for mk in markets:
             tk = mk.get("ticker", "")
-            if tk in self.bets or tk.rsplit("-", 1)[0] in open_events:
+            if tk in self.bets or tk in getattr(self, "pending", {}) \
+                    or tk.rsplit("-", 1)[0] in open_events:
                 continue                                # one bet per game per series
             kind = mk.get("_kind", "ml")
             if kind == "ml":
@@ -505,15 +686,19 @@ class SharpEV:
         return out
 
     def place(self, cands):
+        """Rest maker orders for the best candidates. Cash moves at FILL time
+        (check_fills), not here - a resting order costs nothing until it fills."""
         mode, _ = self._gate()
         open_stake = sum(b["entry"] * b["count"] for b in self.bets.values())
         bankroll = self.cash + open_stake
         placed = 0
         budget = MAX_PER_DAY - self._placed_today()
+        taken = {t.rsplit("-", 1)[0] for t in list(self.bets) + list(self.pending)}
         for mk, label, side, edge_c, fair, src, start_iso in cands:
-            if placed >= budget or len(self.bets) >= MAX_OPEN:
+            if placed >= budget or len(self.bets) + len(self.pending) >= MAX_OPEN:
                 break
-            if mk["ticker"].rsplit("-", 1)[0] in {t.rsplit("-", 1)[0] for t in self.bets}:
+            tk = mk["ticker"]
+            if tk in self.bets or tk in self.pending or tk.rsplit("-", 1)[0] in taken:
                 continue                                 # filled a sibling this pass
             entry = mk["yes_bid"] if side == "yes" else 100 - mk["yes_ask"]
             if mode == "probe":
@@ -524,36 +709,52 @@ class SharpEV:
                 count = int(min(f_star, PER_BET_CAP) * bankroll // entry)
                 if count < 1:
                     continue
-            cost = entry * count
-            if cost > self.cash:
+            if entry * count > self.cash:
                 continue
-            self.cash -= cost
             self.placed += 1
             ots = datetime.datetime.now().isoformat(timespec="seconds")
             team = label if side == "yes" else (
                 "not " + label if label.startswith("Over") else label + " (fade)")
-            self.bets[mk["ticker"]] = {
+            expire = ""
+            try:
+                expire = (datetime.datetime.fromisoformat(start_iso)
+                          - datetime.timedelta(minutes=LOCKOUT_MIN)
+                          ).isoformat(timespec="seconds")
+            except Exception:
+                pass
+            self.pending[tk] = {
                 "sport": mk.get("_sport", ""), "game": (mk.get("title") or "")[:60],
                 "team": team, "side": side, "entry": entry, "count": count,
                 "pside": round(fair, 3), "edge": round(edge_c, 1), "fee": 0,
-                "src": src, "start": start_iso, "ots": ots, "era": ERA}
-            self._log([ots, "PLACE", mk.get("_sport", ""), (mk.get("title") or "")[:60],
+                "src": src, "start": start_iso, "ots": ots, "era": ERA,
+                "expire": expire}
+            taken.add(tk.rsplit("-", 1)[0])
+            self._log([ots, "REST", mk.get("_sport", ""), (mk.get("title") or "")[:60],
                        team, round(fair, 3), entry, count, "", ""])
             placed += 1
         return placed
 
     def step(self, force=False):
-        """Called from the bot loop. Settles cheaply every call; pulls odds only
-        every SCAN_HOURS (credit budget)."""
+        """Called from the bot loop. Settles + checks resting fills cheaply every
+        call; pulls odds on the adaptive credit-paced schedule (+ burst scans
+        near game starts when ahead of pace)."""
         self.settle()
+        self.check_fills()
+        self.shadow_daily()
         now = datetime.datetime.now()
-        due = True
+        elapsed_h = 1e9
         if self.last_fetch and not force:
             try:
-                due = (now - datetime.datetime.fromisoformat(self.last_fetch)
-                       ).total_seconds() >= SCAN_HOURS * 3600
+                elapsed_h = (now - datetime.datetime.fromisoformat(self.last_fetch)
+                             ).total_seconds() / 3600.0
             except Exception:
-                due = True
+                pass
+        interval = self._interval_h()
+        due = force or elapsed_h >= interval
+        burst = False
+        if not due and elapsed_h >= BURST_GAP_H and self._pace_ok() \
+                and self._burst_near():
+            due = burst = True
         n_cand = n_placed = 0
         if due:
             if not os.environ.get("ODDS_API_KEY", ""):
@@ -564,11 +765,13 @@ class SharpEV:
                 return 0, 0
             self.last_fetch = now.isoformat(timespec="seconds")
             self._shadow_rows = []
+            nowa = datetime.datetime.now(ET)
+            starts = []
             scan = {"ts": self.last_fetch, "sports": [], "evaluated": 0,
-                    "best_edge": None, "bar": None}
+                    "best_edge": None, "bar": None, "burst": burst}
             for sport, series_map in SPORTS.items():
                 # credit guard: Kalshi first (free) - only spend odds credits on
-                # sports that have QUOTED near-term Kalshi markets right now
+                # sports that have QUOTED markets inside the bet window right now
                 markets = []
                 for kind, series in series_map.items():
                     if kind == "total" and "totals" not in ODDS_MARKETS:
@@ -579,9 +782,16 @@ class SharpEV:
                         markets.append(mk)
                 if not any(m.get("yes_bid") for m in markets):
                     continue                       # out of season / nothing live
+                if not self._near_game(markets, nowa):
+                    continue                       # quoted, but no game in window
                 events = self.fetch_odds(sport)
                 if not events:
                     continue
+                for ev in events:                  # cache starts for burst logic
+                    st = self._start_of(ev)
+                    if st and datetime.timedelta(0) <= st - nowa \
+                            <= datetime.timedelta(hours=26):
+                        starts.append(st.isoformat(timespec="minutes"))
                 before = len(self._shadow_rows)
                 cands = self.candidates(events, markets)
                 n_cand += len(cands)
@@ -596,6 +806,10 @@ class SharpEV:
                 scan["best_edge"] = max(r[8] for r in self._shadow_rows)
             mode, _ = self._gate()
             scan["bar"] = MIN_EDGE_C if mode == "scale" else PROBE_MIN_EDGE_C
+            scan["credits"] = self.credits_remaining
+            scan["interval_h"] = round(self._interval_h(), 2)
+            scan["pending"] = len(self.pending)
+            self.next_starts = sorted(set(starts))[:40]
             self.last_scan = scan
             self._flush_shadow()
         self.save()
@@ -619,10 +833,115 @@ class SharpEV:
             pass
         self._shadow_rows = []
 
+    # ---- shadow outcomes: ~30x more calibration data/day than actual bets ----
+    def shadow_daily(self, force=False):
+        """Once a day, join settled outcomes onto the shadow log (bounded
+        lookups) and refresh the edge-bucket calibration report."""
+        today = datetime.date.today().isoformat()
+        if self.shadow_day == today and not force:
+            return
+        self.shadow_day = today
+        try:
+            raw = list(csv.reader(open(SSHADOW)))
+        except Exception:
+            return
+        if len(raw) < 2:
+            return
+        hdr, rows = raw[0], raw[1:]
+        done = set()
+        try:
+            for r in csv.reader(open(SSHADOWR)):
+                if len(r) >= 5 and r[0] != "ts":
+                    done.add((r[0], r[3], r[4]))
+        except Exception:
+            pass
+        now = datetime.datetime.now(ET)
+        res_cache, looked, out = {}, 0, []
+        for r in rows:
+            if len(r) < 11 or (r[0], r[3], r[4]) in done:
+                continue
+            try:
+                st = datetime.datetime.fromisoformat(r[10])
+            except Exception:
+                continue
+            if not (now - datetime.timedelta(days=10) < st
+                    < now - datetime.timedelta(hours=5)):
+                continue                       # game must be over (and recent)
+            tk = r[3]
+            if tk not in res_cache:
+                if looked >= SHADOW_LOOKUPS_MAX:
+                    continue
+                looked += 1
+                res_cache[tk] = self.fetch_result(tk)
+            res = res_cache[tk]
+            if res is None:
+                continue
+            out.append(r + [1 if res == r[4] else 0])
+        if out:
+            try:
+                new = not os.path.exists(SSHADOWR)
+                with open(SSHADOWR, "a", newline="") as f:
+                    w = csv.writer(f)
+                    if new:
+                        w.writerow(hdr + ["outcome"])
+                    w.writerows(out)
+            except Exception:
+                pass
+        self.shadow_cache = self.shadow_report()
+
+    def shadow_report(self):
+        """Edge-bucket calibration from settled shadow rows: does sharp-vs-Kalshi
+        disagreement actually predict outcomes? ev_c = mean(100*outcome - entry)
+        per contract in cents, at the maker entry we would have joined."""
+        try:
+            rows = list(csv.reader(open(SSHADOWR)))[1:]
+        except Exception:
+            return {}
+        buckets = [(-99, 0, "<0"), (0, 1, "0-1"), (1, 2, "1-2"),
+                   (2, 3, "2-3"), (3, 5, "3-5"), (5, 999, "5+")]
+        agg, n_all = {}, 0
+        for r in rows:
+            try:
+                fair, entry = float(r[5]), float(r[6])
+                edge, out = float(r[8]), int(r[11])
+            except (ValueError, IndexError):
+                continue
+            n_all += 1
+            for lo, hi, lab in buckets:
+                if lo <= edge < hi:
+                    a = agg.setdefault(lab, [0, 0.0, 0, 0.0, 0.0])
+                    a[0] += 1
+                    a[1] += fair
+                    a[2] += out
+                    a[3] += entry
+                    a[4] += 100.0 * out - entry
+                    break
+        rep = {"n": n_all, "buckets": []}
+        for lo, hi, lab in buckets:
+            a = agg.get(lab)
+            if not a or a[0] < 3:
+                continue
+            rep["buckets"].append(
+                {"edge": lab, "n": a[0],
+                 "fair": round(100.0 * a[1] / a[0], 1),
+                 "act": round(100.0 * a[2] / a[0], 1),
+                 "entry": round(a[3] / a[0], 1),
+                 "ev_c": round(a[4] / a[0], 2)})
+        return rep
+
 
 if __name__ == "__main__":
     import sys
-    if "--selftest" in sys.argv:
+    if "--shadow-report" in sys.argv:
+        p = SharpEV()
+        p.shadow_daily(force=True)
+        rep = p.shadow_cache or {}
+        print("settled shadow rows: %d" % rep.get("n", 0))
+        for b in rep.get("buckets", []):
+            print("  edge %-4s n=%-4d fair %5.1f%%  act %5.1f%%  entry %5.1f  "
+                  "EV/contract %+.2fc" % (b["edge"], b["n"], b["fair"], b["act"],
+                                          b["entry"], b["ev_c"]))
+    elif "--selftest" in sys.argv:
         # devig
         f = devig({"A": 1.91, "B": 1.91})
         assert abs(f["A"] - 0.5) < 1e-9
@@ -652,10 +971,11 @@ if __name__ == "__main__":
         mk = {"ticker": tk, "title": "Atlanta vs Pittsburgh Winner?",
               "yes_sub_title": "Pittsburgh", "yes_bid": 50, "yes_ask": 53, "_sport": "baseball_mlb"}
         p = SharpEV.__new__(SharpEV)
-        p.start = 10000; p.cash = 10000.0; p.bets = {}; p.realized = 0.0
-        p.wins = p.losses = p.placed = 0; p.fees = 0.0; p.history = []
-        p.last_fetch = ""; p.warned_no_key = False
-        p._shadow_rows = []; p.last_scan = {}
+        p.start = 10000; p.cash = 10000.0; p.bets = {}; p.pending = {}
+        p.realized = 0.0; p.wins = p.losses = p.placed = p.canceled = 0
+        p.fees = 0.0; p.history = []; p.last_fetch = ""; p.warned_no_key = False
+        p.credits_remaining = None; p.next_starts = []; p.shadow_day = ""
+        p.shadow_cache = {}; p._shadow_rows = []; p.last_scan = {}
         cands = p.candidates([ev], [mk], now=now)
         assert len(cands) == 1 and cands[0][3] >= MIN_EDGE_C     # pinnacle 62% vs 50c bid
         # longshot rejected even with huge edge
@@ -668,17 +988,17 @@ if __name__ == "__main__":
         assert p.candidates([dict(ev, commence_time=(now - datetime.timedelta(minutes=5))
                              .astimezone(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"))],
                             [mk], now=now) == []
-        # probe-mode bar: a 2-4c edge is bettable while probing (data collection)
-        # pinnacle fair 61.9% -> blended fair vs bid 58 = ~3.1c edge
+        # probe-mode bar: a small edge is restable while probing (data collection)
         mk4 = dict(mk, yes_bid=58, yes_ask=60)
         c4 = p.candidates([ev], [mk4], now=now)
         assert len(c4) == 1 and PROBE_MIN_EDGE_C <= c4[0][3] < MIN_EDGE_C
         # ...but the SAME market is rejected once the gate passes (scale mode)
         p2 = SharpEV.__new__(SharpEV)
-        p2.start = 10000; p2.cash = 10000.0; p2.bets = {}; p2.realized = 0.0
-        p2.wins = p2.losses = p2.placed = 0; p2.fees = 0.0
-        p2.last_fetch = ""; p2.warned_no_key = False
-        p2._shadow_rows = []; p2.last_scan = {}
+        p2.start = 10000; p2.cash = 10000.0; p2.bets = {}; p2.pending = {}
+        p2.realized = 0.0; p2.wins = p2.losses = p2.placed = p2.canceled = 0
+        p2.fees = 0.0; p2.last_fetch = ""; p2.warned_no_key = False
+        p2.credits_remaining = None; p2.next_starts = []; p2.shadow_day = ""
+        p2.shadow_cache = {}; p2._shadow_rows = []; p2.last_scan = {}
         p2.history = [{"era": ERA, "outcome": 1, "pnl": 10, "pside": 0.97}] * 30
         assert p2._gate()[0] == "scale"
         assert p2.candidates([ev], [mk4], now=now) == []
@@ -696,19 +1016,37 @@ if __name__ == "__main__":
                 {"name": "Pittsburgh Pirates", "price": 1.9},
                 {"name": "Atlanta Braves", "price": 1.9}]}]}])
         assert fair_from_books(ev2) == ({}, "")
-        # placement at probe size + settle math
+        # placement rests a maker order (no cash moves), fill on trade-through
         n = p.place(cands)
-        assert n == 1 and p.placed == 1 and len(p.bets) == 1
+        assert n == 1 and p.placed == 1 and len(p.pending) == 1 and not p.bets
+        assert p.cash == 10000.0
+        tk0 = list(p.pending)[0]
+        p.check_fills(quotes={tk0: {"yes_bid": 50, "yes_ask": 53, "last_price": 50}})
+        assert len(p.bets) == 1 and not p.pending and p.cash < 10000.0
         b = list(p.bets.values())[0]
         assert b["entry"] * b["count"] <= PROBE_COST_CENTS
         p.fetch_result = lambda tk: "yes"
         os.makedirs("logs", exist_ok=True)
+        p.settle()                       # game hasn't started -> nothing settles
+        assert p.wins == 0 and p.bets
+        list(p.bets.values())[0]["start"] = (
+            now - datetime.timedelta(hours=4)).isoformat(timespec="minutes")
         p.settle()
         assert p.wins == 1 and p.realized > 0
-        print("sharp_ev self-test PASSED (devig, parse, match, filters, probe bar, shadow, settle)")
+        # NFL-preseason style series (quoted, but games months out) is skipped
+        far = now + datetime.timedelta(days=60)
+        fmk = {"ticker": "KXNFLGAME-26%s%02d%02d%02dDALNYG-DAL" % (
+            ["JAN","FEB","MAR","APR","MAY","JUN","JUL","AUG","SEP","OCT","NOV","DEC"][far.month-1],
+            far.day, far.hour, far.minute), "yes_bid": 45, "yes_ask": 48}
+        assert not SharpEV._near_game([fmk], now)
+        assert SharpEV._near_game([mk], now)
+        print("sharp_ev self-test PASSED (devig, parse, match, filters, probe bar, "
+              "rest/fill, near-game guard, shadow, settle)")
     else:
         p = SharpEV()
         nc, np_ = p.step(force=True)
         s = p.summary()
-        print("sharp-ev: %d candidates, %d placed | bank $%.2f | %dW/%dL | gate %s %d/30"
-              % (nc, np_, s["cash"], s["wins"], s["losses"], s["gate"], s["gate_n"]))
+        print("sharp-ev: %d candidates, %d placed | bank $%.2f | %dW/%dL | "
+              "pending %d | gate %s %d/30 | credits left %s"
+              % (nc, np_, s["cash"], s["wins"], s["losses"], s["pending"],
+                 s["gate"], s["gate_n"], p.credits_remaining))
