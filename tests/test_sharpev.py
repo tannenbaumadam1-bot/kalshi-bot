@@ -345,3 +345,31 @@ def test_shadow_report_handles_odds_age_column(tmp_path, monkeypatch):
     assert rep["n"] == 6
     by = {b["edge"]: b for b in rep["buckets"]}
     assert by["1-2"]["n"] == 6 and abs(by["1-2"]["act"] - 50.0) < 0.1
+
+
+def test_fade_report_dedups_and_prices_taker_inverse(tmp_path, monkeypatch):
+    """v3.1 fade study: inverse EV of big edges at taker prices, deduped to
+    the last row per (ticker, side) so per-scan duplicates don't fake n."""
+    monkeypatch.chdir(tmp_path)
+    os.makedirs("logs", exist_ok=True)
+    with open(se.SSHADOWR, "w", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(["ts", "sport", "kind", "ticker", "side", "fair", "entry_c",
+                    "mid_c", "edge_c", "src", "start", "odds_age_m", "outcome"])
+        # same game logged 5x across scans -> must count ONCE (last row wins)
+        for i in range(5):
+            w.writerow(["t%d" % i, "mlb", "ml", "GAME1", "yes", 0.45, 40,
+                        41, 2.5, "pinnacle", "s", 3.0, 0])
+        # a second game, our side won (fade loses)
+        w.writerow(["u0", "mlb", "ml", "GAME2", "yes", 0.45, 40,
+                    41, 2.6, "pinnacle", "s", 3.0, 1])
+        # sub-threshold edge: excluded from the fade study
+        w.writerow(["v0", "mlb", "ml", "GAME3", "yes", 0.50, 48,
+                    49, 1.7, "pinnacle", "s", 3.0, 0])
+    rep = _bot().fade_report()
+    assert rep["n"] == 2                       # deduped: GAME1 once + GAME2
+    assert rep["our_act"] == 50.0
+    # inverse econ at entry 40: fee = 7*0.4*0.6 = 1.68c
+    # GAME1 (out=0): +40 - 1.68 = +38.32 ; GAME2 (out=1): 40-100-1.68 = -61.68
+    assert abs(rep["inv_ev_c"] - (38.32 - 61.68) / 2) < 0.01
+    assert rep["buckets"] == []                # n=2 < 3 per-bucket floor

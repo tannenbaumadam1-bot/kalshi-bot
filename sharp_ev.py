@@ -108,6 +108,7 @@ MAX_EDGE_C = float(os.environ.get("SEV_MAX_EDGE_C", "2.0"))
 MAX_ODDS_AGE_MIN = float(os.environ.get("SEV_MAX_ODDS_AGE_MIN", "30"))  # stale-line guard
 MAX_REST_H = float(os.environ.get("SEV_MAX_REST_H", "2.0"))    # cap the free option
 CANCEL_EDGE_C = float(os.environ.get("SEV_CANCEL_EDGE_C", "0.5"))  # revalidation floor
+FADE_MIN_EDGE_C = float(os.environ.get("SEV_FADE_MIN_EDGE_C", "2.0"))  # fade study bar
 MIN_P, MAX_P = 0.20, 0.80          # fair-prob band: no longshots (Adam's rule)
 MIN_PRICE, MAX_PRICE = 20, 80      # entry-price band
 MAX_SPREAD_C = int(os.environ.get("SEV_MAX_SPREAD_C", "6"))
@@ -1014,6 +1015,9 @@ class SharpEV:
             except Exception:
                 pass
         self.shadow_cache = self.shadow_report()
+        fade = self.fade_report()
+        if fade:
+            self.shadow_cache["fade"] = fade
 
     def shadow_report(self):
         """Edge-bucket calibration from settled shadow rows: does sharp-vs-Kalshi
@@ -1057,6 +1061,60 @@ class SharpEV:
                  "ev_c": round(a[4] / a[0], 2)})
         return rep
 
+    def fade_report(self):
+        """FADE STUDY (measurement only - no fade bets are placed). The v3
+        finding: big sharp-vs-Kalshi disagreements LOSE at our maker price -
+        so would the OPPOSITE side (bet WITH Kalshi, against the sharp
+        consensus) make money at honest TAKER prices?
+        Method: settled shadow rows with edge >= FADE_MIN_EDGE_C, DEDUPED to
+        the last row per (ticker, side) - the same game is logged every scan
+        and duplicate rows fake the sample size. Inverse economics per
+        contract: pay 100-entry (cross the book), pay the taker fee
+        7*P*(1-P) cents, collect 100 when OUR side loses:
+            inv_ev_c = entry - 100*outcome - fee.
+        Promote to a paper book ONLY if this stays positive at n >= 30
+        deduped games; odds_age_m in the shadow rows shows how much of the
+        effect is stale-feed artifact the v3 freshness gate already removes."""
+        try:
+            rows = list(csv.reader(open(SSHADOWR)))[1:]
+        except Exception:
+            return {}
+        last = {}
+        for r in rows:
+            try:
+                if float(r[8]) >= FADE_MIN_EDGE_C:
+                    int(r[-1])
+                    last[(r[3], r[4])] = r
+            except (ValueError, IndexError):
+                continue
+        if not last:
+            return {}
+        buckets = [(2, 3, "2-3"), (3, 5, "3-5"), (5, 999, "5+")]
+        agg = {}
+        tot = [0, 0.0, 0]
+        for r in last.values():
+            entry, edge, out = float(r[6]), float(r[8]), int(r[-1])
+            pe = entry / 100.0
+            inv = entry - 100.0 * out - 7.0 * pe * (1.0 - pe)
+            tot[0] += 1
+            tot[1] += inv
+            tot[2] += out
+            for lo, hi, lab in buckets:
+                if lo <= edge < hi:
+                    a = agg.setdefault(lab, [0, 0.0])
+                    a[0] += 1
+                    a[1] += inv
+                    break
+        out_b = []
+        for lo, hi, lab in buckets:
+            a = agg.get(lab)
+            if a and a[0] >= 3:
+                out_b.append({"edge": lab, "n": a[0],
+                              "inv_ev_c": round(a[1] / a[0], 2)})
+        return {"min_edge": FADE_MIN_EDGE_C, "n": tot[0],
+                "our_act": round(100.0 * tot[2] / tot[0], 1),
+                "inv_ev_c": round(tot[1] / tot[0], 2), "buckets": out_b}
+
 
 if __name__ == "__main__":
     import sys
@@ -1069,6 +1127,12 @@ if __name__ == "__main__":
             print("  edge %-4s n=%-4d fair %5.1f%%  act %5.1f%%  entry %5.1f  "
                   "EV/contract %+.2fc" % (b["edge"], b["n"], b["fair"], b["act"],
                                           b["entry"], b["ev_c"]))
+        fd = rep.get("fade") or {}
+        if fd:
+            print("FADE study (deduped, taker-priced inverse of edges >=%.1fc): "
+                  "n=%d our_act %.1f%% inv EV %+.2fc/contract %s"
+                  % (fd["min_edge"], fd["n"], fd["our_act"], fd["inv_ev_c"],
+                     fd["buckets"]))
     elif "--selftest" in sys.argv:
         # devig
         f = devig({"A": 1.91, "B": 1.91})
