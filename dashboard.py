@@ -656,7 +656,7 @@ async function load(){
       tile('Last scan',(S.last_scan&&S.last_scan.ts)?S.last_scan.ts.replace('T',' ').slice(5,16):'\u2013',
         (S.last_scan&&S.last_scan.ts)?((S.last_scan.evaluated||0)+' edges eval \u00b7 best '
           +(S.last_scan.best_edge!=null?S.last_scan.best_edge+'\u00a2':'\u2013')
-          +(S.last_scan.bar!=null?' vs '+S.last_scan.bar+'\u00a2 bar':'')):'no scan yet'),
+          +(S.last_scan.bar!=null?' vs '+S.last_scan.bar+(S.last_scan.ceil!=null?'\u2013'+S.last_scan.ceil:'')+'\u00a2 band':'')):'no scan yet'),
     ].join('');
     const rows=[];
     (S.pending||[]).forEach(b=>rows.push('<tr><td class=mut>'+((b.start||'').slice(5,16).replace('T',' '))+'</td><td><span class=mkt>'+(b.game||'')+'</span></td><td>'+(b.team||'')+'</td>'

@@ -6,7 +6,10 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import sharp_ev as se
 
 
-def _ev(start, pinn_home=1.60, pinn_away=2.60):
+def _ev(start, pinn_home=1.893, pinn_away=2.034):
+    # default = fair home ~51.8% vs 50c bid -> ~1.7c blended edge (inside the
+    # tradeable band [PROBE_MIN_EDGE_C, MAX_EDGE_C)); pass 1.60/2.60 for a
+    # too-good-to-be-true ~8.8c "edge" (rejected by the ceiling)
     return {"commence_time": start.astimezone(datetime.timezone.utc)
                 .strftime("%Y-%m-%dT%H:%M:%SZ"),
             "home_team": "Pittsburgh Pirates", "away_team": "Atlanta Braves",
@@ -75,7 +78,8 @@ def test_pipeline_rests_fills_and_settles():
     start = now + datetime.timedelta(hours=3)
     p = _bot()
     cands = p.candidates([_ev(start)], [_mk(start)], now=now)
-    assert len(cands) == 1 and cands[0][3] >= se.MIN_EDGE_C
+    assert len(cands) == 1
+    assert se.PROBE_MIN_EDGE_C <= cands[0][3] < se.MAX_EDGE_C   # inside the band
     assert p.place(cands) == 1
     assert len(p.pending) == 1 and not p.bets and p.cash == 10000.0  # rests, no cash
     assert _fill(p) == 1
@@ -109,8 +113,8 @@ def test_no_side_fill_logic():
     start = now + datetime.timedelta(hours=3)
     ev = _ev(start)
     ev["bookmakers"][0]["markets"].append({"key": "totals", "outcomes": [
-        {"name": "Over", "price": 2.30, "point": 8.5},
-        {"name": "Under", "price": 1.66, "point": 8.5}]})   # fair over ~ 41.7%
+        {"name": "Over", "price": 1.850, "point": 8.5},
+        {"name": "Under", "price": 2.086, "point": 8.5}]})  # fair over ~ 53%
     mons = ["JAN","FEB","MAR","APR","MAY","JUN","JUL","AUG","SEP","OCT","NOV","DEC"]
     tk = "KXMLBTOTAL-26%s%02d%02d%02dATLPIT-9" % (
         mons[start.month-1], start.day, start.hour, start.minute)
@@ -120,8 +124,9 @@ def test_no_side_fill_logic():
           "_sport": "baseball_mlb", "_kind": "total"}
     p = _bot()
     cands = p.candidates([ev], [mk], now=now)
-    # market says 53.5 mid, sharp says 41.7 -> NO (under) side has the edge
-    assert len(cands) == 1 and cands[0][2] == "no" and cands[0][3] >= se.MIN_EDGE_C
+    # market says 53.5 mid, sharp says 53.0 -> NO (under) side has a band edge
+    assert len(cands) == 1 and cands[0][2] == "no"
+    assert se.PROBE_MIN_EDGE_C <= cands[0][3] < se.MAX_EDGE_C
     assert p.place(cands) == 1
     o = p.pending[tk]
     assert o["side"] == "no" and o["entry"] == 100 - 55
@@ -229,6 +234,78 @@ def test_burst_near_game_start():
     assert not p._burst_near()                           # inside lockout: pointless
 
 
+def test_edge_ceiling_rejects_biggest_edges():
+    """v3: edges >= MAX_EDGE_C are information, not opportunity (measured:
+    2.0-2.5c realized 3W/14L; shadow 2-3c EV -23c/contract). Rejected in BOTH
+    gate modes, but still shadow-logged."""
+    now = datetime.datetime.now(se.ET)
+    start = now + datetime.timedelta(hours=3)
+    p = _bot()
+    big = _ev(start, 1.60, 2.60)          # ~8.8c blended "edge"
+    assert p.candidates([big], [_mk(start)], now=now) == []
+    assert any(float(r[8]) >= se.MAX_EDGE_C for r in p._shadow_rows)
+    p.history = [{"era": se.ERA, "outcome": 1, "pnl": 10, "pside": 0.5}] * 30
+    assert p._gate()[0] == "scale"
+    assert p.candidates([big], [_mk(start)], now=now) == []       # scale too
+    # ...and the band itself still trades in scale mode (gate = sizing only)
+    assert len(p.candidates([_ev(start)], [_mk(start)], now=now)) == 1
+
+
+def test_stale_odds_rejected_fresh_accepted():
+    """v3: a candidate anchored to an old book line is a lag artifact -> skip.
+    Odds age is logged into the shadow row (col 11); missing last_update is
+    treated as fresh (back-compat with fixtures/old feeds)."""
+    now = datetime.datetime.now(se.ET)
+    start = now + datetime.timedelta(hours=3)
+    utcnow = datetime.datetime.now(datetime.timezone.utc)
+    p = _bot()
+    stale = _ev(start)
+    stale["bookmakers"][0]["markets"][0]["last_update"] = (
+        utcnow - datetime.timedelta(hours=2)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    assert p.candidates([stale], [_mk(start)], now=now) == []
+    assert any(r[11] != "" and float(r[11]) > se.MAX_ODDS_AGE_MIN
+               for r in p._shadow_rows)
+    fresh = _ev(start)
+    fresh["bookmakers"][0]["markets"][0]["last_update"] = (
+        utcnow - datetime.timedelta(minutes=2)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    assert len(p.candidates([fresh], [_mk(start)], now=now)) == 1
+
+
+def test_rest_time_cap():
+    """v3: a resting order expires MAX_REST_H after placement even when the
+    game lockout is much later (long rests measured net-negative)."""
+    now = datetime.datetime.now(se.ET)
+    start = now + datetime.timedelta(hours=20)
+    p = _bot()
+    cands = p.candidates([_ev(start)], [_mk(start)], now=now)
+    assert p.place(cands) == 1
+    o = list(p.pending.values())[0]
+    expd = datetime.datetime.fromisoformat(o["expire"])
+    assert expd <= now + datetime.timedelta(hours=se.MAX_REST_H, minutes=1)
+
+
+def test_revalidate_pending_kills_stale_orders():
+    """v3: on each scan the fresh fair for every resting order is captured
+    (candidates() -> _pending_eval) and revalidate_pending() cancels orders
+    whose edge collapsed - no more free options resting in the book."""
+    now = datetime.datetime.now(se.ET)
+    start = now + datetime.timedelta(hours=3)
+    p = _bot()
+    mk = _mk(start)
+    cands = p.candidates([_ev(start)], [mk], now=now)
+    assert p.place(cands) == 1
+    tk = list(p.pending)[0]
+    # next scan sees the same market: captured for revalidation, not re-bet
+    assert p.candidates([_ev(start)], [mk], now=now) == []
+    assert tk in p._pending_eval
+    # fair unchanged -> order survives
+    assert p.revalidate_pending() == 0 and tk in p.pending
+    # sharp line collapses to 49% -> edge < CANCEL_EDGE_C -> canceled
+    p._pending_eval = {tk: (0.49, mk["yes_bid"], mk["yes_ask"])}
+    assert p.revalidate_pending() == 1
+    assert not p.pending and p.canceled == 1 and p.cash == 10000.0
+
+
 def test_shadow_report_buckets(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     os.makedirs("logs", exist_ok=True)
@@ -247,3 +324,24 @@ def test_shadow_report_buckets(tmp_path, monkeypatch):
     by = {b["edge"]: b for b in rep["buckets"]}
     assert by["2-3"]["n"] == 6 and abs(by["2-3"]["act"] - 66.7) < 0.1
     assert by["2-3"]["ev_c"] > 0 and by["<0"]["ev_c"] < 0
+
+
+def test_shadow_report_handles_odds_age_column(tmp_path, monkeypatch):
+    """v3 rows are 13-wide (odds_age_m before outcome); report reads outcome
+    from the LAST column so old 12-wide and new 13-wide rows mix safely."""
+    monkeypatch.chdir(tmp_path)
+    os.makedirs("logs", exist_ok=True)
+    with open(se.SSHADOWR, "w", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(["ts", "sport", "kind", "ticker", "side", "fair", "entry_c",
+                    "mid_c", "edge_c", "src", "start", "odds_age_m", "outcome"])
+        for i in range(3):   # old-style 12-wide row (no age)
+            w.writerow(["t%d" % i, "mlb", "ml", "T%d" % i, "yes", 0.5, 45,
+                        46, 1.7, "pinnacle", "s", 1])
+        for i in range(3):   # new-style 13-wide row (with age)
+            w.writerow(["n%d" % i, "mlb", "ml", "N%d" % i, "yes", 0.5, 45,
+                        46, 1.7, "pinnacle", "s", 4.2, 0])
+    rep = _bot().shadow_report()
+    assert rep["n"] == 6
+    by = {b["edge"]: b for b in rep["buckets"]}
+    assert by["1-2"]["n"] == 6 and abs(by["1-2"]["act"] - 50.0) < 0.1

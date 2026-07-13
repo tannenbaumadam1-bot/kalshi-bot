@@ -53,6 +53,22 @@ logs/sharpev_shadow.csv; now a daily joiner fetches outcomes into
 sharpev_shadow_res.csv and buckets realized win rate by edge size - ~30x more
 calibration data per day than actual bets. Judge the anchor on this table.
 
+v3 (7/13) - the "big edges lose" fixes, each earned by 34 settled + 1938 shadow
+rows (realized 2.0-2.5c edges: 3W/14L; shadow 2-3c: act 16.7% vs fair 42.2%):
+- EDGE CEILING (SEV_MAX_EDGE_C, 2.0c): the tradeable band is
+  [PROBE_MIN_EDGE_C, MAX_EDGE_C) in both gate modes - when Kalshi disagrees
+  hard with the sharp books, Kalshi has been right; a big "edge" is our fair
+  being stale/wrong, not mispricing. The gate changes sizing, never the band.
+- ODDS-AGE GATE (SEV_MAX_ODDS_AGE_MIN, 30m): candidates anchored to a stale
+  book line are skipped; every shadow row now logs odds_age_m so stale-line
+  artifacts can be separated from true adverse selection as data grows.
+- PENDING REVALIDATION: each scan recomputes fair for every RESTING order and
+  cancels it when the edge fell below SEV_CANCEL_EDGE_C (0.5c) or blew past
+  the ceiling - a resting order priced off an old fair is a free option for
+  informed flow (we get filled exactly when we're wrong).
+- REST-TIME CAP (SEV_MAX_REST_H, 2h): orders also expire MAX_REST_H after
+  placement, not just at the game lockout.
+
 Without ODDS_API_KEY the module idles gracefully.
 """
 from __future__ import annotations
@@ -80,6 +96,18 @@ MIN_EDGE_C = float(os.environ.get("SEV_MIN_EDGE_C", "4"))      # net edge to act
 # 1.5c shrunk = ~2.1c raw sharp-vs-mid disagreement. The realistic fill sim
 # (cancel-at-lockout, trade-through fills) is what makes a low bar safe to run.
 PROBE_MIN_EDGE_C = float(os.environ.get("SEV_PROBE_MIN_EDGE_C", "1.5"))
+# v3 (7/13): EDGE CEILING. 34 settled + 1938 shadow rows agree: edges >=2c are
+# where the money dies (realized 2.0-2.5c: 3W/14L -$4.89; shadow 2-3c: act 16.7%
+# vs fair 42.2%, EV -23c/contract) while 1.5-2.0c is flat-to-positive. When
+# Kalshi disagrees HARD with the sharp consensus, Kalshi has been right - a big
+# "edge" is a stale/wrong fair value (line move, injury news), not mispricing.
+# So the tradeable band is [PROBE_MIN_EDGE_C, MAX_EDGE_C) in BOTH modes; the
+# gate changes SIZING (probe stakes -> Kelly), never the band. Shadow still
+# logs every edge, so the ceiling can be raised if the table ever earns it.
+MAX_EDGE_C = float(os.environ.get("SEV_MAX_EDGE_C", "2.0"))
+MAX_ODDS_AGE_MIN = float(os.environ.get("SEV_MAX_ODDS_AGE_MIN", "30"))  # stale-line guard
+MAX_REST_H = float(os.environ.get("SEV_MAX_REST_H", "2.0"))    # cap the free option
+CANCEL_EDGE_C = float(os.environ.get("SEV_CANCEL_EDGE_C", "0.5"))  # revalidation floor
 MIN_P, MAX_P = 0.20, 0.80          # fair-prob band: no longshots (Adam's rule)
 MIN_PRICE, MAX_PRICE = 20, 80      # entry-price band
 MAX_SPREAD_C = int(os.environ.get("SEV_MAX_SPREAD_C", "6"))
@@ -199,6 +227,34 @@ def totals_from_books(event):
     return out
 
 
+def odds_age_min(event, key="h2h", book=None, now=None):
+    """Minutes since the newest last_update among books quoting `key` for this
+    event (or a specific `book`, e.g. the pinnacle anchor). None = unknown
+    (older feed rows without the field are treated as fresh for compat)."""
+    newest = None
+    for bk in event.get("bookmakers") or []:
+        if book and bk.get("key") != book:
+            continue
+        for m in bk.get("markets") or []:
+            if m.get("key") != key:
+                continue
+            lu = m.get("last_update") or bk.get("last_update")
+            if not lu:
+                continue
+            try:
+                t = datetime.datetime.fromisoformat(lu.replace("Z", "+00:00"))
+            except Exception:
+                continue
+            if newest is None or t > newest:
+                newest = t
+    if newest is None:
+        return None
+    now = now or datetime.datetime.now(datetime.timezone.utc)
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=datetime.timezone.utc)
+    return max(0.0, (now - newest).total_seconds() / 60.0)
+
+
 def parse_ticker(tk):
     """-> (start_dt_ET|date, has_time, yes_code) from a Kalshi game ticker."""
     m = _TKRE.search(tk or "")
@@ -304,6 +360,7 @@ class SharpEV:
         self.shadow_cache = {}         # cached shadow calibration report
         self.warned_no_key = False
         self._shadow_rows = []         # per-scan: every band-qualifying edge seen
+        self._pending_eval = {}        # per-scan: fresh fair for resting orders
         self.last_scan = {}            # diagnostics for the dashboard
         self.load()
 
@@ -586,10 +643,13 @@ class SharpEV:
         n += sum(1 for h in self.history if (h.get("ots") or "")[:10] == today)
         return n
 
-    def _sided(self, mk, fair_yes, src, start_iso, label, min_edge=None):
+    def _sided(self, mk, fair_yes, src, start_iso, label, min_edge=None,
+               age_m=None):
         """Try both sides of one market -> best qualifying (cand tuple) or None.
         YES entry = join yes_bid; NO entry = join no_bid = 100 - yes_ask.
-        Every band-qualifying side is shadow-logged (edge distribution data)."""
+        Every band-qualifying side is shadow-logged (edge distribution data,
+        incl. odds age); candidacy requires min_edge <= edge < MAX_EDGE_C and
+        fresh odds (stale anchor lines manufacture phantom edges)."""
         if min_edge is None:
             min_edge = MIN_EDGE_C
         bid, ask = mk.get("yes_bid") or 0, mk.get("yes_ask") or 0
@@ -609,9 +669,14 @@ class SharpEV:
             self._shadow_rows.append(
                 [datetime.datetime.now().isoformat(timespec="seconds"),
                  mk.get("_sport", ""), mk.get("_kind", ""), mk.get("ticker", ""),
-                 side, round(p, 4), entry, mid, round(edge_c, 2), src, start_iso])
+                 side, round(p, 4), entry, mid, round(edge_c, 2), src, start_iso,
+                 "" if age_m is None else round(age_m, 1)])
             if edge_c < min_edge:
                 continue
+            if edge_c >= MAX_EDGE_C:
+                continue        # too-good-to-be-true: big disagreement = we're wrong
+            if age_m is not None and age_m > MAX_ODDS_AGE_MIN:
+                continue        # anchor line is stale: the "edge" is a lag artifact
             if best is None or edge_c > best[3]:
                 best = (mk, label, side, edge_c, p, src, start_iso)
         return best
@@ -625,17 +690,25 @@ class SharpEV:
             return None
 
     def candidates(self, events, markets, now=None):
-        """Filter pipeline -> [(mk, label, side, edge_c, fair_side, src, start)]."""
+        """Filter pipeline -> [(mk, label, side, edge_c, fair_side, src, start)].
+        The band is [PROBE_MIN_EDGE_C, MAX_EDGE_C) in both gate modes - the
+        gate changes sizing, never the band (edges >=2c measured toxic).
+        Markets with a RESTING order aren't candidates, but their fresh fair is
+        captured into _pending_eval so revalidate_pending() can kill stale
+        orders instead of leaving free options in the book."""
         now = now or datetime.datetime.now(ET)
         out = []
-        mode, _ = self._gate()
-        min_edge = MIN_EDGE_C if mode == "scale" else PROBE_MIN_EDGE_C
+        min_edge = PROBE_MIN_EDGE_C
+        pend = getattr(self, "pending", {})
+        if getattr(self, "_pending_eval", None) is None:
+            self._pending_eval = {}
         open_events = {tk.rsplit("-", 1)[0]
-                       for tk in list(self.bets) + list(getattr(self, "pending", {}))}
+                       for tk in list(self.bets) + list(pend)}
         for mk in markets:
             tk = mk.get("ticker", "")
-            if tk in self.bets or tk in getattr(self, "pending", {}) \
-                    or tk.rsplit("-", 1)[0] in open_events:
+            is_pend = tk in pend
+            if tk in self.bets or (not is_pend
+                                   and tk.rsplit("-", 1)[0] in open_events):
                 continue                                # one bet per game per series
             kind = mk.get("_kind", "ml")
             if kind == "ml":
@@ -645,15 +718,22 @@ class SharpEV:
                 start = self._start_of(ev)
                 if start is None:
                     continue
-                if not (start - datetime.timedelta(hours=HOURS_BEFORE) <= now
-                        <= start - datetime.timedelta(minutes=LOCKOUT_MIN)):
-                    continue                            # pregame window only
                 fair_all, src = fair_from_books(ev)
                 if not fair_all or team not in fair_all:
                     continue
+                if is_pend:
+                    self._pending_eval[tk] = (fair_all[team],
+                                              mk.get("yes_bid") or 0,
+                                              mk.get("yes_ask") or 0)
+                    continue
+                if not (start - datetime.timedelta(hours=HOURS_BEFORE) <= now
+                        <= start - datetime.timedelta(minutes=LOCKOUT_MIN)):
+                    continue                            # pregame window only
+                age = odds_age_min(ev, "h2h",
+                                   "pinnacle" if src == "pinnacle" else None)
                 c = self._sided(mk, fair_all[team], src,
                                 start.isoformat(timespec="minutes"),
-                                team, min_edge=min_edge)
+                                team, min_edge=min_edge, age_m=age)
                 if c:
                     out.append(c)
             elif kind == "total":
@@ -669,21 +749,59 @@ class SharpEV:
                 start = self._start_of(ev)
                 if start is None:
                     continue
-                if not (start - datetime.timedelta(hours=HOURS_BEFORE) <= now
-                        <= start - datetime.timedelta(minutes=LOCKOUT_MIN)):
-                    continue
                 tf = totals_from_books(ev)
                 got = tf.get(float(pt))
                 if not got:
                     continue                            # need the SAME line at the books
                 p_over, src = got
+                if is_pend:
+                    self._pending_eval[tk] = (p_over,
+                                              mk.get("yes_bid") or 0,
+                                              mk.get("yes_ask") or 0)
+                    continue
+                if not (start - datetime.timedelta(hours=HOURS_BEFORE) <= now
+                        <= start - datetime.timedelta(minutes=LOCKOUT_MIN)):
+                    continue
+                age = odds_age_min(ev, "totals",
+                                   "pinnacle" if src == "pinnacle" else None)
                 c = self._sided(mk, p_over, src,
                                 start.isoformat(timespec="minutes"),
-                                "Over %.1f" % float(pt), min_edge=min_edge)
+                                "Over %.1f" % float(pt), min_edge=min_edge,
+                                age_m=age)
                 if c:
                     out.append(c)
         out.sort(key=lambda t: -t[3])
         return out
+
+    def revalidate_pending(self):
+        """Kill resting orders whose reason-to-exist is gone. A maker order
+        priced off an old fair value is a free option for informed flow - we
+        get filled exactly when the world learns we were wrong. On every scan,
+        each pending order with a freshly computed fair (from _pending_eval)
+        is re-edged at ITS resting entry; cancel when the edge fell below
+        CANCEL_EDGE_C or blew past MAX_EDGE_C (fair moved = we're the fish)."""
+        n = 0
+        for tk, o in list(self.pending.items()):
+            got = (getattr(self, "_pending_eval", None) or {}).get(tk)
+            if not got:
+                continue
+            fair_yes, bid, ask = got
+            if not bid or not ask:
+                continue
+            mid = (bid + ask) / 2.0
+            fair = FAIR_W * fair_yes + (1 - FAIR_W) * (mid / 100.0)
+            p = fair if o.get("side", "yes") == "yes" else 1 - fair
+            edge_c = p * 100 - o["entry"]
+            if CANCEL_EDGE_C <= edge_c < MAX_EDGE_C:
+                continue                                # still sane: let it rest
+            self.canceled += 1
+            n += 1
+            self._log([datetime.datetime.now().isoformat(timespec="seconds"),
+                       "CANCEL", o.get("sport", ""), o.get("game", ""),
+                       o.get("team", ""), o.get("pside", 0), o["entry"],
+                       o["count"], "edge-gone %.1fc" % edge_c, ""])
+            del self.pending[tk]
+        return n
 
     def place(self, cands):
         """Rest maker orders for the best candidates. Cash moves at FILL time
@@ -715,13 +833,18 @@ class SharpEV:
             ots = datetime.datetime.now().isoformat(timespec="seconds")
             team = label if side == "yes" else (
                 "not " + label if label.startswith("Over") else label + " (fade)")
+            # expire at the game lockout OR after MAX_REST_H, whichever is
+            # sooner: our fair value rots between scans, and a long-resting
+            # order is a free option (long rests measured net-negative).
+            cap = (datetime.datetime.now(ET)
+                   + datetime.timedelta(hours=MAX_REST_H))
             expire = ""
             try:
-                expire = (datetime.datetime.fromisoformat(start_iso)
-                          - datetime.timedelta(minutes=LOCKOUT_MIN)
-                          ).isoformat(timespec="seconds")
+                lock = (datetime.datetime.fromisoformat(start_iso)
+                        - datetime.timedelta(minutes=LOCKOUT_MIN))
+                expire = min(lock, cap).isoformat(timespec="seconds")
             except Exception:
-                pass
+                expire = cap.isoformat(timespec="seconds")
             self.pending[tk] = {
                 "sport": mk.get("_sport", ""), "game": (mk.get("title") or "")[:60],
                 "team": team, "side": side, "entry": entry, "count": count,
@@ -765,6 +888,7 @@ class SharpEV:
                 return 0, 0
             self.last_fetch = now.isoformat(timespec="seconds")
             self._shadow_rows = []
+            self._pending_eval = {}
             nowa = datetime.datetime.now(ET)
             starts = []
             scan = {"ts": self.last_fetch, "sports": [], "evaluated": 0,
@@ -804,8 +928,9 @@ class SharpEV:
             scan["evaluated"] = len(self._shadow_rows)
             if self._shadow_rows:
                 scan["best_edge"] = max(r[8] for r in self._shadow_rows)
-            mode, _ = self._gate()
-            scan["bar"] = MIN_EDGE_C if mode == "scale" else PROBE_MIN_EDGE_C
+            scan["bar"] = PROBE_MIN_EDGE_C     # band min (both modes; gate = sizing)
+            scan["ceil"] = MAX_EDGE_C
+            scan["revalidated"] = self.revalidate_pending()
             scan["credits"] = self.credits_remaining
             scan["interval_h"] = round(self._interval_h(), 2)
             scan["pending"] = len(self.pending)
@@ -827,7 +952,8 @@ class SharpEV:
                 w = csv.writer(f)
                 if new:
                     w.writerow(["ts", "sport", "kind", "ticker", "side", "fair",
-                                "entry_c", "mid_c", "edge_c", "src", "start"])
+                                "entry_c", "mid_c", "edge_c", "src", "start",
+                                "odds_age_m"])
                 w.writerows(self._shadow_rows)
         except Exception:
             pass
@@ -902,8 +1028,10 @@ class SharpEV:
         agg, n_all = {}, 0
         for r in rows:
             try:
+                # outcome is the LAST column: rows are 12-wide (pre-odds-age)
+                # or 13-wide (with odds_age_m) - both end in outcome.
                 fair, entry = float(r[5]), float(r[6])
-                edge, out = float(r[8]), int(r[11])
+                edge, out = float(r[8]), int(r[-1])
             except (ValueError, IndexError):
                 continue
             n_all += 1
@@ -959,12 +1087,15 @@ if __name__ == "__main__":
         # candidate pipeline on fixtures
         now = datetime.datetime.now(ET)
         start = now + datetime.timedelta(hours=3)
-        ev = {"commence_time": start.astimezone(datetime.timezone.utc)
-                  .strftime("%Y-%m-%dT%H:%M:%SZ"),
-              "home_team": "Pittsburgh Pirates", "away_team": "Atlanta Braves",
-              "bookmakers": [{"key": "pinnacle", "markets": [{"key": "h2h", "outcomes": [
-                  {"name": "Pittsburgh Pirates", "price": 1.60},
-                  {"name": "Atlanta Braves", "price": 2.60}]}]}]}
+        def _mkev(ph, pa):
+            return {"commence_time": start.astimezone(datetime.timezone.utc)
+                        .strftime("%Y-%m-%dT%H:%M:%SZ"),
+                    "home_team": "Pittsburgh Pirates", "away_team": "Atlanta Braves",
+                    "bookmakers": [{"key": "pinnacle", "markets": [{"key": "h2h",
+                        "outcomes": [{"name": "Pittsburgh Pirates", "price": ph},
+                                     {"name": "Atlanta Braves", "price": pa}]}]}]}
+        ev_big = _mkev(1.60, 2.60)     # fair ~62% vs 50c bid = ~8.8c "edge"
+        ev = _mkev(1.893, 2.034)       # fair ~51.8% vs 50c bid = ~1.7c edge (band)
         tk = "KXMLBGAME-26%s%02d%02d%02dATLPIT-PIT" % (
             ["JAN","FEB","MAR","APR","MAY","JUN","JUL","AUG","SEP","OCT","NOV","DEC"][start.month-1],
             start.day, start.hour, start.minute)
@@ -976,11 +1107,24 @@ if __name__ == "__main__":
         p.fees = 0.0; p.history = []; p.last_fetch = ""; p.warned_no_key = False
         p.credits_remaining = None; p.next_starts = []; p.shadow_day = ""
         p.shadow_cache = {}; p._shadow_rows = []; p.last_scan = {}
+        p._pending_eval = {}
         cands = p.candidates([ev], [mk], now=now)
-        assert len(cands) == 1 and cands[0][3] >= MIN_EDGE_C     # pinnacle 62% vs 50c bid
+        assert len(cands) == 1 and PROBE_MIN_EDGE_C <= cands[0][3] < MAX_EDGE_C
+        # EDGE CEILING: a huge sharp-vs-Kalshi disagreement is rejected
+        # (measured: the biggest "edges" lose - stale/wrong fair, not mispricing)
+        assert p.candidates([ev_big], [mk], now=now) == []
+        # ...but still shadow-logged (calibration data)
+        assert any(r[3] == mk["ticker"] and r[8] > MAX_EDGE_C
+                   for r in p._shadow_rows)
+        # STALE ODDS: same band edge, but the anchor line is 2h old -> skip
+        ev_stale = _mkev(1.893, 2.034)
+        old = (datetime.datetime.now(datetime.timezone.utc)
+               - datetime.timedelta(hours=2)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        ev_stale["bookmakers"][0]["markets"][0]["last_update"] = old
+        assert p.candidates([ev_stale], [mk], now=now) == []
         # longshot rejected even with huge edge
         mk2 = dict(mk, yes_bid=8, yes_ask=11)
-        assert p.candidates([ev], [mk2], now=now) == []
+        assert p.candidates([ev_big], [mk2], now=now) == []
         # wide spread rejected
         mk3 = dict(mk, yes_bid=40, yes_ask=55)
         assert p.candidates([ev], [mk3], now=now) == []
@@ -988,39 +1132,37 @@ if __name__ == "__main__":
         assert p.candidates([dict(ev, commence_time=(now - datetime.timedelta(minutes=5))
                              .astimezone(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"))],
                             [mk], now=now) == []
-        # probe-mode bar: a small edge is restable while probing (data collection)
-        mk4 = dict(mk, yes_bid=58, yes_ask=60)
-        c4 = p.candidates([ev], [mk4], now=now)
-        assert len(c4) == 1 and PROBE_MIN_EDGE_C <= c4[0][3] < MIN_EDGE_C
-        # ...but the SAME market is rejected once the gate passes (scale mode)
+        # scale mode trades the SAME band (the gate changes sizing, not the band)
         p2 = SharpEV.__new__(SharpEV)
         p2.start = 10000; p2.cash = 10000.0; p2.bets = {}; p2.pending = {}
         p2.realized = 0.0; p2.wins = p2.losses = p2.placed = p2.canceled = 0
         p2.fees = 0.0; p2.last_fetch = ""; p2.warned_no_key = False
         p2.credits_remaining = None; p2.next_starts = []; p2.shadow_day = ""
         p2.shadow_cache = {}; p2._shadow_rows = []; p2.last_scan = {}
-        p2.history = [{"era": ERA, "outcome": 1, "pnl": 10, "pside": 0.97}] * 30
+        p2._pending_eval = {}
+        p2.history = [{"era": ERA, "outcome": 1, "pnl": 10, "pside": 0.5}] * 30
         assert p2._gate()[0] == "scale"
-        assert p2.candidates([ev], [mk4], now=now) == []
-        # shadow rows were recorded for evaluated sides regardless of betting
-        assert any(r[3] == mk4["ticker"] for r in p._shadow_rows)
-        # disagreement guard
-        ev2 = dict(ev, bookmakers=[
-            {"key": "bk1", "markets": [{"key": "h2h", "outcomes": [
-                {"name": "Pittsburgh Pirates", "price": 1.45},
-                {"name": "Atlanta Braves", "price": 2.9}]}]},
-            {"key": "bk2", "markets": [{"key": "h2h", "outcomes": [
-                {"name": "Pittsburgh Pirates", "price": 2.2},
-                {"name": "Atlanta Braves", "price": 1.75}]}]},
-            {"key": "bk3", "markets": [{"key": "h2h", "outcomes": [
-                {"name": "Pittsburgh Pirates", "price": 1.9},
-                {"name": "Atlanta Braves", "price": 1.9}]}]}])
-        assert fair_from_books(ev2) == ({}, "")
+        assert len(p2.candidates([ev], [mk], now=now)) == 1
+        assert p2.candidates([ev_big], [mk], now=now) == []
         # placement rests a maker order (no cash moves), fill on trade-through
         n = p.place(cands)
         assert n == 1 and p.placed == 1 and len(p.pending) == 1 and not p.bets
         assert p.cash == 10000.0
         tk0 = list(p.pending)[0]
+        # REST-TIME CAP: expire is at most MAX_REST_H from placement
+        expd = datetime.datetime.fromisoformat(p.pending[tk0]["expire"])
+        assert expd <= datetime.datetime.now(ET) + datetime.timedelta(
+            hours=MAX_REST_H, minutes=1)
+        # PENDING REVALIDATION: fair collapses -> the resting order is canceled
+        p._pending_eval = {tk0: (0.49, 50, 53)}   # blend ~49.8 vs entry 50 = edge<0
+        assert p.revalidate_pending() == 1 and not p.pending and p.canceled == 1
+        # re-place for the fill/settle flow
+        p._pending_eval = {}
+        cands = p.candidates([ev], [mk], now=now)
+        assert p.place(cands) == 1
+        # revalidation keeps a still-sane order
+        p._pending_eval = {tk0: (0.518, 50, 53)}
+        assert p.revalidate_pending() == 0 and len(p.pending) == 1
         p.check_fills(quotes={tk0: {"yes_bid": 50, "yes_ask": 53, "last_price": 50}})
         assert len(p.bets) == 1 and not p.pending and p.cash < 10000.0
         b = list(p.bets.values())[0]
@@ -1040,8 +1182,8 @@ if __name__ == "__main__":
             far.day, far.hour, far.minute), "yes_bid": 45, "yes_ask": 48}
         assert not SharpEV._near_game([fmk], now)
         assert SharpEV._near_game([mk], now)
-        print("sharp_ev self-test PASSED (devig, parse, match, filters, probe bar, "
-              "rest/fill, near-game guard, shadow, settle)")
+        print("sharp_ev self-test PASSED (devig, parse, match, filters, band+ceiling, "
+              "stale-odds gate, rest cap, revalidation, rest/fill, near-game, shadow, settle)")
     else:
         p = SharpEV()
         nc, np_ = p.step(force=True)
