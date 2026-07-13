@@ -25,6 +25,7 @@ RESERVE_FRAC      = float(os.environ.get("POLY_RESERVE", "0.10"))       # keep 1
 CAPTURE_EFF       = float(os.environ.get("POLY_CAPTURE_EFF", "0.08"))   # naive->real gap (CALIBRATE)
 ADVERSE_HAIRCUT   = float(os.environ.get("POLY_ADVERSE", "0.35"))       # inventory/adverse loss
 DAILY_NET_CAP     = float(os.environ.get("POLY_DAILY_CAP", "0.01"))     # <=1%/day/market sanity cap
+TOP_CANDS         = int(os.environ.get("POLY_TOP_CANDS", "25"))         # efficiency-ranked funnel
 
 
 def est_net_daily(alloc_usd, mkt, competing_shares):
@@ -113,8 +114,11 @@ class PolyPaper:
             markets = pc.reward_markets()
             # REWARD-EFFICIENCY targeting: rank by pool per unit of volume - lower
             # volume = fewer competing LPs = a bigger share of the pool for us.
+            # wider funnel (7/13): 15-of-80 missed low-competition pools and
+            # left 79% of the accrual concentrated in ONE market; 25-of-200
+            # diversifies picks at the cost of ~10 extra book fetches/day.
             markets = sorted(markets,
-                             key=lambda m: -m.get("pool_daily", 0) / (m.get("vol24", 0) + 1000.0))[:15]
+                             key=lambda m: -m.get("pool_daily", 0) / (m.get("vol24", 0) + 1000.0))[:TOP_CANDS]
         comp_fn = comp_fn or pc.market_competition
         picks = self._pick(markets, comp_fn)
         day_net = sum(net for _m, _a, _c, net in picks)
