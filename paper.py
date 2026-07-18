@@ -75,6 +75,10 @@ try:
     import sharp_ev
 except Exception:
     sharp_ev = None
+try:
+    import weather_live
+except Exception:
+    weather_live = None
 
 from kalshibot.config import load_config
 from kalshibot.fees import fee_cents
@@ -537,6 +541,12 @@ def main():
             sev_bot = sharp_ev.SharpEV()
         except Exception:
             sev_bot = None
+    wl_dry = None
+    if weather_live is not None:
+        try:
+            wl_dry = weather_live.WeatherLive(None, mode="DRY")
+        except Exception:
+            wl_dry = None
     # funding carry strategy removed 2026-07-18: purge its orphaned paper book
     try:
         _fs = os.path.join("logs", "funding_state.json")
@@ -641,6 +651,16 @@ def main():
                               f"{ps['days']}d | APY~{ps['apy']}% | {len(picks)} mkts")
                 except Exception as e:
                     print(f"  poly step skipped: {e}")
+            if (wl_dry is not None and n % 20 == 3
+                    and not os.path.exists(weather_live.ARM_FILE)
+                    and os.environ.get("KALSHI_WEATHER_LIVE", "") != "1"):
+                # go-live DRY REHEARSAL: same brain, would-be orders only.
+                # Auto-defers the moment the real live service is armed.
+                try:
+                    wl_dry.step()
+                    ws_ = wl_dry.save  # state written inside step()
+                except Exception as e:
+                    print(f"  weather-live dry step skipped: {e}")
             if sev_bot is not None and n % 20 == 1:
                 try:
                     nc, npl = sev_bot.step()

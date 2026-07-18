@@ -552,8 +552,11 @@ async function load(){
   $('upd').innerHTML='<span class="dot'+(ageMin>30?' stale':'')+'"></span>'
     +(ageMin>30?'STALE &middot; ':'')+'updated '+(d.updated?d.updated.replace('T',' ').slice(0,16):'-');
   if(d.live&&d.live.summary){const L=d.live.summary;
-    $('live').textContent='LIVE '+M(L.net||0)+' ('+(L.wins||0)+'W/'+(L.losses||0)+'L)'
-      +(d.live.balance_c!=null?' bal $'+(d.live.balance_c/100).toFixed(2):'');}
+    $('live').textContent=(L.mode||'LIVE')+' '+M(L.net||0)+' ('+(L.wins||0)+'W/'+(L.losses||0)+'L)'
+      +(L.resting!=null?' \u00b7 '+L.resting+' resting':'')
+      +(L.day_pnl!=null?' \u00b7 day '+M(L.day_pnl):'')
+      +(L.halted?' \u00b7 HALTED':'')
+      +(d.live.balance_c!=null?' \u00b7 bal $'+(d.live.balance_c/100).toFixed(2):'');}
   const start=Number(s.start||0),banked=Number(s.total||0);
   const unrl=(s.unrealized==null)?null:Number(s.unrealized);
   const nav=k.nav!=null?k.nav:start+banked;

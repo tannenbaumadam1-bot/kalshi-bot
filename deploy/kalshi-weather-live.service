@@ -1,0 +1,24 @@
+# Weather LIVE executor - REAL MONEY when armed.
+# Install (does NOT start it):
+#   cp /opt/kalshibot/deploy/kalshi-weather-live.service /etc/systemd/system/
+#   systemctl daemon-reload
+# Go-live (the one action, after key + funding are in place):
+#   touch /opt/kalshibot/logs/LIVE_ARMED
+#   systemctl enable --now kalshi-weather-live
+# Kill switch:
+#   systemctl stop kalshi-weather-live && rm /opt/kalshibot/logs/LIVE_ARMED
+[Unit]
+Description=Kalshi weather LIVE executor (armed via logs/LIVE_ARMED)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/kalshibot
+Environment=KALSHI_WEATHER_LIVE=1
+ExecStart=/usr/bin/python3 /opt/kalshibot/weather_live.py --yes-live
+Restart=always
+RestartSec=30
+
+[Install]
+WantedBy=multi-user.target
