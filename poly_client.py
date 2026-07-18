@@ -26,7 +26,7 @@ def _f(x):
         return 0.0
 
 
-def reward_markets(limit=80, min_pool=1.0):
+def reward_markets(limit=200, min_pool=1.0):
     """Active markets that currently pay LP rewards, richest-volume first."""
     try:
         ms = requests.get(GAMMA, params={

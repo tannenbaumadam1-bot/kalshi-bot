@@ -295,12 +295,6 @@ def build_data():
             out["sharpev"] = json.load(open(sev_path))
         except Exception:
             pass
-    fund_path = os.path.join("logs", "funding_state.json")
-    if os.path.exists(fund_path):
-        try:
-            out["funding"] = json.load(open(fund_path))
-        except Exception:
-            pass
     return out
 
 
@@ -410,11 +404,6 @@ td.num,th.num{text-align:right}
 <div style="margin-top:10px"><table><thead><tr><th>Date</th><th>Market / activity</th>
 <th class=num>Alloc</th><th class=num>Net</th><th class=num>Bank after</th></tr></thead>
 <tbody id=polytbl></tbody></table></div>
-<h2>Crypto funding carry <span style="text-transform:none;letter-spacing:0">(paper &mdash; delta-neutral, uncorrelated)</span></h2>
-<div class=grid id=fund></div>
-<div style="margin-top:10px"><table><thead><tr><th>Date</th><th>Leg / activity</th>
-<th class=num>Alloc</th><th class=num>Net</th><th class=num>Bank after</th></tr></thead>
-<tbody id=fundtbl></tbody></table></div>
 <h2>Sharp +EV sports <span style="text-transform:none;letter-spacing:0">(paper &mdash; sharp-book fair value vs Kalshi price, maker-only, gated)</span></h2>
 <div class=grid id=sev></div>
 <div style="margin-top:10px"><table><thead><tr><th>Start</th><th>Game</th><th>Our team</th>
@@ -517,12 +506,11 @@ async function load(){
     const wStart=Number(s.start||0);
     const wNav=(k.nav!=null?Number(k.nav):(wStart+Number(s.total||0)));
     const wSettled=Number((k.era_current&&k.era_current.n)||0);
-    const P=d.poly||null, G=d.funding||null, E=d.sharpev||null;
+    const P=d.poly||null, E=d.sharpev||null;
     const eSum=E?(E.summary||{}):{};
     const eOpenStake=E?(E.open||[]).reduce((a,b)=>a+(b.entry||0)*(b.count||0)/100,0):0;
     const eBank=E?(Number(eSum.cash||0)+eOpenStake):null, eStart=E?Number(eSum.start||0):0;
     const pBank=P?Number(P.cash||P.start||0):null, pStart=P?Number(P.start||0):0;
-    const gBank=G?Number(G.cash||G.start||0):null, gStart=G?Number(G.start||0):0;
     const cards=[
       stratCard('Weather edge','forecast','era',F(wNav),
         '<span class="'+C(wNav-wStart)+'">'+M(wNav-wStart)+'</span>',
@@ -532,10 +520,6 @@ async function load(){
         P?F(pBank):NA, P?'<span class="'+C(P.earned)+'">'+M(P.earned)+'</span>':NA,
         P?('&middot; '+(P.days||0)+'d &middot; APY ~'+(P.apy_annualized!=null?P.apy_annualized:'&ndash;')+'%'):'&middot; starting',
         'reinvesting','era'),
-      stratCard('Crypto funding carry','neutral','no',
-        G?F(gBank):NA, G?'<span class="'+C(G.earned)+'">'+M(G.earned)+'</span>':NA,
-        G?('&middot; '+(G.days||0)+'d &middot; APY ~'+(G.apy_annualized!=null?G.apy_annualized:'&ndash;')+'%'):'&middot; starting',
-        G?('probing '+(G.days||0)+'/20'):'starting','leg'),
       stratCard('Sharp +EV sports','anchor','era',
         E?F(eBank):NA, E?'<span class="'+C(eSum.realized)+'">'+M(eSum.realized)+'</span>':NA,
         E?('&middot; '+(eSum.wins||0)+'W/'+(eSum.losses||0)+'L &middot; '+(eSum.open_bets||0)+' open'):'&middot; starting',
@@ -543,7 +527,7 @@ async function load(){
     ];
     $('strat').innerHTML=cards.join('');
     let tStart=wStart, tNav=wNav, nb=1;
-    if(P){tStart+=pStart;tNav+=pBank;nb++;} if(G){tStart+=gStart;tNav+=gBank;nb++;}
+    if(P){tStart+=pStart;tNav+=pBank;nb++;}
     if(E){tStart+=eStart;tNav+=eBank;nb++;}
     $('combined').innerHTML='<div style="display:flex;align-items:baseline;gap:12px;flex-wrap:wrap;">'
       +'<span style="font-size:11px;color:var(--mut);text-transform:uppercase;letter-spacing:.12em;">Combined paper NAV</span>'
@@ -635,17 +619,6 @@ async function load(){
   } else { $('poly').innerHTML='<div class=tile><div class=k>Polymarket</div><div class=v>&ndash;</div><div class=s>paper sim starting&hellip;</div></div>'; }
   $('polytbl').innerHTML=actRows(d.poly,(d.poly&&d.poly.positions||[]).map(p=>({name:p.q,alloc:p.alloc,net:p.net})),'markets')
     ||'<tr><td colspan=5 class=empty>No activity yet \u2014 allocations post once per day.</td></tr>';
-  if(d.funding){const G=d.funding;const legs=(G.positions||[]).length;
-    $('fund').innerHTML=[
-      tile('Bank (paper)',F(G.cash||G.start||0),'started '+F(G.start||0)),
-      tile('Carry earned','<span class=pos>'+M(G.earned||0)+'</span>',(G.days||0)+' paper days'),
-      tile('Annualized (net)','~'+(G.apy_annualized!=null?G.apy_annualized:'&ndash;')+'%','after fee/basis haircut'),
-      tile('Open legs',legs,'delta-neutral'),
-      tile('Correlation','~0','independent of markets'),
-    ].join('');
-  } else { $('fund').innerHTML='<div class=tile><div class=k>Funding carry</div><div class=v>&ndash;</div><div class=s>paper sim starting&hellip;</div></div>'; }
-  $('fundtbl').innerHTML=actRows(d.funding,(d.funding&&d.funding.positions||[]).map(p=>({name:p.asset+' \u00b7 '+p.side+' \u00b7 '+p.apy+'% APY',alloc:p.alloc,net:p.net})),'legs')
-    ||'<tr><td colspan=5 class=empty>No activity yet \u2014 legs rebalance once per day.</td></tr>';
   if(d.sharpev){const S=d.sharpev,ss=S.summary||{};
     $('sev').innerHTML=[
       tile('Bank (paper)',F(ss.cash),'started '+F(ss.start)),
