@@ -47,6 +47,9 @@ MIN_PRICE, MAX_PRICE = 30, 85
 # (act 20% vs pred 36.5%). Cap them to half the book allowance until the
 # shadow report proves lo-calibration.
 LO_BOOK_FRAC = 0.50
+# v8 multi-strike: bands/or-below strikes now tradeable; cap correlated bets
+# in the same city-day event (mutually exclusive strikes, shared weather risk)
+EVENT_MAX_BETS = int(os.environ.get("WX_EVENT_MAX_BETS", "3"))
 # v7: churn killer - after a forecast-based exit, do NOT re-enter the same
 # ticker for this many hours (Phoenix was exit/re-entered 5x in one day).
 COOLDOWN_H = 12
@@ -103,7 +106,9 @@ class WeatherPaper:
                 json.dump(self.to_dict(), f)
             st = {"updated": datetime.datetime.now().isoformat(timespec="seconds"),
                   "summary": self.summary(),
+                  "depth": dict(we.LAST_DEPTH) if we.LAST_DEPTH else None,
                   "open": [{"ticker": tk, "city": b["city"], "strike": b["strike"],
+                            "kind": b.get("kind", "ge"), "cap": b.get("cap"),
                             "hl": b["hl"], "side": b["side"], "entry": b["entry"],
                             "count": b["count"], "pside": round(b["pside"], 2),
                             "fee": b.get("fee", 0), "src": b.get("src", ""),
@@ -177,6 +182,7 @@ class WeatherPaper:
             self.wins += int(won)
             self.losses += int(not won)
             self.history.append({"city": b["city"], "strike": b["strike"], "hl": b["hl"],
+                                 "kind": b.get("kind", "ge"), "cap": b.get("cap"),
                                  "side": b["side"], "pside": round(b["pside"], 3),
                                  "entry": b["entry"], "count": b["count"],
                                  "fee": b.get("fee", 0),
@@ -246,12 +252,19 @@ class WeatherPaper:
         bankroll = self.cash + open_stake
         mode, _gate_n = self._gate()
         self._prune_cooldown()
+        ev_counts = {}
+        for b in self.bets.values():
+            ek = (b["city"], b.get("date", ""), b["hl"])
+            ev_counts[ek] = ev_counts.get(ek, 0) + 1
         for ev, side, mk, fair, ftemp in edges:
             tk = mk["ticker"]
             if tk in self.bets:
                 continue
             if self._cooled(tk):          # v7: no re-entry churn after an exit
                 continue
+            ekey = (mk["city"], mk.get("date", ""), "lo" if mk["is_low"] else "hi")
+            if ev_counts.get(ekey, 0) >= EVENT_MAX_BETS:
+                continue                  # correlated event already at cap
             s = "yes" if side == "YES" else "no"
             # maker entry (rest at the bid) chosen by the scanner; fall back to
             # the taker touch only if an older scan didn't tag one.
@@ -301,8 +314,10 @@ class WeatherPaper:
                 lo_stake += price * size
             self.fees += fee
             pside = fair if s == "yes" else (1 - fair)
+            ev_counts[ekey] = ev_counts.get(ekey, 0) + 1
             self.bets[tk] = {"side": s, "entry": price, "count": size, "fee": fee,
                              "pside": pside, "city": mk["city"], "strike": mk["strike"],
+                             "kind": mk.get("kind", "ge"), "cap": mk.get("cap"),
                              "hl": ("lo" if mk["is_low"] else "hi"),
                              "ots": datetime.datetime.now().isoformat(timespec="seconds"),
                              "era": ERA, "maker": maker, "date": mk.get("date", ""),
@@ -324,7 +339,7 @@ class WeatherPaper:
         except Exception:
             return None, None
 
-    def _reprice(self, city, date, lat, lon, strike, is_low):
+    def _reprice(self, city, date, lat, lon, strike, is_low, kind="ge", cap=None):
         """(p_side_yes, weight) re-forecast for one market. Same-day markets
         use the OBS-anchored nowcast (hard data); else the forecast ensemble.
         Returns (None, None) if we cannot re-evaluate."""
@@ -333,7 +348,8 @@ class WeatherPaper:
         except Exception:
             stt = None
         if stt and stt.get("n_obs", 0) >= nc.MIN_OBS:
-            p = nc.prob_from_state(stt, strike, is_low)
+            p = we.kind_prob(lambda k: nc.prob_from_state(stt, k, is_low),
+                             kind, strike, cap)
             if p is not None:
                 return p, we.NOWCAST_WEIGHT
         try:
@@ -342,8 +358,20 @@ class WeatherPaper:
                             datetime.datetime.now()).total_seconds() / 3600)
         except Exception:
             hrs = 6.0
-        p, _, nsrc = wx.prob(city, date, lat, lon, strike, is_low, hrs, log=False)
-        if p is None or nsrc < wx.MIN_SOURCES:
+        if kind == "ge":
+            p, _, nsrc = wx.prob(city, date, lat, lon, strike, is_low, hrs, log=False)
+            if p is None or nsrc < wx.MIN_SOURCES:
+                return None, None
+            return p, we.blend_weight()
+        try:
+            fc = wx.forecast(city, date, lat, lon, hrs, log=False)
+        except Exception:
+            return None, None
+        d = fc["min"] if is_low else fc["max"]
+        if not d.ok() or fc["n_sources"] < wx.MIN_SOURCES:
+            return None, None
+        p = we.kind_prob(d.prob_at_least, kind, strike, cap)
+        if p is None:
             return None, None
         return p, we.blend_weight()
 
@@ -363,7 +391,8 @@ class WeatherPaper:
             if not date or city not in we.CITY_COORDS:
                 continue
             lat, lon = we.CITY_COORDS[city]
-            p_yes, wgt = self._reprice(city, date, lat, lon, strike, is_low)
+            p_yes, wgt = self._reprice(city, date, lat, lon, strike, is_low,
+                                       b.get("kind", "ge"), b.get("cap"))
             if p_yes is None:
                 continue                      # can't re-evaluate -> hold
             p_new = p_yes if side == "yes" else (1 - p_yes)
@@ -391,6 +420,7 @@ class WeatherPaper:
                 self.realized += net
                 self.fees += exit_fee
                 self.history.append({"city": city, "strike": strike,
+                                     "kind": b.get("kind", "ge"), "cap": b.get("cap"),
                                      "hl": b["hl"], "side": side, "pside": round(b["pside"], 3),
                                      "entry": b["entry"], "count": cnt, "fee": b.get("fee", 0),
                                      "outcome": None, "exited": True,

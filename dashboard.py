@@ -236,6 +236,7 @@ def build_data():
             out["summary"] = w.get("summary", {}) or {}
             out["open"] = w.get("open", []) or []
             out["settled"] = w.get("settled", []) or []
+            out["depth"] = w.get("depth")
         except Exception:
             pass
     # live marks on open positions
@@ -423,7 +424,9 @@ const M=x=>{const n=Number(x||0);return (n>=0?'+':'-')+'$'+Math.abs(n).toFixed(2
 const C=x=>Number(x||0)>=0?'pos':'neg';
 const NA='<span class=mut>&ndash;</span>';
 const feeC=f=>(f==null)?NA:(Number(f).toFixed(0)+'&cent;');
-function mkt(b){return '<td><span class=mkt>'+(b.city||'')+' '+b.strike+'&deg; '+((b.hl==='lo')?'low':'high')+'</span></td>';}
+function mkt(b){const kk=b.kind||'ge';
+  const st=(kk==='band')?(b.strike+'&ndash;'+(b.cap!=null?b.cap:'?')+'&deg;'):((kk==='le')?'&le;'+b.strike+'&deg;':'&ge;'+b.strike+'&deg;');
+  return '<td><span class=mkt>'+(b.city||'')+' '+st+' '+((b.hl==='lo')?'low':'high')+'</span></td>';}
 function side(s){s=(s||'').toLowerCase();return '<td><span class="chip '+(s==='yes'?'yes':'no')+'">'+s.toUpperCase()+'</span></td>';}
 function era(b){const cur=(b.era==='v7-obs');
   return '<td><span class="chip '+(cur?'era':'leg')+'">'+(cur?'v7':'legacy')+'</span></td>';}
@@ -580,6 +583,10 @@ async function load(){
     tile('Total placed',(s.placed||0),'since inception'),
     tile('Fees paid',F(k.fees),k.fee_drag_pct!=null?k.fee_drag_pct+'% of inception NAV':''),
     tile('Fee / bet placed',k.fee_per_bet!=null?F(k.fee_per_bet):NA,''),
+    (d.depth?tile('Depth at our entries','$'+Number(d.depth.fill_total||0).toFixed(0),
+      (d.depth.edges||0)+' edges \u00b7 med $'+Number(d.depth.fill_med||0).toFixed(0)+'/strike at touch'):''),
+    (d.depth?tile('Touch liquidity scanned','$'+Number(d.depth.touch_total||0).toFixed(0),
+      (d.depth.n_mkts||0)+' strikes incl. bands \u00b7 measured, not modeled'):''),
   ].join('');
   $('curven').textContent='(last '+(k.window_n||0)+' settled)';
   drawCurve($('eq'),d.curve);

@@ -23,7 +23,7 @@ It is a HYPOTHESIS until proven: log every bet with our probability, then
 check calibration (do our 70% bets win ~70%?).
 """
 from __future__ import annotations
-import os, json, math, re, sys, time, datetime
+import os, csv, json, math, re, sys, time, datetime
 import requests
 from kalshibot.fees import fee_cents
 import weather_ensemble as wx
@@ -214,6 +214,51 @@ def _c(v):
     return int(round(_f(v) * 100))
 
 
+DEPTH_LOG = os.path.join("logs", "weather_depth.csv")
+LAST_DEPTH = {}          # summary of displayed liquidity at our entries, per scan
+
+
+def classify_market(strike_type, floor_strike, cap_strike, sub):
+    """(kind, strike, cap) for a Kalshi temp market, else None.
+    kind 'ge': extreme >= strike; 'le': extreme <= strike;
+    'band': strike <= extreme <= cap (inclusive)."""
+    st = (strike_type or "").lower()
+    try:
+        if st == "greater" and floor_strike is not None:
+            return "ge", int(floor_strike) + 1, None
+        if st == "less" and cap_strike is not None:
+            return "le", int(cap_strike) - 1, None
+        if st == "between" and floor_strike is not None and cap_strike is not None:
+            return "band", int(floor_strike), int(cap_strike)
+    except Exception:
+        pass
+    sub = sub or ""
+    m = re.search(r"(-?\d+)\s*°?\s*(or above|or higher|\+)", sub, re.I)
+    if m:
+        return "ge", int(m.group(1)), None
+    m = re.search(r"(-?\d+)\s*°?\s*(or below|or lower)", sub, re.I)
+    if m:
+        return "le", int(m.group(1)), None
+    m = re.search(r"(-?\d+)\s*°?\s*to\s*(-?\d+)", sub, re.I)
+    if m:
+        return "band", int(m.group(1)), int(m.group(2))
+    return None
+
+
+def kind_prob(pfn, kind, strike, cap):
+    """Compose P(market resolves YES) from pfn(s) = P(extreme >= s).
+    Works for both forecast distributions and the obs nowcast."""
+    if kind == "le":
+        p = pfn(strike + 1)
+        return None if p is None else max(0.0, min(1.0, 1.0 - p))
+    if kind == "band":
+        a, b = pfn(strike), pfn((cap if cap is not None else strike) + 1)
+        if a is None or b is None:
+            return None
+        return max(0.0, min(1.0, a - b))
+    return pfn(strike)
+
+
 def find_temp_markets(max_days=2):
     """Near-term Kalshi daily temperature markets (whitelisted series only)."""
     out, cursor, pages = [], None, 0
@@ -240,12 +285,16 @@ def find_temp_markets(max_days=2):
                 hrs = (close - now).total_seconds() / 3600
                 if hrs < -2 or hrs > max_days * 24:
                     continue
-                m = re.search(r"(-?\d+)\s*°?\s*(or above|or higher|\+)", (mk.get("yes_sub_title") or ""), re.I)
-                if not m:
+                ks = classify_market(mk.get("strike_type"), mk.get("floor_strike"),
+                                     mk.get("cap_strike"), mk.get("yes_sub_title"))
+                if ks is None:
                     continue
+                kind, strike, cap = ks
                 out.append({
                     "ticker": mk["ticker"], "city": city, "is_low": is_low,
-                    "strike": int(m.group(1)),
+                    "strike": strike, "kind": kind, "cap": cap,
+                    "bid_size": float(mk.get("yes_bid_size_fp") or 0),
+                    "ask_size": float(mk.get("yes_ask_size_fp") or 0),
                     "yes_bid": _c(mk.get("yes_bid_dollars")), "yes_ask": _c(mk.get("yes_ask_dollars")),
                     # settlement day comes from the TICKER (unambiguous), not
                     # close_time (which is the next UTC day -> v2-v6 forecast
@@ -282,7 +331,8 @@ def scan(min_edge_cents=4, max_edge_cents=20, verbose=True):
         # need enough INDEPENDENT models to trust the ensemble; else skip
         if not dist.ok() or nsrc < wx.MIN_SOURCES:
             continue
-        model = dist.prob_at_least(mk["strike"])
+        kind, cap = mk.get("kind", "ge"), mk.get("cap")
+        model = kind_prob(dist.prob_at_least, kind, mk["strike"], cap)
         ftemp = dist.center
         src_tot += nsrc
         if model is None:
@@ -291,12 +341,13 @@ def scan(min_edge_cents=4, max_edge_cents=20, verbose=True):
         # (bet or not, tails included) - free calibration data at ~10x the
         # rate of settled bets. Joined to outcomes by weather_shadow.settle.
         # (Always the FORECAST prob, so learned MODEL_WEIGHT stays clean.)
-        shadow_rows.append({
-            "ticker": mk["ticker"], "city": mk["city"], "date": mk["date"],
-            "strike": mk["strike"], "hl": "lo" if mk["is_low"] else "hi",
-            "hrs": round(mk["hrs"], 1), "n_sources": nsrc,
-            "model_p": round(model, 4),
-            "mkt_bid": mk["yes_bid"], "mkt_ask": mk["yes_ask"]})
+        if kind == "ge":                       # shadow schema tracks >= strikes only
+            shadow_rows.append({
+                "ticker": mk["ticker"], "city": mk["city"], "date": mk["date"],
+                "strike": mk["strike"], "hl": "lo" if mk["is_low"] else "hi",
+                "hrs": round(mk["hrs"], 1), "n_sources": nsrc,
+                "model_p": round(model, 4),
+                "mkt_bid": mk["yes_bid"], "mkt_ask": mk["yes_ask"]})
         # v7 NOWCAST: same-day markets are priced from station OBS (running
         # max/min) + remaining-hours ensemble - hard data beats a forecast.
         src, wgt = "forecast", blend_weight()
@@ -308,7 +359,8 @@ def scan(min_edge_cents=4, max_edge_cents=20, verbose=True):
                     nc_cache[key] = None
             stt = nc_cache[key]
             if stt and stt.get("n_obs", 0) >= nc.MIN_OBS:
-                p_now = nc.prob_from_state(stt, mk["strike"], mk["is_low"])
+                p_now = kind_prob(lambda k: nc.prob_from_state(stt, k, mk["is_low"]),
+                                  kind, mk["strike"], cap)
                 if p_now is not None:
                     model, src, wgt = p_now, "nowcast", NOWCAST_WEIGHT
                     ftemp = stt["run_min"] if mk["is_low"] else stt["run_max"]
@@ -353,6 +405,41 @@ def scan(min_edge_cents=4, max_edge_cents=20, verbose=True):
         edges.append((ev, side, mk, fair, ftemp))
     try:
         ws.log(shadow_rows)
+    except Exception:
+        pass
+    # DEPTH STUDY: measure displayed liquidity so the capacity ceiling is a
+    # number, not a guess. Zero extra API calls (sizes ride the events feed).
+    try:
+        ts = datetime.datetime.now().isoformat(timespec="seconds")
+        new = not os.path.exists(DEPTH_LOG)
+        os.makedirs("logs", exist_ok=True)
+        with open(DEPTH_LOG, "a", newline="") as f:
+            w = csv.writer(f)
+            if new:
+                w.writerow(["ts", "ticker", "kind", "yes_bid", "yes_ask",
+                            "bid_size", "ask_size"])
+            for mk in mkts:
+                if mk["yes_bid"] > 0 and mk["yes_ask"] > 0:
+                    w.writerow([ts, mk["ticker"], mk.get("kind", "ge"),
+                                mk["yes_bid"], mk["yes_ask"],
+                                round(mk.get("bid_size", 0), 1),
+                                round(mk.get("ask_size", 0), 1)])
+        fills = []
+        for ev_c, side, mk, fair, ftemp in edges:
+            qsz = mk.get("bid_size", 0) if side == "YES" else mk.get("ask_size", 0)
+            fills.append(round(qsz * mk.get("entry_price", 0) / 100.0, 2))
+        fills.sort()
+        tot_touch = sum((mk.get("bid_size", 0) * mk["yes_bid"]
+                         + mk.get("ask_size", 0) * mk["yes_ask"]) / 100.0
+                        for mk in mkts if mk["yes_bid"] > 0 and mk["yes_ask"] > 0)
+        LAST_DEPTH.clear()
+        LAST_DEPTH.update({
+            "ts": ts, "edges": len(fills),
+            "fill_total": round(sum(fills), 2),
+            "fill_med": round(fills[len(fills) // 2], 2) if fills else 0.0,
+            "fill_min": fills[0] if fills else 0.0,
+            "n_mkts": len(mkts),
+            "touch_total": round(tot_touch, 2)})
     except Exception:
         pass
     edges.sort(key=lambda e: -e[0])
