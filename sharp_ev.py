@@ -88,7 +88,30 @@ SLOG = os.path.join("logs", "sharpev_bets.csv")
 SSHADOW = os.path.join("logs", "sharpev_shadow.csv")   # every evaluated edge, bet or not
 SSHADOWR = os.path.join("logs", "sharpev_shadow_res.csv")  # shadow rows + outcome
 
-ERA = "ev1-sharp"
+ERA = "ev3-band"            # current strategy: thin [1.5,2.0)c band + stale-odds gate + rest cap
+V3_TS = "2026-07-13T15:00"  # v3 ship time (UTC); bets placed before = legacy "ev1-sharp"
+
+
+def era_of(b):
+    """Resolve a bet's strategy era. Rows placed pre-7/13 carry era 'ev1-sharp';
+    rows placed after the v3 ship (band ceiling, stale-odds gate, pending
+    revalidation, 2h rest cap) are the current strategy regardless of tag."""
+    if b.get("era") == ERA:
+        return ERA
+    return ERA if (b.get("ots") or "") >= V3_TS else "ev1-sharp"
+
+
+def _era_stats(rows):
+    n = len(rows)
+    if not n:
+        return {"n": 0, "wins": 0, "losses": 0, "net": 0.0,
+                "expectancy": None, "pred": None, "actual": None}
+    wins = sum(1 for b in rows if b.get("outcome") == 1)
+    net = sum(float(b.get("pnl", 0) or 0) for b in rows)
+    pred = sum(float(b.get("pside", 0) or 0) for b in rows) / n
+    return {"n": n, "wins": wins, "losses": n - wins, "net": round(net, 2),
+            "expectancy": round(net / n, 3), "pred": round(100 * pred, 1),
+            "actual": round(100 * wins / n, 1)}
 START_CENTS = int(os.environ.get("SEV_START_C", "10000"))
 MIN_EDGE_C = float(os.environ.get("SEV_MIN_EDGE_C", "4"))      # net edge to act (post-gate)
 # Probe mode uses a LOWER bar: maker fee ~$0 and stakes <=60c mean any positive
@@ -397,13 +420,18 @@ class SharpEV:
         try:
             os.makedirs("logs", exist_ok=True)
             json.dump(self.to_dict(), open(SSIM, "w"))
+            settled_all = [h for h in self.history if h.get("outcome") in (0, 1)]
+            era_cur = _era_stats([h for h in settled_all if era_of(h) == ERA])
+            era_cur["open"] = sum(1 for b in self.bets.values() if era_of(b) == ERA)
             st = {"updated": datetime.datetime.now().isoformat(timespec="seconds"),
                   "summary": self.summary(),
+                  "era_current": era_cur,
+                  "era_legacy": _era_stats([h for h in settled_all if era_of(h) != ERA]),
                   "last_scan": self.last_scan,
                   "shadow": self.shadow_cache or {},
-                  "pending": [dict(o, ticker=tk) for tk, o in self.pending.items()],
-                  "open": [dict(b, ticker=tk) for tk, b in self.bets.items()],
-                  "settled": list(reversed(self.history[-50:]))}
+                  "pending": [dict(o, ticker=tk, era_v=era_of(o)) for tk, o in self.pending.items()],
+                  "open": [dict(b, ticker=tk, era_v=era_of(b)) for tk, b in self.bets.items()],
+                  "settled": [dict(h, era_v=era_of(h)) for h in reversed(self.history[-50:])]}
             json.dump(st, open(SSTATE, "w"))
         except Exception:
             pass
@@ -433,7 +461,7 @@ class SharpEV:
     # ---- gate: identical contract to the weather book ----
     def _gate(self):
         cur = [h for h in self.history
-               if h.get("era") == ERA and h.get("outcome") in (0, 1)][-60:]
+               if era_of(h) == ERA and h.get("outcome") in (0, 1)][-60:]
         n = len(cur)
         if n < GATE_MIN_N:
             return "probe", n

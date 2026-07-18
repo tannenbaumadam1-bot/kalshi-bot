@@ -406,6 +406,11 @@ td.num,th.num{text-align:right}
 <tbody id=polytbl></tbody></table></div>
 <h2>Sharp +EV sports <span style="text-transform:none;letter-spacing:0">(paper &mdash; sharp-book fair value vs Kalshi price, maker-only, gated)</span></h2>
 <div class=grid id=sev></div>
+<h2>Sharp strategy attribution</h2>
+<div class=eras>
+  <div class=panel><div class=t>Current strategy &middot; v3 thin-band <span style="text-transform:none;letter-spacing:0">(1.5&ndash;2&cent; edges only, stale-odds gated &mdash; from Jul 13)</span></div><table><tbody id=sevcur></tbody></table></div>
+  <div class=panel><div class=t>Legacy &middot; v1 wide-edge <span style="text-transform:none;letter-spacing:0">(big "edges" were toxic &mdash; retired Jul 13)</span></div><table><tbody id=sevleg></tbody></table></div>
+</div>
 <div style="margin-top:10px"><table><thead><tr><th>Start</th><th>Game</th><th>Our team</th>
 <th class=num>Fair</th><th class=num>Entry</th><th class=num>Edge</th><th class=num>Qty</th>
 <th>Result</th><th class=num>P&amp;L</th></tr></thead><tbody id=sevtbl></tbody></table></div>
@@ -512,18 +517,23 @@ async function load(){
     const eBank=E?(Number(eSum.cash||0)+eOpenStake):null, eStart=E?Number(eSum.start||0):0;
     const pBank=P?Number(P.cash||P.start||0):null, pStart=P?Number(P.start||0):0;
     const cards=[
-      stratCard('Weather edge','forecast','era',F(wNav),
-        '<span class="'+C(wNav-wStart)+'">'+M(wNav-wStart)+'</span>',
-        '&middot; '+(s.settled||0)+' settled',
-        wSettled>=30?'gate: passed':'probing '+wSettled+'/30','leg'),
+      stratCard('Weather edge &middot; v7-obs','forecast','era',F(wNav),
+        '<span class="'+C((k.era_current||{}).net)+'">'+M((k.era_current||{}).net||0)+'</span>',
+        '&middot; v7: '+((k.era_current||{}).wins||0)+'W/'+((k.era_current||{}).losses||0)+'L'
+        +((k.era_current||{}).expectancy!=null?' &middot; '+M((k.era_current||{}).expectancy)+'/bet':'')
+        +' <span class=mut>(bank incl. legacy '+M((k.era_legacy||{}).net||0)+')</span>',
+        wSettled>=30?'v7 gate: n\u226530 met':'v7 probing '+wSettled+'/30','leg'),
       stratCard('Polymarket rewards','liquidity','yes',
         P?F(pBank):NA, P?'<span class="'+C(P.earned)+'">'+M(P.earned)+'</span>':NA,
         P?('&middot; '+(P.days||0)+'d &middot; APY ~'+(P.apy_annualized!=null?P.apy_annualized:'&ndash;')+'%'):'&middot; starting',
         'reinvesting','era'),
-      stratCard('Sharp +EV sports','anchor','era',
-        E?F(eBank):NA, E?'<span class="'+C(eSum.realized)+'">'+M(eSum.realized)+'</span>':NA,
-        E?('&middot; '+(eSum.wins||0)+'W/'+(eSum.losses||0)+'L &middot; '+(eSum.open_bets||0)+' open'):'&middot; starting',
-        E?((eSum.gate==='scale'?'gate: passed':'probing '+(eSum.gate_n||0)+'/30')):'starting','leg'),
+      stratCard('Sharp +EV &middot; v3 band','anchor','era',
+        E?F(eBank):NA,
+        E?'<span class="'+C((E.era_current||{}).net)+'">'+M((E.era_current||{}).net||0)+'</span>':NA,
+        E?('&middot; v3: '+((E.era_current||{}).wins||0)+'W/'+((E.era_current||{}).losses||0)+'L'
+          +((E.era_current||{}).expectancy!=null?' &middot; '+M((E.era_current||{}).expectancy)+'/bet':'')
+          +' <span class=mut>(bank incl. legacy '+M((E.era_legacy||{}).net||0)+')</span>'):'&middot; starting',
+        E?((eSum.gate==='scale'?'v3 gate: passed':'v3 probing '+(eSum.gate_n||0)+'/30')):'starting','leg'),
     ];
     $('strat').innerHTML=cards.join('');
     let tStart=wStart, tNav=wNav, nb=1;
@@ -624,22 +634,27 @@ async function load(){
       tile('Bank (paper)',F(ss.cash),'started '+F(ss.start)),
       tile('Realized P&L','<span class="'+C(ss.realized)+'">'+M(ss.realized)+'</span>',(ss.wins||0)+'W / '+(ss.losses||0)+'L'),
       tile('Open bets',(ss.open_bets||0),(ss.pending||0)+' resting \u00b7 '+(ss.canceled||0)+' expired'),
-      tile('Calibration gate',(ss.gate||'probe')+' '+(ss.gate_n||0)+'/30','sizing is earned'),
+      tile('Calibration gate',(ss.gate||'probe')+' '+(ss.gate_n||0)+'/30','v3 bets only \u00b7 sizing is earned'),
+      tile('v3 expectancy / bet',(S.era_current&&S.era_current.expectancy!=null)?'<span class="'+C(S.era_current.expectancy)+'">'+M(S.era_current.expectancy)+'</span>':NA,
+        (S.era_current&&S.era_current.pred!=null)?('pred '+S.era_current.pred+'% vs act '+S.era_current.actual+'%'):'no v3 settles yet'),
       tile('Placed',(ss.placed||0),(S.last_scan&&S.last_scan.credits!=null)?(S.last_scan.credits+' odds credits left'):'since inception'),
       tile('Last scan',(S.last_scan&&S.last_scan.ts)?S.last_scan.ts.replace('T',' ').slice(5,16):'\u2013',
         (S.last_scan&&S.last_scan.ts)?((S.last_scan.evaluated||0)+' edges eval \u00b7 best '
           +(S.last_scan.best_edge!=null?S.last_scan.best_edge+'\u00a2':'\u2013')
           +(S.last_scan.bar!=null?' vs '+S.last_scan.bar+(S.last_scan.ceil!=null?'\u2013'+S.last_scan.ceil:'')+'\u00a2 band':'')):'no scan yet'),
     ].join('');
+    $('sevcur').innerHTML=eraRows(S.era_current||{});
+    $('sevleg').innerHTML=eraRows(S.era_legacy||{});
+    const sevEra=b=>b.era_v?(b.era_v==='ev3-band'?' <span class="chip era" style="margin-left:5px">v3 new</span>':' <span class="chip leg" style="margin-left:5px">v1 old</span>'):'';
     const rows=[];
-    (S.pending||[]).forEach(b=>rows.push('<tr><td class=mut>'+((b.start||'').slice(5,16).replace('T',' '))+'</td><td><span class=mkt>'+(b.game||'')+'</span></td><td>'+(b.team||'')+'</td>'
+    (S.pending||[]).forEach(b=>rows.push('<tr><td class=mut>'+((b.start||'').slice(5,16).replace('T',' '))+'</td><td><span class=mkt>'+(b.game||'')+'</span></td><td>'+(b.team||'')+sevEra(b)+'</td>'
       +'<td class=num>'+Math.round((b.pside||0)*100)+'%</td><td class=num>'+b.entry+'&cent;</td><td class=num>+'+(b.edge||0)+'&cent;</td><td class=num>'+b.count+'</td>'
       +'<td><span class=chip style="background:rgba(230,180,60,.13);color:#e6b43c">RESTING</span></td><td class=num>&ndash;</td></tr>'));
-    (S.open||[]).forEach(b=>rows.push('<tr><td class=mut>'+((b.start||'').slice(5,16).replace('T',' '))+'</td><td><span class=mkt>'+(b.game||'')+'</span></td><td>'+(b.team||'')+'</td>'
+    (S.open||[]).forEach(b=>rows.push('<tr><td class=mut>'+((b.start||'').slice(5,16).replace('T',' '))+'</td><td><span class=mkt>'+(b.game||'')+'</span></td><td>'+(b.team||'')+sevEra(b)+'</td>'
       +'<td class=num>'+Math.round((b.pside||0)*100)+'%</td><td class=num>'+b.entry+'&cent;</td><td class=num>+'+(b.edge||0)+'&cent;</td><td class=num>'+b.count+'</td>'
       +'<td><span class=chip style="background:rgba(91,141,239,.13);color:var(--acc)">OPEN</span></td><td class=num>&ndash;</td></tr>'));
     (S.settled||[]).slice(0,10).forEach(b=>{const won=Number(b.outcome)===1;
-      rows.push('<tr><td class=mut>'+((b.ts||'').slice(5,16).replace('T',' '))+'</td><td><span class=mkt>'+(b.game||'')+'</span></td><td>'+(b.team||'')+'</td>'
+      rows.push('<tr><td class=mut>'+((b.ts||'').slice(5,16).replace('T',' '))+'</td><td><span class=mkt>'+(b.game||'')+'</span></td><td>'+(b.team||'')+sevEra(b)+'</td>'
       +'<td class=num>'+Math.round((b.pside||0)*100)+'%</td><td class=num>'+b.entry+'&cent;</td><td class=num>+'+(b.edge||0)+'&cent;</td><td class=num>'+b.count+'</td>'
       +'<td><span class="'+(won?'won':'lost')+'">'+(won?'WON':'LOST')+'</span></td><td class=num><span class="'+C(b.pnl)+'">'+M(b.pnl)+'</span></td></tr>');});
     if(S.shadow&&S.shadow.n){const bs=(S.shadow.buckets||[]).map(b=>b.edge+'\u00a2: n='+b.n+' act '+b.act+'% (fair '+b.fair+'%) EV '+(b.ev_c>0?'+':'')+b.ev_c+'\u00a2').join(' \u00b7 ');
