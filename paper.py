@@ -537,6 +537,14 @@ def main():
             sev_bot = sharp_ev.SharpEV()
         except Exception:
             sev_bot = None
+    # funding carry strategy removed 2026-07-18: purge its orphaned paper book
+    try:
+        _fs = os.path.join("logs", "funding_state.json")
+        if os.path.exists(_fs):
+            os.remove(_fs)
+            print("removed orphaned logs/funding_state.json (funding strategy retired)")
+    except Exception:
+        pass
     _serve_dashboard()
     if sim.load(SIM_PATH):
         print(f"Resumed previous session: ${sim.cash/100:.2f} cash, "
