@@ -43,6 +43,12 @@ GATE_MAX_GAP = 0.05        # max (mean pside - actual win rate) to scale
 # v7: MIN_PRICE 15 -> 30. Across every era the 15-30c entries were the loss
 # center (v6: actual 15% win vs ~21c paid); the only +EV bucket was 30c+.
 MIN_PRICE, MAX_PRICE = 30, 85
+# v8: retire sub-50% confidence bets. Third independent confirmation that our
+# under-50 psides lose (v5 buckets, 7/10 review, 7/18 calibration: 30-50%
+# bucket pred 39 vs act 28 = -11pts, while 50%+ buckets run UNDERconfident
+# +7/+8pts). We only bet when the blended model makes OUR side the favorite;
+# the shadow log still measures the retired band for free.
+MIN_PSIDE = float(os.environ.get("WX_MIN_PSIDE", "0.50"))
 # v7: LOW-temp markets were 40/44 of v6 bets and carried all the losses
 # (act 20% vs pred 36.5%). Cap them to half the book allowance until the
 # shadow report proves lo-calibration.
@@ -275,6 +281,8 @@ class WeatherPaper:
                 continue
             # direction check via Kelly; sizing depends on gate mode
             p = fair if s == "yes" else (1 - fair)
+            if p < MIN_PSIDE:
+                continue          # v8: sub-50% confidence measured -EV in 3 eras
             b_odds = (100 - price) / price
             f_star = p - (1 - p) / b_odds
             if f_star <= 0:

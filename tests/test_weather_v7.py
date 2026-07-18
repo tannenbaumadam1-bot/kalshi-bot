@@ -16,7 +16,7 @@ def _fresh():
     return w
 
 
-def _edge(entry=35, fair=0.48, city="denver", strike=95, is_low=False, tk=None):
+def _edge(entry=35, fair=0.55, city="denver", strike=95, is_low=False, tk=None):
     mk = {"ticker": tk or "T-%s-%s" % (city, strike), "city": city,
           "is_low": is_low, "strike": strike, "yes_bid": entry,
           "yes_ask": entry + 6, "entry_price": entry, "maker": True,
@@ -49,10 +49,10 @@ def test_cooldown_blocks_reentry(monkeypatch):
 
 def test_min_price_30_rejects_cheap_entries(monkeypatch):
     w = _fresh()
-    monkeypatch.setattr(we, "scan", lambda **kw: [_edge(entry=20, fair=0.40, tk="T-cheap")])
+    monkeypatch.setattr(we, "scan", lambda **kw: [_edge(entry=20, fair=0.55, tk="T-cheap")])
     w.place()
     assert len(w.bets) == 0                       # 20c < MIN_PRICE 30 -> no bet
-    monkeypatch.setattr(we, "scan", lambda **kw: [_edge(entry=30, fair=0.45, tk="T-ok")])
+    monkeypatch.setattr(we, "scan", lambda **kw: [_edge(entry=30, fair=0.55, tk="T-ok")])
     w.place()
     assert len(w.bets) == 1
 
@@ -188,3 +188,14 @@ def test_quote_returns_tuple_on_success_and_failure(monkeypatch):
         raise RuntimeError("network down")
     monkeypatch.setattr(wpm.requests, "get", _boom)
     assert w._quote("T-x") == (None, None)
+
+
+def test_min_pside_filter_blocks_sub50(monkeypatch):
+    # v8: sub-50% confidence retired (3 eras of -EV evidence)
+    w = _fresh()
+    monkeypatch.setattr(we, "scan", lambda **kw: [_edge(entry=35, fair=0.45, tk="T-low")])
+    w.place()
+    assert len(w.bets) == 0
+    monkeypatch.setattr(we, "scan", lambda **kw: [_edge(entry=35, fair=0.55, tk="T-hi2")])
+    w.place()
+    assert len(w.bets) == 1

@@ -388,7 +388,7 @@ td.num,th.num{text-align:right}
   <div class=panel><div class=t>Current model &middot; v7 obs-nowcast (calibration-gated)</div><table><tbody id=eracur></tbody></table></div>
   <div class=panel><div class=t>Legacy (v2&ndash;v6 &mdash; wrong-day forecasts)</div><table><tbody id=eraleg></tbody></table></div>
 </div>
-<h2>Model calibration <span style="text-transform:none;letter-spacing:0">(predicted vs realized win rate &mdash; the go-live gate)</span></h2>
+<h2>Model calibration <span style="text-transform:none;letter-spacing:0">(predicted vs realized win rate &mdash; the go-live gate &middot; sub-50% buckets RETIRED 7/18, shadow-only)</span></h2>
 <table><thead><tr><th>Confidence bucket</th><th class=num>Bets</th><th class=num>Predicted</th>
 <th class=num>Realized</th><th class=num>Gap</th></tr></thead><tbody id=calib></tbody></table>
 <h2>Open positions (marked to market)</h2>
@@ -410,6 +410,7 @@ td.num,th.num{text-align:right}
 <h2>Sharp strategy attribution</h2>
 <div class=eras>
   <div class=panel><div class=t>Current strategy &middot; v3 thin-band <span style="text-transform:none;letter-spacing:0">(1.5&ndash;2&cent; edges only, stale-odds gated &mdash; from Jul 13)</span></div><table><tbody id=sevcur></tbody></table></div>
+  <div class=panel><div class=t>Fade book &middot; fade1 <span style="text-transform:none;letter-spacing:0">(bet WITH Kalshi against 2&ndash;5&cent; "edges" &mdash; promoted Jul 18, own gate)</span></div><table><tbody id=sevfade></tbody></table></div>
   <div class=panel><div class=t>Legacy &middot; v1 wide-edge <span style="text-transform:none;letter-spacing:0">(big "edges" were toxic &mdash; retired Jul 13)</span></div><table><tbody id=sevleg></tbody></table></div>
 </div>
 <div style="margin-top:10px"><table><thead><tr><th>Start</th><th>Game</th><th>Our team</th>
@@ -647,6 +648,8 @@ async function load(){
       tile('Calibration gate',(ss.gate||'probe')+' '+(ss.gate_n||0)+'/30','v3 bets only \u00b7 sizing is earned'),
       tile('v3 expectancy / bet',(S.era_current&&S.era_current.expectancy!=null)?'<span class="'+C(S.era_current.expectancy)+'">'+M(S.era_current.expectancy)+'</span>':NA,
         (S.era_current&&S.era_current.pred!=null)?('pred '+S.era_current.pred+'% vs act '+S.era_current.actual+'%'):'no v3 settles yet'),
+      tile('Fade expectancy / bet',(S.era_fade&&S.era_fade.expectancy!=null)?'<span class="'+C(S.era_fade.expectancy)+'">'+M(S.era_fade.expectancy)+'</span>':NA,
+        (S.era_fade&&S.era_fade.n)?(S.era_fade.n+' settled \u00b7 '+(S.era_fade.open||0)+' open'):'no fade settles yet'),
       tile('Placed',(ss.placed||0),(S.last_scan&&S.last_scan.credits!=null)?(S.last_scan.credits+' odds credits left'):'since inception'),
       tile('Last scan',(S.last_scan&&S.last_scan.ts)?S.last_scan.ts.replace('T',' ').slice(5,16):'\u2013',
         (S.last_scan&&S.last_scan.ts)?((S.last_scan.evaluated||0)+' edges eval \u00b7 best '
@@ -654,8 +657,10 @@ async function load(){
           +(S.last_scan.bar!=null?' vs '+S.last_scan.bar+(S.last_scan.ceil!=null?'\u2013'+S.last_scan.ceil:'')+'\u00a2 band':'')):'no scan yet'),
     ].join('');
     $('sevcur').innerHTML=eraRows(S.era_current||{});
+    const FD=S.era_fade||{};
+    $('sevfade').innerHTML=eraRows(FD)+(FD.gate!=null?('<tr><td class=mut>Gate</td><td class=num>'+FD.gate+' '+(FD.gate_n||0)+'/30</td></tr>'):'');
     $('sevleg').innerHTML=eraRows(S.era_legacy||{});
-    const sevEra=b=>b.era_v?(b.era_v==='ev3-band'?' <span class="chip era" style="margin-left:5px">v3 new</span>':' <span class="chip leg" style="margin-left:5px">v1 old</span>'):'';
+    const sevEra=b=>b.era_v?(b.era_v==='ev3-band'?' <span class="chip era" style="margin-left:5px">v3 new</span>':(b.era_v==='fade1'?' <span class="chip" style="margin-left:5px;background:rgba(180,120,230,.15);color:#b478e6">fade</span>':' <span class="chip leg" style="margin-left:5px">v1 old</span>')):'';
     const rows=[];
     (S.pending||[]).forEach(b=>rows.push('<tr><td class=mut>'+((b.start||'').slice(5,16).replace('T',' '))+'</td><td><span class=mkt>'+(b.game||'')+'</span></td><td>'+(b.team||'')+sevEra(b)+'</td>'
       +'<td class=num>'+Math.round((b.pside||0)*100)+'%</td><td class=num>'+b.entry+'&cent;</td><td class=num>+'+(b.edge||0)+'&cent;</td><td class=num>'+b.count+'</td>'

@@ -95,7 +95,10 @@ V3_TS = "2026-07-13T15:00"  # v3 ship time (UTC); bets placed before = legacy "e
 def era_of(b):
     """Resolve a bet's strategy era. Rows placed pre-7/13 carry era 'ev1-sharp';
     rows placed after the v3 ship (band ceiling, stale-odds gate, pending
-    revalidation, 2h rest cap) are the current strategy regardless of tag."""
+    revalidation, 2h rest cap) are the current strategy regardless of tag.
+    Fade-book rows are tagged explicitly and never reclassified."""
+    if b.get("era") == FADE_ERA:
+        return FADE_ERA
     if b.get("era") == ERA:
         return ERA
     return ERA if (b.get("ots") or "") >= V3_TS else "ev1-sharp"
@@ -132,6 +135,9 @@ MAX_ODDS_AGE_MIN = float(os.environ.get("SEV_MAX_ODDS_AGE_MIN", "30"))  # stale-
 MAX_REST_H = float(os.environ.get("SEV_MAX_REST_H", "2.0"))    # cap the free option
 CANCEL_EDGE_C = float(os.environ.get("SEV_CANCEL_EDGE_C", "0.5"))  # revalidation floor
 FADE_MIN_EDGE_C = float(os.environ.get("SEV_FADE_MIN_EDGE_C", "2.0"))  # fade study bar
+FADE_MAX_EDGE_C = float(os.environ.get("SEV_FADE_MAX_EDGE_C", "5.0"))  # 5c+ edges WON (n=4) - don't fade those
+FADE_ON = os.environ.get("SEV_FADE", "1") == "1"       # fade book promoted 7/18 (study: n=47 inv EV +15.6c)
+FADE_ERA = "fade1"
 MIN_P, MAX_P = 0.20, 0.80          # fair-prob band: no longshots (Adam's rule)
 MIN_PRICE, MAX_PRICE = 20, 80      # entry-price band
 MAX_SPREAD_C = int(os.environ.get("SEV_MAX_SPREAD_C", "6"))
@@ -423,10 +429,16 @@ class SharpEV:
             settled_all = [h for h in self.history if h.get("outcome") in (0, 1)]
             era_cur = _era_stats([h for h in settled_all if era_of(h) == ERA])
             era_cur["open"] = sum(1 for b in self.bets.values() if era_of(b) == ERA)
+            era_fd = _era_stats([h for h in settled_all if era_of(h) == FADE_ERA])
+            era_fd["open"] = sum(1 for b in self.bets.values() if era_of(b) == FADE_ERA)
+            fade_gate, fade_n = self._gate(FADE_ERA)
+            era_fd["gate"], era_fd["gate_n"] = fade_gate, fade_n
             st = {"updated": datetime.datetime.now().isoformat(timespec="seconds"),
                   "summary": self.summary(),
                   "era_current": era_cur,
-                  "era_legacy": _era_stats([h for h in settled_all if era_of(h) != ERA]),
+                  "era_fade": era_fd,
+                  "era_legacy": _era_stats([h for h in settled_all
+                                            if era_of(h) not in (ERA, FADE_ERA)]),
                   "last_scan": self.last_scan,
                   "shadow": self.shadow_cache or {},
                   "pending": [dict(o, ticker=tk, era_v=era_of(o)) for tk, o in self.pending.items()],
@@ -459,9 +471,9 @@ class SharpEV:
             pass
 
     # ---- gate: identical contract to the weather book ----
-    def _gate(self):
+    def _gate(self, era=None):
         cur = [h for h in self.history
-               if era_of(h) == ERA and h.get("outcome") in (0, 1)][-60:]
+               if era_of(h) == (era or ERA) and h.get("outcome") in (0, 1)][-60:]
         n = len(cur)
         if n < GATE_MIN_N:
             return "probe", n
@@ -686,7 +698,7 @@ class SharpEV:
             return None                                 # illiquid / wide
         mid = (bid + ask) / 2.0
         fair = FAIR_W * fair_yes + (1 - FAIR_W) * (mid / 100.0)
-        best = None
+        best, fade = None, None
         for side, p, entry in (("yes", fair, bid), ("no", 1 - fair, 100 - ask)):
             if not (MIN_P <= p <= MAX_P):               # no longshots (either side)
                 continue
@@ -700,6 +712,21 @@ class SharpEV:
                  mk.get("_sport", ""), mk.get("_kind", ""), mk.get("ticker", ""),
                  side, round(p, 4), entry, mid, round(edge_c, 2), src, start_iso,
                  "" if age_m is None else round(age_m, 1)])
+            # FADE BOOK (promoted 7/18): a measured "edge" in [2,5)c is the
+            # TOXIC band - when Kalshi disagrees that hard with the sharp
+            # consensus, Kalshi has been right (shadow n=47 deduped, inverse
+            # EV +15.6c). So we take the OTHER side at ITS maker price.
+            # No stale-odds filter here: a lag artifact only strengthens the
+            # "Kalshi is right" case. pside = market mid of the fade side
+            # (neutral prior - the gate then MEASURES the anomaly honestly).
+            if FADE_ON and FADE_MIN_EDGE_C <= edge_c < FADE_MAX_EDGE_C:
+                f_side = "no" if side == "yes" else "yes"
+                f_entry = bid if f_side == "yes" else 100 - ask
+                f_p = (mid / 100.0) if f_side == "yes" else (1 - mid / 100.0)
+                if (MIN_P <= f_p <= MAX_P and MIN_PRICE <= f_entry <= MAX_PRICE
+                        and (fade is None or edge_c > fade[3])):
+                    fade = (mk, label, f_side, round(edge_c, 2), f_p, src,
+                            start_iso, "fade")
             if edge_c < min_edge:
                 continue
             if edge_c >= MAX_EDGE_C:
@@ -707,8 +734,8 @@ class SharpEV:
             if age_m is not None and age_m > MAX_ODDS_AGE_MIN:
                 continue        # anchor line is stale: the "edge" is a lag artifact
             if best is None or edge_c > best[3]:
-                best = (mk, label, side, edge_c, p, src, start_iso)
-        return best
+                best = (mk, label, side, edge_c, p, src, start_iso, "dir")
+        return best or fade
 
     @staticmethod
     def _start_of(ev):
@@ -819,10 +846,19 @@ class SharpEV:
                 continue
             mid = (bid + ask) / 2.0
             fair = FAIR_W * fair_yes + (1 - FAIR_W) * (mid / 100.0)
-            p = fair if o.get("side", "yes") == "yes" else 1 - fair
-            edge_c = p * 100 - o["entry"]
-            if CANCEL_EDGE_C <= edge_c < MAX_EDGE_C:
-                continue                                # still sane: let it rest
+            if o.get("strat") == "fade":
+                # fade rests on the OPPOSITE side of the measured edge: keep it
+                # only while the triggering disagreement is still in [2,5)c
+                p_t = 1 - fair if o.get("side", "yes") == "yes" else fair
+                e_t = (100 - ask) if o.get("side", "yes") == "yes" else bid
+                trig_c = p_t * 100 - e_t
+                if FADE_MIN_EDGE_C <= trig_c < FADE_MAX_EDGE_C:
+                    continue                            # signal alive: let it rest
+            else:
+                p = fair if o.get("side", "yes") == "yes" else 1 - fair
+                edge_c = p * 100 - o["entry"]
+                if CANCEL_EDGE_C <= edge_c < MAX_EDGE_C:
+                    continue                            # still sane: let it rest
             self.canceled += 1
             n += 1
             self._log([datetime.datetime.now().isoformat(timespec="seconds"),
@@ -841,14 +877,17 @@ class SharpEV:
         placed = 0
         budget = MAX_PER_DAY - self._placed_today()
         taken = {t.rsplit("-", 1)[0] for t in list(self.bets) + list(self.pending)}
-        for mk, label, side, edge_c, fair, src, start_iso in cands:
+        fade_mode, _fn = self._gate(FADE_ERA)
+        for mk, label, side, edge_c, fair, src, start_iso, strat in cands:
             if placed >= budget or len(self.bets) + len(self.pending) >= MAX_OPEN:
                 break
             tk = mk["ticker"]
             if tk in self.bets or tk in self.pending or tk.rsplit("-", 1)[0] in taken:
                 continue                                 # filled a sibling this pass
             entry = mk["yes_bid"] if side == "yes" else 100 - mk["yes_ask"]
-            if mode == "probe":
+            bet_era = FADE_ERA if strat == "fade" else ERA
+            bet_mode = fade_mode if strat == "fade" else mode
+            if bet_mode == "probe":
                 count = max(1, PROBE_COST_CENTS // entry)
             else:
                 b_odds = (100 - entry) / entry
@@ -862,6 +901,8 @@ class SharpEV:
             ots = datetime.datetime.now().isoformat(timespec="seconds")
             team = label if side == "yes" else (
                 "not " + label if label.startswith("Over") else label + " (fade)")
+            if strat == "fade":
+                team += " [contra]"
             # expire at the game lockout OR after MAX_REST_H, whichever is
             # sooner: our fair value rots between scans, and a long-resting
             # order is a free option (long rests measured net-negative).
@@ -878,8 +919,8 @@ class SharpEV:
                 "sport": mk.get("_sport", ""), "game": (mk.get("title") or "")[:60],
                 "team": team, "side": side, "entry": entry, "count": count,
                 "pside": round(fair, 3), "edge": round(edge_c, 1), "fee": 0,
-                "src": src, "start": start_iso, "ots": ots, "era": ERA,
-                "expire": expire}
+                "src": src, "start": start_iso, "ots": ots, "era": bet_era,
+                "strat": strat, "expire": expire}
             taken.add(tk.rsplit("-", 1)[0])
             self._log([ots, "REST", mk.get("_sport", ""), (mk.get("title") or "")[:60],
                        team, round(fair, 3), entry, count, "", ""])

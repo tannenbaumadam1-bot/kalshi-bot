@@ -373,3 +373,66 @@ def test_fade_report_dedups_and_prices_taker_inverse(tmp_path, monkeypatch):
     # GAME1 (out=0): +40 - 1.68 = +38.32 ; GAME2 (out=1): 40-100-1.68 = -61.68
     assert abs(rep["inv_ev_c"] - (38.32 - 61.68) / 2) < 0.01
     assert rep["buckets"] == []                # n=2 < 3 per-bucket floor
+
+
+# ---- fade book (promoted 7/18: bet WITH Kalshi against 2-5c "edges") ----
+
+def test_fade_candidate_on_toxic_edge():
+    now = datetime.datetime.now(se.ET)
+    start = now + datetime.timedelta(hours=3)
+    p = _bot()
+    # fair home ~55.7% vs 50c bid -> shrunk edge ~ 2.8c = in the fade band
+    cands = p.candidates([_ev(start, pinn_home=1.80, pinn_away=2.13)],
+                         [_mk(start)], now=now)
+    assert len(cands) == 1
+    mk, label, side, edge_c, pside, src, start_iso, strat = cands[0]
+    assert strat == "fade"
+    assert side == "no"                      # opposite of the measured edge side
+    assert se.FADE_MIN_EDGE_C <= edge_c < se.FADE_MAX_EDGE_C
+    assert abs(pside - (1 - 51.5 / 100.0)) < 0.02   # market-mid prior, not fair
+
+
+def test_fade_places_with_own_era_and_probe_stakes():
+    now = datetime.datetime.now(se.ET)
+    start = now + datetime.timedelta(hours=3)
+    p = _bot()
+    cands = p.candidates([_ev(start, pinn_home=1.80, pinn_away=2.13)],
+                         [_mk(start)], now=now)
+    assert p.place(cands) == 1
+    o = next(iter(p.pending.values()))
+    assert o["era"] == se.FADE_ERA and o["strat"] == "fade"
+    assert o["entry"] * o["count"] <= se.PROBE_COST_CENTS   # probe until own gate
+    assert "[contra]" in o["team"]
+    _fill(p)
+    b = next(iter(p.bets.values()))
+    assert se.era_of(b) == se.FADE_ERA       # explicit tag survives fills
+
+
+def test_fade_excluded_from_v3_gate():
+    p = _bot()
+    p.history = ([{"era": se.FADE_ERA, "outcome": 1, "pnl": 10, "pside": 0.5,
+                   "ots": "2026-07-19T00:00:00"}] * 40)
+    mode, n = p._gate()                      # v3 gate must not see fade rows
+    assert n == 0 and mode == "probe"
+    fmode, fn = p._gate(se.FADE_ERA)
+    assert fn == 40 and fmode == "scale"
+
+
+def test_huge_edges_not_faded():
+    now = datetime.datetime.now(se.ET)
+    start = now + datetime.timedelta(hours=3)
+    p = _bot()
+    # ~8.8c edge: beyond FADE_MAX (5c+ edges WON in the shadow data)
+    cands = p.candidates([_ev(start, pinn_home=1.60, pinn_away=2.60)],
+                         [_mk(start)], now=now)
+    assert cands == []
+
+
+def test_direct_candidates_still_tagged_dir():
+    now = datetime.datetime.now(se.ET)
+    start = now + datetime.timedelta(hours=3)
+    p = _bot()
+    cands = p.candidates([_ev(start)], [_mk(start)], now=now)
+    assert len(cands) == 1 and cands[0][7] == "dir"
+    assert p.place(cands) == 1
+    assert next(iter(p.pending.values()))["era"] == se.ERA

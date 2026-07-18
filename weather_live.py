@@ -363,6 +363,8 @@ class WeatherLive:
             if price < wp.MIN_PRICE or price > wp.MAX_PRICE:
                 continue
             p = fair if s == "yes" else (1 - fair)
+            if p < wp.MIN_PSIDE:
+                continue          # v8: sub-50% confidence measured -EV in 3 eras
             b_odds = (100 - price) / price
             f_star = p - (1 - p) / b_odds
             if f_star <= 0:
