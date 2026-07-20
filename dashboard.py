@@ -668,7 +668,7 @@ async function load(){
     return '<tr>'+mkt(b)+side(b.side)+era(b)+prob(b.pside)
     +'<td class=num>'+b.entry+'&cent;</td>'
     +'<td class=num>'+(h?b.now+'&cent;':'&ndash;')+'</td>'
-    +'<td class=num>'+b.count+'</td>'
+    +'<td class=num>'+b.count+(b.adds?' <span class=mut>(+'+b.adds+')</span>':'')+'</td>'
     +'<td class=num>'+F(b.entry*b.count/100)+'</td>'
     +'<td class=num>'+feeC(b.fee)+'</td>'
     +'<td class=num>'+(h?F(b.value):'&ndash;')+'</td>'

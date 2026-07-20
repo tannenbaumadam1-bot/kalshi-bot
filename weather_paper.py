@@ -57,6 +57,14 @@ MIN_PSIDE = float(os.environ.get("WX_MIN_PSIDE", "0.50"))
 # 7/21: threshold raised 20->30 - the market-price calibration shows the
 # whole 20-35c band is toxic (act 12.7% vs implied 27.3%), not just sub-20.
 SALVAGE_C = int(os.environ.get("WX_SALVAGE_C", "30"))
+# Pyramiding (Adam 7/21: accentuate winners, cut losers short). A MODEL book
+# adds only when BOTH are true: the position has RUN WX_PYRAMID_UP_C past its
+# average entry AND the current scan STILL shows a fee-cleared edge on the
+# same side (the model re-confirms at today's higher price). Probe-size adds,
+# winners only, capped; WX_PYRAMID=0 disables.
+WX_PYRAMID = os.environ.get("WX_PYRAMID", "1") == "1"
+WX_PYRAMID_UP_C = int(os.environ.get("WX_PYRAMID_UP_C", "10"))
+WX_PYRAMID_MAX = int(os.environ.get("WX_PYRAMID_MAX", "2"))
 # v7: LOW-temp markets were 40/44 of v6 bets and carried all the losses
 # (act 20% vs pred 36.5%). Cap them to half the book allowance until the
 # shadow report proves lo-calibration.
@@ -123,6 +131,7 @@ class WeatherPaper:
                   "depth": dict(we.LAST_DEPTH) if we.LAST_DEPTH else None,
                   "open": [{"ticker": tk, "city": b["city"], "strike": b["strike"],
                             "kind": b.get("kind", "ge"), "cap": b.get("cap"),
+                            "adds": b.get("adds", 0),
                             "hl": b["hl"], "side": b["side"], "entry": b["entry"],
                             "count": b["count"], "pside": round(b["pside"], 2),
                             "fee": b.get("fee", 0), "src": b.get("src", ""),
@@ -273,6 +282,8 @@ class WeatherPaper:
         for ev, side, mk, fair, ftemp in edges:
             tk = mk["ticker"]
             if tk in self.bets:
+                # this ticker STILL has a scanned edge -> maybe add to a runner
+                self._maybe_pyramid(tk, side, mk, fair)
                 continue
             if self._cooled(tk):          # v7: no re-entry churn after an exit
                 continue
@@ -343,6 +354,51 @@ class WeatherPaper:
             self._log([datetime.datetime.now().isoformat(timespec="seconds"), "OPEN",
                        mk["city"], mk["strike"], ("lo" if mk["is_low"] else "hi"), s,
                        round(pside, 3), price, size, "", ""])
+
+    def _maybe_pyramid(self, tk, side, mk, fair):
+        """Add one probe-size unit to a winning position the model still
+        believes in: price ran >= WX_PYRAMID_UP_C past avg entry AND this
+        ticker re-qualified in the scan (edge >= bar at the CURRENT price).
+        Never adds to losers; max WX_PYRAMID_MAX adds; weighted-avg entry."""
+        if not WX_PYRAMID:
+            return False
+        b = self.bets[tk]
+        s = "yes" if side == "YES" else "no"
+        if s != b["side"]:
+            return False                  # model flipped sides: no add
+        if int(b.get("adds", 0)) >= WX_PYRAMID_MAX:
+            return False
+        price = int(mk.get("entry_price",
+                           mk["yes_ask"] if s == "yes" else (100 - mk["yes_bid"])))
+        if price < b["entry"] + WX_PYRAMID_UP_C:
+            return False                  # not a runner yet
+        if price < MIN_PRICE or price > MAX_PRICE:
+            return False
+        p = fair if s == "yes" else (1 - fair)
+        if p < MIN_PSIDE:
+            return False
+        size = max(1, PROBE_COST_CENTS // price)
+        maker = bool(mk.get("maker", False))
+        fee = fee_cents(price, size, taker=not maker)
+        cost = price * size + fee
+        open_stake = sum(x["entry"] * x["count"] for x in self.bets.values())
+        bankroll = self.cash + open_stake
+        if open_stake + price * size > MAX_BOOK_FRAC * bankroll:
+            return False
+        if self.cash - cost < 100:
+            return False
+        self.cash -= cost
+        self.fees += fee
+        tot = b["count"] + size
+        b["entry"] = round((b["entry"] * b["count"] + price * size) / tot, 1)
+        b["count"] = tot
+        b["fee"] = b.get("fee", 0) + fee
+        b["adds"] = int(b.get("adds", 0)) + 1
+        self._log([datetime.datetime.now().isoformat(timespec="seconds"),
+                   "PYRAMID", mk["city"], mk["strike"],
+                   ("lo" if mk["is_low"] else "hi"), s, round(p, 3),
+                   price, size, "", ""])
+        return True
 
     def _quote(self, ticker):
         """Current (yes_bid, yes_ask) in cents, or (None, None)."""

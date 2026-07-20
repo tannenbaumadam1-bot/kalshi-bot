@@ -213,11 +213,14 @@ class WeatherLive:
                 if filled > 0:
                     fee = fee_cents(o["entry"], filled, taker=False)
                     self.fees_c += fee
-                    self.bets[tk] = {**{k: o[k] for k in
-                                        ("side", "entry", "city", "strike", "kind",
-                                         "cap", "hl", "pside", "date", "src")},
-                                     "count": filled, "fee": fee, "oid": oid,
-                                     "ots": o.get("ots", now()), "era": ERA}
+                    if tk in self.bets and o.get("is_add"):
+                        self._merge_fill(tk, o["entry"], filled, fee)
+                    else:
+                        self.bets[tk] = {**{k: o[k] for k in
+                                            ("side", "entry", "city", "strike", "kind",
+                                             "cap", "hl", "pside", "date", "src")},
+                                         "count": filled, "fee": fee, "oid": oid,
+                                         "ots": o.get("ots", now()), "era": ERA}
                     self._log([now(), "FILL", self.mode, o["city"], o["strike"],
                                o["hl"], o["side"], round(o["pside"], 3),
                                o["entry"], filled, "", "", oid])
@@ -351,7 +354,11 @@ class WeatherLive:
             ev_counts[ek] = ev_counts.get(ek, 0) + 1
         for ev, side, mk, fair, ftemp in edges:
             tk = mk["ticker"]
-            if tk in self.bets or any(o["ticker"] == tk for o in self.pending.values()):
+            if any(o["ticker"] == tk for o in self.pending.values()):
+                continue
+            if tk in self.bets:
+                # ticker re-qualified in the scan -> maybe add to a runner
+                self._maybe_pyramid_order(tk, side, mk, fair, balance_c)
                 continue
             if self._cooled(tk):
                 continue
@@ -418,13 +425,74 @@ class WeatherLive:
             for oid, o in list(self.pending.items()):
                 fee = fee_cents(o["entry"], o["count"], taker=False)
                 self.fees_c += fee
-                self.bets[o["ticker"]] = {**{k: o[k] for k in
-                                             ("side", "entry", "count", "city",
-                                              "strike", "kind", "cap", "hl",
-                                              "pside", "date", "src")},
-                                          "fee": fee, "oid": oid,
-                                          "ots": o["ots"], "era": ERA}
+                tk0 = o["ticker"]
+                if tk0 in self.bets and o.get("is_add"):
+                    self._merge_fill(tk0, o["entry"], o["count"], fee)
+                else:
+                    self.bets[tk0] = {**{k: o[k] for k in
+                                         ("side", "entry", "count", "city",
+                                          "strike", "kind", "cap", "hl",
+                                          "pside", "date", "src")},
+                                      "fee": fee, "oid": oid,
+                                      "ots": o["ots"], "era": ERA}
                 del self.pending[oid]
+
+    def _merge_fill(self, tk, price, count, fee):
+        """Fold a pyramid add-on fill into the existing position."""
+        b = self.bets[tk]
+        tot = b["count"] + count
+        b["entry"] = round((b["entry"] * b["count"] + price * count) / tot, 1)
+        b["count"] = tot
+        b["fee"] = b.get("fee", 0) + fee
+        b["adds"] = int(b.get("adds", 0)) + 1
+
+    def _maybe_pyramid_order(self, tk, side, mk, fair, balance_c):
+        """Rest a probe-size ADD order on a winner the model still believes
+        in (same rules as the paper book: +WX_PYRAMID_UP_C past avg entry,
+        re-qualified edge, same side, capped adds)."""
+        if not wp.WX_PYRAMID:
+            return False
+        b = self.bets[tk]
+        s = "yes" if side == "YES" else "no"
+        if s != b["side"] or int(b.get("adds", 0)) >= wp.WX_PYRAMID_MAX:
+            return False
+        price = int(mk.get("entry_price",
+                           mk["yes_ask"] if s == "yes" else (100 - mk["yes_bid"])))
+        if price < b["entry"] + wp.WX_PYRAMID_UP_C:
+            return False
+        if price < wp.MIN_PRICE or price > wp.MAX_PRICE:
+            return False
+        p = fair if s == "yes" else (1 - fair)
+        if p < wp.MIN_PSIDE:
+            return False
+        size = max(1, PROBE_COST_CENTS // price)
+        if price * size > self.max_bet_c:
+            return False
+        if self.open_cost_c() + price * size > self.max_open_c:
+            return False
+        if balance_c - price * size < self.reserve_c:
+            return False
+        oid = f"dry-add-{self.placed + 1}"
+        if self.client is not None:
+            try:
+                resp = self.client.create_order(tk, action="buy", side=s,
+                                                count=size, price_cents=price)
+                oid = ((resp.get("order") or {}).get("order_id")
+                       or resp.get("order_id") or oid)
+            except Exception:
+                return False
+        if self.client is None:
+            self.dry_balance_c -= price * size
+        self.pending[oid] = {
+            "ticker": tk, "side": s, "entry": price, "count": size,
+            "pside": round(p, 3), "city": b["city"], "strike": b["strike"],
+            "kind": b.get("kind", "ge"), "cap": b.get("cap"), "hl": b["hl"],
+            "date": b.get("date", ""), "src": b.get("src", "forecast"),
+            "maker": True, "is_add": True, "ots": now()}
+        self.placed += 1
+        self._log([now(), "PYRAMID", self.mode, b["city"], b["strike"], b["hl"],
+                   s, round(p, 3), price, size, "", "", oid])
+        return True
 
     def step(self):
         self._roll_day()
