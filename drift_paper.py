@@ -48,6 +48,12 @@ DRIFT_STOP_C = int(os.environ.get("DRIFT_STOP_C", "50"))
 # >= DRIFT_LEVEL_C the LEVEL alone qualifies (no climb needed - certainty is
 # underpriced); 65-80c entries remain the climb-gated experiment.
 DRIFT_LEVEL_C = int(os.environ.get("DRIFT_LEVEL_C", "80"))
+# Momentum-trader upgrades (Adam 7/21, from trend-following research):
+VOL_CONFIRM = os.environ.get("DRIFT_VOL_CONFIRM", "1") == "1"   # climbs need volume
+CLIMB_SAMEDAY = os.environ.get("DRIFT_CLIMB_SAMEDAY", "1") == "1"  # info arrives on settle day
+PYRAMID_UP_C = int(os.environ.get("DRIFT_PYRAMID_UP_C", "10"))  # add-on trigger (post-gate)
+PYRAMID_MAX = int(os.environ.get("DRIFT_PYRAMID_MAX", "2"))     # max adds per position
+FADE_DROP_C = int(os.environ.get("DRIFT_FADE_DROP_C", "15"))    # A/B: exit peak-15c even >50
 PROBE_COST_CENTS = int(os.environ.get("DRIFT_PROBE_COST", "60"))
 GATE_MIN_N = 30
 GATE_MAX_GAP = 0.05
@@ -65,6 +71,7 @@ class DriftPaper:
         self.bets = {}
         self.history = []
         self.last_mid = {}       # ticker -> yes-mid at the previous scan
+        self.last_vol = {}       # ticker -> 24h volume at the previous scan
         self.wins = 0
         self.losses = 0
         self.fees = 0.0
@@ -77,7 +84,7 @@ class DriftPaper:
             try:
                 d = json.load(open(STATE))
                 for k in ("start", "cash", "bets", "history", "last_mid",
-                          "wins", "losses", "fees", "placed"):
+                          "last_vol", "wins", "losses", "fees", "placed"):
                     if k in d:
                         setattr(self, k, d[k])
             except Exception:
@@ -89,7 +96,7 @@ class DriftPaper:
             mode, n = self._gate()
             d = {"updated": now(), "start": self.start, "cash": self.cash,
                  "bets": self.bets, "history": self.history[-120:],
-                 "last_mid": self.last_mid,
+                 "last_mid": self.last_mid, "last_vol": self.last_vol,
                  "wins": self.wins, "losses": self.losses, "fees": self.fees,
                  "placed": self.placed,
                  "summary": {
@@ -205,7 +212,13 @@ class DriftPaper:
                 continue
             mid = (yb + ya) / 2.0
             smid = mid if b["side"] == "yes" else 100 - mid
-            if smid >= DRIFT_STOP_C:
+            peak = max(float(b.get("peak", smid)), smid)
+            b["peak"] = peak
+            # A/B experiment: 'fade'-mode bets also exit when momentum stalls
+            # (>= FADE_DROP_C off the peak) even while still the favorite
+            fade = (b.get("exitmode") == "fade" and smid >= DRIFT_STOP_C
+                    and peak - smid >= FADE_DROP_C)
+            if smid >= DRIFT_STOP_C and not fade:
                 continue
             bid = yb if b["side"] == "yes" else 100 - ya
             if bid <= 0:
@@ -221,12 +234,13 @@ class DriftPaper:
                                  "pside": round(b["pside"], 3),
                                  "entry": b["entry"], "count": cnt,
                                  "fee": b.get("fee", 0),
-                                 "outcome": None, "exited": True, "stopped": True,
+                                 "outcome": None, "exited": True,
+                                 "stopped": not fade, "faded": fade,
                                  "exit_px": bid,
                                  "pnl": round(net / 100.0, 2), "ts": now(),
                                  "ots": b.get("ots", ""), "era": ERA})
             self.history = self.history[-120:]
-            self._log([now(), "STOP", tk, b["city"], b["strike"], b["hl"],
+            self._log([now(), "FADE" if fade else "STOP", tk, b["city"], b["strike"], b["hl"],
                        b["side"], round(b["pside"], 3), bid, cnt, "",
                        round(net / 100.0, 2)])
             del self.bets[tk]
@@ -234,7 +248,11 @@ class DriftPaper:
         return stopped
 
     def place(self, mkts=None):
-        """Momentum entries: side price >= DRIFT_MIN_C and climbing."""
+        """Momentum entries, RANKED: proven level entries (>=80c) first by
+        price, then climbs by climb size (cross-sectional momentum). Climb
+        entries additionally require a SAME-DAY market (that's when weather
+        information actually arrives) and RISING 24h volume (a 2c climb on no
+        volume is a stale quote, not momentum). Also pyramids post-gate."""
         if mkts is None:
             try:
                 mkts = we.find_temp_markets(max_days=1)
@@ -244,8 +262,8 @@ class DriftPaper:
         budget = DRIFT_MAX_PER_DAY - self._placed_today()
         ev_keys = {(b["city"], b.get("date", ""), b["hl"])
                    for b in self.bets.values()}
-        new_mid = {}
-        placed = 0
+        new_mid, new_vol, cands = {}, {}, []
+        today_iso = datetime.date.today().isoformat()
         for mk in mkts:
             tk = mk["ticker"]
             bid, ask = mk["yes_bid"], mk["yes_ask"]
@@ -253,31 +271,50 @@ class DriftPaper:
                 continue
             mid = (bid + ask) / 2.0
             prev = self.last_mid.get(tk)
+            prev_vol = self.last_vol.get(tk)
+            vol = float(mk.get("vol", 0) or 0)
             new_mid[tk] = mid
-            if tk in self.bets or placed >= budget:
+            new_vol[tk] = vol
+            if tk in self.bets:
+                self._maybe_pyramid(tk, mk, mid, mode)
                 continue
             ekey = (mk["city"], mk.get("date", ""),
                     "lo" if mk["is_low"] else "hi")
             if ekey in ev_keys:
                 continue                    # one drift bet per weather event
-            # which side is strong, and is it still climbing?
             if mid >= DRIFT_MIN_C:
                 side, entry, smid = "yes", bid, mid
-                climbing = prev is not None and (mid - prev) >= DRIFT_UP_C
+                climb_c = (mid - prev) if prev is not None else None
             elif mid <= 100 - DRIFT_MIN_C:
                 side, entry, smid = "no", 100 - ask, 100 - mid
-                climbing = prev is not None and (prev - mid) >= DRIFT_UP_C
+                climb_c = (prev - mid) if prev is not None else None
             else:
                 continue
-            # >=80c: level alone is the proven signal; 65-80c: climb required
+            climbing = climb_c is not None and climb_c >= DRIFT_UP_C
+            # >=80c: level alone is the proven signal; 65-80c: climb required,
+            # and the climb must be REAL (same-day info + actual trading)
             if smid >= DRIFT_LEVEL_C:
-                trig = "level"
+                trig, score = "level", smid
             elif climbing:
-                trig = "climb"
+                if CLIMB_SAMEDAY and mk.get("date", "") != today_iso:
+                    continue                # tomorrow's climb = noise, skip
+                if VOL_CONFIRM and not (prev_vol is not None and vol > prev_vol):
+                    continue                # no volume behind the move = stale quote
+                trig, score = "climb", climb_c
             else:
                 continue
             if entry < 50 or entry > DRIFT_MAX_ENTRY:
                 continue                    # favorite at a real price only
+            cands.append((trig, score, mk, side, entry, smid, prev, mid, ekey))
+        # cross-sectional ranking: strongest signals get the daily budget first
+        cands.sort(key=lambda c: (0 if c[0] == "level" else 1, -c[1]))
+        placed = 0
+        for trig, score, mk, side, entry, smid, prev, mid, ekey in cands:
+            if placed >= budget:
+                break
+            if ekey in ev_keys:
+                continue
+            tk = mk["ticker"]
             pside = smid / 100.0            # market's own prob = our prediction
             if mode == "probe":
                 size = max(1, PROBE_COST_CENTS // entry)
@@ -301,6 +338,9 @@ class DriftPaper:
                              "hl": ("lo" if mk["is_low"] else "hi"),
                              "date": mk.get("date", ""), "ots": now(),
                              "era": ERA, "trig": trig,
+                             "exitmode": ("fade" if self.placed % 2 == 0
+                                          else "plain"),
+                             "peak": smid, "adds": 0,
                              "from_mid": prev, "at_mid": mid}
             ev_keys.add(ekey)
             self.placed += 1
@@ -309,8 +349,39 @@ class DriftPaper:
                        ("lo" if mk["is_low"] else "hi"), side,
                        round(pside, 3), entry, size, "", ""])
         self.last_mid = new_mid             # momentum memory = last scan only
+        self.last_vol = new_vol
         return placed
 
+    def _maybe_pyramid(self, tk, mk, mid, mode):
+        """Trend-follower add-on: POST-GATE ONLY, add one probe-size unit when
+        an open position has run PYRAMID_UP_C past its (average) entry.
+        Adds to winners, never losers; capped at PYRAMID_MAX adds."""
+        if mode != "scale":
+            return False
+        b = self.bets[tk]
+        if int(b.get("adds", 0)) >= PYRAMID_MAX:
+            return False
+        smid = mid if b["side"] == "yes" else 100 - mid
+        if smid < b["entry"] + PYRAMID_UP_C:
+            return False
+        entry_add = mk["yes_bid"] if b["side"] == "yes" else 100 - mk["yes_ask"]
+        if entry_add <= 0 or entry_add > DRIFT_MAX_ENTRY:
+            return False
+        add = max(1, PROBE_COST_CENTS // entry_add)
+        fee = fee_cents(entry_add, add, taker=False)
+        cost = entry_add * add + fee
+        if self.cash - cost < 100:
+            return False
+        self.cash -= cost
+        self.fees += fee
+        tot = b["count"] + add
+        b["entry"] = round((b["entry"] * b["count"] + entry_add * add) / tot, 1)
+        b["count"] = tot
+        b["fee"] = b.get("fee", 0) + fee
+        b["adds"] = int(b.get("adds", 0)) + 1
+        self._log([now(), "PYRAMID", tk, b["city"], b["strike"], b["hl"],
+                   b["side"], round(b["pside"], 3), entry_add, add, "", ""])
+        return True
     def step(self):
         self.settle()
         self.stop_check()

@@ -295,6 +295,7 @@ def find_temp_markets(max_days=2):
                     "strike": strike, "kind": kind, "cap": cap,
                     "bid_size": float(mk.get("yes_bid_size_fp") or 0),
                     "ask_size": float(mk.get("yes_ask_size_fp") or 0),
+                    "vol": float(mk.get("volume_24h_fp") or 0),
                     "yes_bid": _c(mk.get("yes_bid_dollars")), "yes_ask": _c(mk.get("yes_ask_dollars")),
                     # settlement day comes from the TICKER (unambiguous), not
                     # close_time (which is the next UTC day -> v2-v6 forecast

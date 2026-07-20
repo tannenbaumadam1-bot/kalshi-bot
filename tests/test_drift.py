@@ -8,12 +8,18 @@ import drift_paper as dp
 import weather_paper as wp
 
 
+import datetime as _dt
+
+TODAY = _dt.date.today().isoformat()
+TOMORROW = (_dt.date.today() + _dt.timedelta(days=1)).isoformat()
+
+
 def _mk(tk="KXHIGHNY-26JUL21-T86", bid=66, ask=70, city="new york",
-        is_low=False, strike=87, kind="ge", cap=None, date="2026-07-21"):
+        is_low=False, strike=87, kind="ge", cap=None, date=None, vol=100.0):
     return {"ticker": tk, "city": city, "is_low": is_low, "strike": strike,
             "kind": kind, "cap": cap, "yes_bid": bid, "yes_ask": ask,
-            "date": date, "hrs": 10.0, "title": "", "sub": "",
-            "bid_size": 50.0, "ask_size": 50.0}
+            "date": date or TODAY, "hrs": 10.0, "title": "", "sub": "",
+            "bid_size": 50.0, "ask_size": 50.0, "vol": vol}
 
 
 def _bot(tmp_path, monkeypatch):
@@ -21,7 +27,7 @@ def _bot(tmp_path, monkeypatch):
     monkeypatch.setattr(dp, "BETS", str(tmp_path / "b.csv"))
     b = dp.DriftPaper.__new__(dp.DriftPaper)
     b.start, b.cash = 10000, 10000.0
-    b.bets, b.history, b.last_mid = {}, [], {}
+    b.bets, b.history, b.last_mid, b.last_vol = {}, [], {}, {}
     b.wins = b.losses = b.placed = 0
     b.fees = 0.0
     return b
@@ -32,8 +38,8 @@ def test_needs_two_scans_and_a_climb(tmp_path, monkeypatch):
     # first sight: high but no momentum memory -> no bet, memory recorded
     assert b.place(mkts=[_mk(bid=66, ask=70)]) == 0
     assert b.last_mid and not b.bets
-    # second scan: climbed 3c -> bet YES at the bid (maker)
-    assert b.place(mkts=[_mk(bid=69, ask=73)]) == 1
+    # second scan: climbed 3c on rising volume -> bet YES at the bid (maker)
+    assert b.place(mkts=[_mk(bid=69, ask=73, vol=160.0)]) == 1
     bet = next(iter(b.bets.values()))
     assert bet["side"] == "yes" and bet["entry"] == 69
     assert bet["era"] == "drift1"
@@ -52,7 +58,7 @@ def test_no_side_momentum(tmp_path, monkeypatch):
     b = _bot(tmp_path, monkeypatch)
     # yes-mid falling = NO side climbing
     b.place(mkts=[_mk(bid=28, ask=32)])                 # no-side mid 70
-    assert b.place(mkts=[_mk(bid=24, ask=28)]) == 1     # no-mid 74, climbed 4
+    assert b.place(mkts=[_mk(bid=24, ask=28, vol=160.0)]) == 1   # no-mid 74, +4
     bet = next(iter(b.bets.values()))
     assert bet["side"] == "no" and bet["entry"] == 100 - 28
 
@@ -62,8 +68,8 @@ def test_probe_stakes_and_event_cap(tmp_path, monkeypatch):
     m1 = _mk(tk="A-T86", strike=87)
     m2 = _mk(tk="A-T88", strike=89)                     # same city-day event
     b.place(mkts=[m1, m2])
-    up1 = dict(m1, yes_bid=69, yes_ask=73)
-    up2 = dict(m2, yes_bid=69, yes_ask=73)
+    up1 = dict(m1, yes_bid=69, yes_ask=73, vol=160.0)
+    up2 = dict(m2, yes_bid=69, yes_ask=73, vol=160.0)
     assert b.place(mkts=[up1, up2]) == 1                # 1 bet per event only
     bet = next(iter(b.bets.values()))
     assert bet["count"] == 1          # probe: one contract when entry > 60c
@@ -154,8 +160,8 @@ def test_65_80_band_still_requires_climb(tmp_path, monkeypatch):
     b = _bot(tmp_path, monkeypatch)
     # 72c mid, first sight -> below level bar, no climb memory -> no bet
     assert b.place(mkts=[_mk(bid=70, ask=74)]) == 0
-    # climbs 3c -> now the experiment fires, tagged as climb
-    assert b.place(mkts=[_mk(bid=73, ask=77)]) == 1
+    # climbs 3c on volume -> now the experiment fires, tagged as climb
+    assert b.place(mkts=[_mk(bid=73, ask=77, vol=160.0)]) == 1
     assert next(iter(b.bets.values()))["trig"] == "climb"
 
 
@@ -210,3 +216,70 @@ def test_stopped_rows_excluded_from_gate(tmp_path, monkeypatch):
                   "pside": 0.7}] * 40
     mode, n = b._gate()
     assert n == 0 and mode == "probe"
+
+
+
+# ---- momentum-trader upgrades (7/21: vol confirm, same-day, rank, pyramid, fade A/B) ----
+
+def test_climb_needs_rising_volume(tmp_path, monkeypatch):
+    b = _bot(tmp_path, monkeypatch)
+    b.place(mkts=[_mk()])
+    # 3c climb but volume flat -> stale quote, not momentum -> no bet
+    assert b.place(mkts=[_mk(bid=69, ask=73, vol=100.0)]) == 0
+    assert not b.bets
+
+
+def test_climb_needs_same_day_market(tmp_path, monkeypatch):
+    b = _bot(tmp_path, monkeypatch)
+    b.place(mkts=[_mk(date=TOMORROW)])
+    # tomorrow's market climbing on volume -> still no (info arrives settle-day)
+    assert b.place(mkts=[_mk(bid=69, ask=73, vol=160.0, date=TOMORROW)]) == 0
+    # but a LEVEL entry in tomorrow's market is fine (static edge, not momentum)
+    assert b.place(mkts=[_mk(tk="T-lvl", bid=82, ask=86, date=TOMORROW,
+                             city="boston")]) == 1
+    assert next(iter(b.bets.values()))["trig"] == "level"
+
+
+def test_candidates_ranked_by_strength(tmp_path, monkeypatch):
+    b = _bot(tmp_path, monkeypatch)
+    monkeypatch.setattr(dp, "DRIFT_MAX_PER_DAY", 1)
+    small = _mk(tk="T-small", city="boston")
+    big = _mk(tk="T-big", city="denver")
+    b.place(mkts=[small, big])
+    # both climb on volume, but 'big' climbs harder -> it gets the only slot
+    assert b.place(mkts=[dict(small, yes_bid=69, yes_ask=73, vol=160.0),
+                         dict(big, yes_bid=72, yes_ask=76, vol=160.0)]) == 1
+    assert "T-big" in b.bets and "T-small" not in b.bets
+
+
+def test_pyramid_only_post_gate(tmp_path, monkeypatch):
+    b = _bot(tmp_path, monkeypatch)
+    b.bets = {"TK1": {"side": "yes", "entry": 70, "count": 1, "fee": 1,
+                      "pside": 0.72, "city": "boston", "strike": 80,
+                      "kind": "ge", "cap": None, "hl": "hi", "date": TODAY,
+                      "ots": TODAY + "T10:00:00", "era": "drift1", "adds": 0}}
+    ran = _mk(tk="TK1", bid=83, ask=87)      # +13c past entry
+    b.place(mkts=[ran])                       # gate=probe -> NO pyramid
+    assert b.bets["TK1"]["count"] == 1 and b.bets["TK1"]["adds"] == 0
+    b.history = [{"era": "drift1", "outcome": 1, "pnl": 0.3, "pside": 0.8}] * 40
+    b.place(mkts=[ran])                       # gate=scale -> add one unit
+    bet = b.bets["TK1"]
+    assert bet["adds"] == 1 and bet["count"] == 2
+    assert 70 < bet["entry"] <= 83            # weighted-average entry
+    b.place(mkts=[ran]); b.place(mkts=[ran])
+    assert b.bets["TK1"]["adds"] <= dp.PYRAMID_MAX
+
+
+def test_fade_mode_exits_on_stall_plain_does_not(tmp_path, monkeypatch):
+    b = _bot(tmp_path, monkeypatch)
+    base = {"entry": 70, "count": 1, "fee": 1, "pside": 0.72, "city": "boston",
+            "strike": 80, "kind": "ge", "cap": None, "hl": "hi", "date": TODAY,
+            "ots": TODAY + "T10:00:00", "era": "drift1", "peak": 85.0}
+    b.bets = {"TF": dict(base, side="yes", exitmode="fade"),
+              "TP": dict(base, side="yes", exitmode="plain")}
+    # side mid 68: still favorite, but 17c off the 85 peak
+    q = {"TF": (66, 70), "TP": (66, 70)}
+    assert b.stop_check(quotes=q) == 1
+    assert "TF" not in b.bets and "TP" in b.bets      # only fade-mode exited
+    h = b.history[-1]
+    assert h["faded"] is True and h["stopped"] is False and h["outcome"] is None
