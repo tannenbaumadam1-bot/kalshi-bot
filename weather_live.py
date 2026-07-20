@@ -300,6 +300,9 @@ class WeatherLive:
             exit_fee_per = fee_cents(bid, 1, taker=True)
             hold_ev = (wgt * p_new + (1 - wgt) * mid_p) * 100
             salvage = (bid <= wp.SALVAGE_C and p_new <= mid_p + 0.05)
+            band_stop = (b.get("kind") == "band"
+                         and (bid + ask) / 2.0 <= b["entry"] - wp.WX_BAND_STOP_C)
+            salvage = salvage or band_stop
             if salvage or bid - exit_fee_per > hold_ev + margin_c:
                 b["exit_streak"] = int(b.get("exit_streak", 0)) + 1
                 if not salvage and b["exit_streak"] < wp.EXIT_CONFIRMS:
@@ -374,6 +377,8 @@ class WeatherLive:
             p = fair if s == "yes" else (1 - fair)
             if p < wp.MIN_PSIDE:
                 continue          # v8: sub-50% confidence measured -EV in 3 eras
+            if mk.get("kind", "ge") == "band" and p < wp.WX_BAND_MIN_PSIDE:
+                continue          # 7/22: coin-flip bands were the loss center
             b_odds = (100 - price) / price
             f_star = p - (1 - p) / b_odds
             if f_star <= 0:

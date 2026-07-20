@@ -371,3 +371,54 @@ def test_live_dry_merges_pyramid_fill(tmp_path, monkeypatch):
     b._merge_fill("TK1", o["entry"], o["count"], 0)
     bet = b.bets["TK1"]
     assert bet["adds"] == 1 and bet["count"] == 2 and 40 < bet["entry"] <= 55
+
+
+# ---- weather band discipline (Adam 7/22: bands rode to zero, model vetoed exits) ----
+
+def _bandbot():
+    w = wp.WeatherPaper.__new__(wp.WeatherPaper)
+    w.cash = 10000.0
+    w.realized = 0.0
+    w.fees = 0.0
+    w.cooldown = {}
+    w.history = []
+    w.bets = {"KXHIGHNY-26JUL22-B79.5": {
+        "side": "yes", "entry": 41, "count": 4, "fee": 3, "pside": 0.57,
+        "city": "new york", "strike": 79, "kind": "band", "cap": 80, "hl": "hi",
+        "date": TODAY, "ots": TODAY + "T10:00:00", "era": "v7-obs"}}
+    return w
+
+
+def test_band_hard_stop_ignores_model_belief(monkeypatch):
+    w = _bandbot()
+    # model STILL believes (52%) - exactly the failure mode from 7/22 - but the
+    # band fell 41 -> mid 25 (>12c below entry): sell anyway, no veto
+    monkeypatch.setattr(wp.WeatherPaper, "_reprice",
+                        lambda self, *a, **k: (0.52, 0.35))
+    w._quote = lambda tk: (23, 27)
+    w.exit_check()
+    assert len(w.bets) == 0
+    h = w.history[-1]
+    assert h["exited"] is True and h["outcome"] is None
+
+
+def test_band_holds_above_stop_line(monkeypatch):
+    w = _bandbot()
+    # mid 32 = only 9c below entry 41 -> no hard stop; model believes -> hold
+    monkeypatch.setattr(wp.WeatherPaper, "_reprice",
+                        lambda self, *a, **k: (0.55, 0.35))
+    w._quote = lambda tk: (30, 34)
+    w.exit_check()
+    w.exit_check()
+    assert len(w.bets) == 1
+
+
+def test_threshold_bets_keep_model_veto(monkeypatch):
+    w = _bandbot()
+    w.bets["KXHIGHNY-26JUL22-B79.5"]["kind"] = "ge"   # same drop, ge kind
+    monkeypatch.setattr(wp.WeatherPaper, "_reprice",
+                        lambda self, *a, **k: (0.52, 0.35))
+    w._quote = lambda tk: (23, 27)
+    w.exit_check()
+    w.exit_check()
+    assert len(w.bets) == 1      # model still believes -> ge bets may hold

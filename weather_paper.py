@@ -65,6 +65,13 @@ SALVAGE_C = int(os.environ.get("WX_SALVAGE_C", "30"))
 WX_PYRAMID = os.environ.get("WX_PYRAMID", "1") == "1"
 WX_PYRAMID_UP_C = int(os.environ.get("WX_PYRAMID_UP_C", "10"))
 WX_PYRAMID_MAX = int(os.environ.get("WX_PYRAMID_MAX", "2"))
+# 7/22 band discipline (Adam): all four big open losers were BAND bets whose
+# model kept believing to 0c - the model-guard fails on 2-degree windows
+# (calibration gap widened 3.4->7.7pts when bands launched). So bands get:
+#  (a) a HARD stop with NO model veto: side-mid <= entry - WX_BAND_STOP_C
+#  (b) a higher entry bar: model pside >= WX_BAND_MIN_PSIDE (vs 0.50 for ge/le)
+WX_BAND_STOP_C = int(os.environ.get("WX_BAND_STOP_C", "12"))
+WX_BAND_MIN_PSIDE = float(os.environ.get("WX_BAND_MIN_PSIDE", "0.60"))
 # v7: LOW-temp markets were 40/44 of v6 bets and carried all the losses
 # (act 20% vs pred 36.5%). Cap them to half the book allowance until the
 # shadow report proves lo-calibration.
@@ -302,6 +309,8 @@ class WeatherPaper:
             p = fair if s == "yes" else (1 - fair)
             if p < MIN_PSIDE:
                 continue          # v8: sub-50% confidence measured -EV in 3 eras
+            if mk.get("kind", "ge") == "band" and p < WX_BAND_MIN_PSIDE:
+                continue          # 7/22: coin-flip bands were the loss center
             b_odds = (100 - price) / price
             f_star = p - (1 - p) / b_odds
             if f_star <= 0:
@@ -484,6 +493,12 @@ class WeatherPaper:
             # SALVAGE: deep underwater + model agrees -> sell NOW (cheap
             # contracts are overpriced; waiting for confirms rode 30c -> 3c)
             salvage = (bid <= SALVAGE_C and p_new <= mid_p + 0.05)
+            # 7/22 BAND HARD STOP: on 2-degree bands the model gets NO veto -
+            # it held four band losers to ~0c while "still believing"
+            side_mid = (bid + ask) / 2.0
+            band_stop = (b.get("kind") == "band"
+                         and side_mid <= b["entry"] - WX_BAND_STOP_C)
+            salvage = salvage or band_stop
             if salvage or exit_ev > hold_ev + margin_c:
                 b["exit_streak"] = int(b.get("exit_streak", 0)) + 1
                 if not salvage and b["exit_streak"] < EXIT_CONFIRMS:
