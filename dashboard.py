@@ -702,7 +702,7 @@ async function load(){
       tile('Unrealized (marked)',(dsm.unrealized!=null)?'<span class="'+C(dsm.unrealized)+'">'+M(dsm.unrealized)+'</span>':NA,
         (dsm.marked_nav!=null)?('marked NAV '+F(dsm.marked_nav)):''),
       tile('Gate',(dsm.gate||'probe')+' '+(dsm.gate_n||0)+'/30','pside = market prob \u2192 gate measures the drift premium'),
-      tile('Trigger','\u226565\u00a2 & climbing','maker join \u00b7 1/event \u00b7 no exits'),
+      tile('Trigger','\u226565\u00a2 & climbing','maker join \u00b7 1/event \u00b7 stop <50\u00a2'),
     ].join('');
     const dr=[];
     (D.open||[]).forEach(b=>dr.push('<tr>'+mkt(b)+side(b.side)
@@ -717,7 +717,7 @@ async function load(){
       dr.push('<tr>'+mkt(b)+side(b.side)
       +'<td class=num>'+Math.round((b.pside||0)*100)+'%</td><td class=num>&ndash;</td>'
       +'<td class=num>'+b.entry+'&cent;</td><td class=num>&ndash;</td><td class=num>'+b.count+'</td>'
-      +'<td><span class="'+(won?'won':'lost')+'">'+(won?'WON':'LOST')+'</span></td>'
+      +'<td>'+(b.stopped?'<span class=chip style="background:rgba(232,180,76,.13);color:var(--amb)">STOP</span>':('<span class="'+(won?'won':'lost')+'">'+(won?'WON':'LOST')+'</span>'))+'</td>'
       +'<td class=num><span class="'+C(b.pnl)+'">'+M(b.pnl)+'</span></td></tr>');});
     $('drifttbl').innerHTML=dr.join('')||'<tr><td colspan=9 class=empty>Waiting for a climbing favorite \u2014 needs two scans of the same market to see momentum.</td></tr>';
   } else { $('drift').innerHTML='<div class=tile><div class=k>Momentum drift</div><div class=v>&ndash;</div><div class=s>starting&hellip;</div></div>';

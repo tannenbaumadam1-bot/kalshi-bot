@@ -138,3 +138,50 @@ def test_salvage_threshold_respected(monkeypatch):
     w._quote = lambda tk: (25, 29)
     w.exit_check()
     assert len(w.bets) == 1
+
+
+# ---- momentum stop (Adam 7/21: thesis dead below 50c -> cut the loss) ----
+
+def _stop_bot(tmp_path, monkeypatch):
+    b = _bot(tmp_path, monkeypatch)
+    b.bets = {"TK1": {"side": "yes", "entry": 70, "count": 1, "fee": 1,
+                      "pside": 0.72, "city": "boston", "strike": 80,
+                      "kind": "ge", "cap": None, "hl": "hi",
+                      "date": "2026-07-21", "ots": "2026-07-21T10:00:00",
+                      "era": "drift1"}}
+    return b
+
+
+def test_stop_cuts_loss_below_50(tmp_path, monkeypatch):
+    b = _stop_bot(tmp_path, monkeypatch)
+    cash0 = b.cash
+    assert b.stop_check(quotes={"TK1": (44, 48)}) == 1   # mid 46 < 50
+    assert not b.bets
+    h = b.history[-1]
+    assert h["stopped"] is True and h["outcome"] is None
+    assert h["exit_px"] == 44
+    # loss capped ~ entry-bid+fees, NOT the full 70c ride to zero
+    assert -0.30 < h["pnl"] < -0.20
+    assert b.cash > cash0                                # salvage cash recovered
+
+
+def test_stop_holds_while_still_favorite(tmp_path, monkeypatch):
+    b = _stop_bot(tmp_path, monkeypatch)
+    assert b.stop_check(quotes={"TK1": (53, 57)}) == 0   # mid 55 >= 50 -> hold
+    assert len(b.bets) == 1
+
+
+def test_stop_works_for_no_side(tmp_path, monkeypatch):
+    b = _stop_bot(tmp_path, monkeypatch)
+    b.bets["TK1"].update({"side": "no", "entry": 70})
+    # yes mid 62 -> our NO side mid 38 < 50 -> stop, sell NO at 100-ask
+    assert b.stop_check(quotes={"TK1": (60, 64)}) == 1
+    assert b.history[-1]["exit_px"] == 100 - 64
+
+
+def test_stopped_rows_excluded_from_gate(tmp_path, monkeypatch):
+    b = _bot(tmp_path, monkeypatch)
+    b.history = [{"outcome": None, "stopped": True, "pnl": -0.25,
+                  "pside": 0.7}] * 40
+    mode, n = b._gate()
+    assert n == 0 and mode == "probe"

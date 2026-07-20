@@ -24,6 +24,8 @@ Bets  -> logs/drift_bets.csv
 from __future__ import annotations
 import os, csv, json, datetime
 
+import requests
+
 import weather_edge as we
 from weather_paper import fetch_result
 from kalshibot.fees import fee_cents
@@ -36,6 +38,11 @@ DRIFT_MIN_C = int(os.environ.get("DRIFT_MIN_C", "65"))       # side price floor
 DRIFT_UP_C = float(os.environ.get("DRIFT_UP_C", "2"))        # min climb since last scan
 DRIFT_MAX_ENTRY = int(os.environ.get("DRIFT_MAX_ENTRY", "90"))  # no near-certainties
 DRIFT_MAX_PER_DAY = int(os.environ.get("DRIFT_MAX_PER_DAY", "20"))
+# Momentum stop (Adam 7/21): this book's ONLY thesis is "trust the market's
+# direction". If our side falls back below 50c it is no longer the favorite -
+# the thesis is dead by its own logic, so cut the loss at the bid instead of
+# riding to zero. (Model books get a model-guard; drift has no model.)
+DRIFT_STOP_C = int(os.environ.get("DRIFT_STOP_C", "50"))
 PROBE_COST_CENTS = int(os.environ.get("DRIFT_PROBE_COST", "60"))
 GATE_MIN_N = 30
 GATE_MAX_GAP = 0.05
@@ -160,6 +167,67 @@ class DriftPaper:
                        1 if won else 0, round(net / 100.0, 2)])
             del self.bets[tk]
 
+    def _quotes(self, tickers):
+        """Batch (yes_bid, yes_ask) for open tickers - one API call."""
+        out = {}
+        try:
+            d = requests.get(we.KALSHI + "/markets",
+                             params={"tickers": ",".join(tickers[:40]),
+                                     "limit": 100}, timeout=15).json()
+            for m in d.get("markets") or []:
+                yb = int(round(float(m.get("yes_bid_dollars") or 0) * 100))
+                ya = int(round(float(m.get("yes_ask_dollars") or 0) * 100))
+                out[m.get("ticker")] = (yb, ya)
+        except Exception:
+            pass
+        return out
+
+    def stop_check(self, quotes=None):
+        """Momentum stop: our side's mid fell below DRIFT_STOP_C -> we are no
+        longer holding the favorite -> sell at the bid (taker), log as a
+        stopped exit (outcome None: excluded from the calibration gate)."""
+        if not self.bets:
+            return 0
+        if quotes is None:
+            quotes = self._quotes(list(self.bets))
+        stopped = 0
+        for tk, b in list(self.bets.items()):
+            q = quotes.get(tk)
+            if not q:
+                continue
+            yb, ya = q
+            if not yb or not ya:
+                continue
+            mid = (yb + ya) / 2.0
+            smid = mid if b["side"] == "yes" else 100 - mid
+            if smid >= DRIFT_STOP_C:
+                continue
+            bid = yb if b["side"] == "yes" else 100 - ya
+            if bid <= 0:
+                continue                      # nothing to sell into; settle decides
+            cnt = b["count"]
+            exit_fee = fee_cents(bid, cnt, taker=True)
+            net = (bid - b["entry"]) * cnt - b.get("fee", 0) - exit_fee
+            self.cash += bid * cnt - exit_fee
+            self.fees += exit_fee
+            self.history.append({"city": b["city"], "strike": b["strike"],
+                                 "kind": b.get("kind", "ge"), "cap": b.get("cap"),
+                                 "hl": b["hl"], "side": b["side"],
+                                 "pside": round(b["pside"], 3),
+                                 "entry": b["entry"], "count": cnt,
+                                 "fee": b.get("fee", 0),
+                                 "outcome": None, "exited": True, "stopped": True,
+                                 "exit_px": bid,
+                                 "pnl": round(net / 100.0, 2), "ts": now(),
+                                 "ots": b.get("ots", ""), "era": ERA})
+            self.history = self.history[-120:]
+            self._log([now(), "STOP", tk, b["city"], b["strike"], b["hl"],
+                       b["side"], round(b["pside"], 3), bid, cnt, "",
+                       round(net / 100.0, 2)])
+            del self.bets[tk]
+            stopped += 1
+        return stopped
+
     def place(self, mkts=None):
         """Momentum entries: side price >= DRIFT_MIN_C and climbing."""
         if mkts is None:
@@ -234,6 +302,7 @@ class DriftPaper:
 
     def step(self):
         self.settle()
+        self.stop_check()
         n = self.place()
         self.save()
         return n
