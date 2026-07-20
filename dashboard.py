@@ -296,6 +296,32 @@ def build_data():
             out["drift"] = json.load(open(drift_path))
         except Exception:
             pass
+    if out.get("drift"):
+        # live marks on drift positions (same background price cache)
+        dop = out["drift"].get("open") or []
+        _WANT["tickers"] = (_WANT.get("tickers") or []) +             [b.get("ticker") for b in dop if b.get("ticker")]
+        dprices = dict(_PRICES["by_ticker"])
+        du, dpriced, dval = 0.0, 0, 0.0
+        for b in dop:
+            px = dprices.get(b.get("ticker") or "")
+            if not px or not (px["yes_bid"] or px["yes_ask"]):
+                b["now"] = None
+                b["upnl"] = None
+                dval += b.get("entry", 0) * b.get("count", 0) / 100.0
+                continue
+            mark = px["yes_bid"] if b.get("side") == "yes" else (100 - px["yes_ask"])
+            mark = max(0, min(100, mark))
+            b["now"] = mark
+            b["value"] = round(mark * b.get("count", 0) / 100.0, 2)
+            b["upnl"] = round((mark - b.get("entry", 0)) * b.get("count", 0) / 100.0, 2)
+            du += b["upnl"]
+            dval += b["value"]
+            dpriced += 1
+        dsum = out["drift"].get("summary")
+        if isinstance(dsum, dict):
+            if dpriced:
+                dsum["unrealized"] = round(du, 2)
+            dsum["marked_nav"] = round(float(dsum.get("cash") or 0) + dval, 2)
     sev_path = os.path.join("logs", "sharpev_state.json")
     if os.path.exists(sev_path):
         try:
@@ -417,7 +443,7 @@ td.num,th.num{text-align:right}
 <h2>Momentum drift <span style="text-transform:none;letter-spacing:0">(paper &mdash; buy the climbing favorite at maker, no model, ride to settlement)</span></h2>
 <div class=grid id=drift></div>
 <div style="margin-top:10px"><table><thead><tr><th>Market</th><th>Side</th><th class=num>Mkt prob</th>
-<th class=num>From&rarr;At</th><th class=num>Entry</th><th class=num>Qty</th><th>Result</th><th class=num>P&amp;L</th></tr></thead>
+<th class=num>From&rarr;At</th><th class=num>Entry</th><th class=num>Now</th><th class=num>Qty</th><th>Result</th><th class=num>P&amp;L</th></tr></thead>
 <tbody id=drifttbl></tbody></table></div>
 <h2>Sharp +EV sports <span style="text-transform:none;letter-spacing:0">(paper &mdash; sharp-book fair value vs Kalshi price, maker-only, gated)</span></h2>
 <div class=grid id=sev></div>
@@ -532,7 +558,7 @@ async function load(){
     const P=d.poly||null, E=d.sharpev||null, DR=d.drift||null;
     const drSum=DR?(DR.summary||{}):{};
     const drOpenStake=DR?(DR.open||[]).reduce((a,b)=>a+(b.entry||0)*(b.count||0)/100,0):0;
-    const drBank=DR?(Number(drSum.cash||0)+drOpenStake):null, drStart=DR?Number(drSum.start||0):0;
+    const drBank=DR?(drSum.marked_nav!=null?Number(drSum.marked_nav):(Number(drSum.cash||0)+drOpenStake)):null, drStart=DR?Number(drSum.start||0):0;
     const eSum=E?(E.summary||{}):{};
     const eOpenStake=E?(E.open||[]).reduce((a,b)=>a+(b.entry||0)*(b.count||0)/100,0):0;
     const eBank=E?(Number(eSum.cash||0)+eOpenStake):null, eStart=E?Number(eSum.start||0):0;
@@ -673,6 +699,8 @@ async function load(){
       tile('Bank (paper)',F(dsm.cash||0),'started '+F(dsm.start||0)),
       tile('Record',(dsm.wins||0)+'W / '+(dsm.losses||0)+'L',(dsm.open||0)+' open'),
       tile('Realized P&L',(dsm.realized!=null)?'<span class="'+C(dsm.realized)+'">'+M(dsm.realized)+'</span>':NA,''),
+      tile('Unrealized (marked)',(dsm.unrealized!=null)?'<span class="'+C(dsm.unrealized)+'">'+M(dsm.unrealized)+'</span>':NA,
+        (dsm.marked_nav!=null)?('marked NAV '+F(dsm.marked_nav)):''),
       tile('Gate',(dsm.gate||'probe')+' '+(dsm.gate_n||0)+'/30','pside = market prob \u2192 gate measures the drift premium'),
       tile('Trigger','\u226565\u00a2 & climbing','maker join \u00b7 1/event \u00b7 no exits'),
     ].join('');
@@ -680,17 +708,20 @@ async function load(){
     (D.open||[]).forEach(b=>dr.push('<tr>'+mkt(b)+side(b.side)
       +'<td class=num>'+Math.round((b.pside||0)*100)+'%</td>'
       +'<td class=num>'+(b.from_mid!=null?Math.round(b.from_mid):'\u2013')+'\u2192'+(b.at_mid!=null?Math.round(b.at_mid):'\u2013')+'\u00a2</td>'
-      +'<td class=num>'+b.entry+'&cent;</td><td class=num>'+b.count+'</td>'
-      +'<td><span class=chip style="background:rgba(91,141,239,.13);color:var(--acc)">OPEN</span></td><td class=num>&ndash;</td></tr>'));
+      +'<td class=num>'+b.entry+'&cent;</td>'
+      +'<td class=num>'+(b.now!=null?b.now+'&cent;':'&ndash;')+'</td>'
+      +'<td class=num>'+b.count+'</td>'
+      +'<td><span class=chip style="background:rgba(91,141,239,.13);color:var(--acc)">OPEN</span></td>'
+      +'<td class=num>'+(b.upnl!=null?('<span class="'+C(b.upnl)+'">'+M(b.upnl)+'</span>'):'&ndash;')+'</td></tr>'));
     (D.settled||[]).slice(0,10).forEach(b=>{const won=Number(b.outcome)===1;
       dr.push('<tr>'+mkt(b)+side(b.side)
       +'<td class=num>'+Math.round((b.pside||0)*100)+'%</td><td class=num>&ndash;</td>'
-      +'<td class=num>'+b.entry+'&cent;</td><td class=num>'+b.count+'</td>'
+      +'<td class=num>'+b.entry+'&cent;</td><td class=num>&ndash;</td><td class=num>'+b.count+'</td>'
       +'<td><span class="'+(won?'won':'lost')+'">'+(won?'WON':'LOST')+'</span></td>'
       +'<td class=num><span class="'+C(b.pnl)+'">'+M(b.pnl)+'</span></td></tr>');});
-    $('drifttbl').innerHTML=dr.join('')||'<tr><td colspan=8 class=empty>Waiting for a climbing favorite \u2014 needs two scans of the same market to see momentum.</td></tr>';
+    $('drifttbl').innerHTML=dr.join('')||'<tr><td colspan=9 class=empty>Waiting for a climbing favorite \u2014 needs two scans of the same market to see momentum.</td></tr>';
   } else { $('drift').innerHTML='<div class=tile><div class=k>Momentum drift</div><div class=v>&ndash;</div><div class=s>starting&hellip;</div></div>';
-    $('drifttbl').innerHTML='<tr><td colspan=8 class=empty>No state yet.</td></tr>'; }
+    $('drifttbl').innerHTML='<tr><td colspan=9 class=empty>No state yet.</td></tr>'; }
   if(d.sharpev){const S=d.sharpev,ss=S.summary||{};
     $('sev').innerHTML=[
       tile('Bank (paper)',F(ss.cash),'started '+F(ss.start)),
