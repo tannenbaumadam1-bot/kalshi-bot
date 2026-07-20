@@ -707,7 +707,7 @@ async function load(){
       tile('Unrealized (marked)',(dsm.unrealized!=null)?'<span class="'+C(dsm.unrealized)+'">'+M(dsm.unrealized)+'</span>':NA,
         (dsm.marked_nav!=null)?('marked NAV '+F(dsm.marked_nav)):''),
       tile('Gate',(dsm.gate||'probe')+' '+(dsm.gate_n||0)+'/30','pside = market prob \u2192 gate measures the drift premium'),
-      tile('Trigger','\u226580\u00a2 level \u00b7 65\u201380\u00a2 climb','maker join \u00b7 1/event \u00b7 stop <50\u00a2'),
+      tile('Trigger','\u226580\u00a2 level \u00b7 65\u201380\u00a2 climb','vol-confirmed \u00b7 same-day climbs \u00b7 ranked \u00b7 stop <50\u00a2 \u00b7 fade A/B'),
     ].join('');
     const dr=[];
     (D.open||[]).forEach(b=>dr.push('<tr>'+mkt(b)+side(b.side)
@@ -715,7 +715,7 @@ async function load(){
       +'<td class=num>'+(b.trig==='level'?'<span class=mut>level</span>':((b.from_mid!=null?Math.round(b.from_mid):'\u2013')+'\u2192'+(b.at_mid!=null?Math.round(b.at_mid):'\u2013')+'\u00a2'))+'</td>'
       +'<td class=num>'+b.entry+'&cent;</td>'
       +'<td class=num>'+(b.now!=null?b.now+'&cent;':'&ndash;')+'</td>'
-      +'<td class=num>'+b.count+'</td>'
+      +'<td class=num>'+b.count+(b.adds?' <span class=mut>(+'+b.adds+')</span>':'')+'</td>'
       +'<td class=num>'+feeC(b.fee)+'</td>'
       +'<td class=num>'+(b.value!=null?F(b.value):'&ndash;')+'</td>'
       +'<td class=num>'+(b.upnl!=null?('<span class="'+C(b.upnl)+'">'+M(b.upnl)+'</span>'):'&ndash;')+'</td></tr>'));
@@ -728,7 +728,7 @@ async function load(){
       +'<td class=num>'+(b.exit_px!=null?b.exit_px+'&cent;':(won?'100&cent;':'0&cent;'))+'</td>'
       +'<td class=num>'+b.count+'</td>'
       +'<td class=num>'+feeC(b.fee)+'</td>'
-      +'<td>'+(b.stopped?'<span class=chip style="background:rgba(232,180,76,.13);color:var(--amb)">STOP</span>':('<span class="'+(won?'won':'lost')+'">'+(won?'WON':'LOST')+'</span>'))+'</td>'
+      +'<td>'+(b.stopped?'<span class=chip style="background:rgba(232,180,76,.13);color:var(--amb)">STOP</span>':(b.faded?'<span class=chip style="background:rgba(180,120,230,.15);color:#b478e6">FADE</span>':('<span class="'+(won?'won':'lost')+'">'+(won?'WON':'LOST')+'</span>')))+'</td>'
       +'<td class=num><span class="'+C(b.pnl)+'">'+M(b.pnl)+'</span></td></tr>');});
     $('driftreal').innerHTML=rl.join('')||'<tr><td colspan=10 class=empty>No realized trades yet \u2014 weather markets settle the next morning; stops fire intraday if a favorite falls below 50&cent;.</td></tr>';
   } else { $('drift').innerHTML='<div class=tile><div class=k>Momentum drift</div><div class=v>&ndash;</div><div class=s>starting&hellip;</div></div>';
