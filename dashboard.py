@@ -707,7 +707,7 @@ async function load(){
       tile('Unrealized (marked)',(dsm.unrealized!=null)?'<span class="'+C(dsm.unrealized)+'">'+M(dsm.unrealized)+'</span>':NA,
         (dsm.marked_nav!=null)?('marked NAV '+F(dsm.marked_nav)):''),
       tile('Gate',(dsm.gate||'probe')+' '+(dsm.gate_n||0)+'/30','pside = market prob \u2192 gate measures the drift premium'),
-      tile('Trigger','\u226580\u00a2 level \u00b7 65\u201380\u00a2 climb','vol-confirmed \u00b7 same-day climbs \u00b7 ranked \u00b7 stop <50\u00a2 \u00b7 fade A/B'),
+      tile('Trigger','\u226580\u00a2 level \u00b7 65\u201380\u00a2 climb','vol-confirmed \u00b7 same-day climbs \u00b7 ranked \u00b7 stop <50\u00a2 \u00b7 trail 15\u00a2 off peak'),
     ].join('');
     const dr=[];
     (D.open||[]).forEach(b=>dr.push('<tr>'+mkt(b)+side(b.side)

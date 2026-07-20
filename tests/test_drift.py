@@ -279,19 +279,22 @@ def test_pyramid_knob_can_relock_behind_gate(tmp_path, monkeypatch):
     assert b.bets["TK1"]["adds"] == 0         # probe + knob off -> no adds
 
 
-def test_fade_mode_exits_on_stall_plain_does_not(tmp_path, monkeypatch):
+def test_trailing_exit_applies_to_every_bet(tmp_path, monkeypatch):
+    # Adam 7/22: trailing exit on ALL trades (no more A/B split)
     b = _bot(tmp_path, monkeypatch)
     base = {"entry": 70, "count": 1, "fee": 1, "pside": 0.72, "city": "boston",
             "strike": 80, "kind": "ge", "cap": None, "hl": "hi", "date": TODAY,
-            "ots": TODAY + "T10:00:00", "era": "drift1", "peak": 85.0}
-    b.bets = {"TF": dict(base, side="yes", exitmode="fade"),
-              "TP": dict(base, side="yes", exitmode="plain")}
-    # side mid 68: still favorite, but 17c off the 85 peak
-    q = {"TF": (66, 70), "TP": (66, 70)}
+            "ots": TODAY + "T10:00:00", "era": "drift1"}
+    b.bets = {"T1": dict(base, side="yes", peak=85.0),
+              "T2": dict(base, side="yes", peak=75.0)}
+    # side mid 68: T1 is 17c off its 85 peak -> trail-exit; T2 only 7c off -> hold
+    q = {"T1": (66, 70), "T2": (66, 70)}
     assert b.stop_check(quotes=q) == 1
-    assert "TF" not in b.bets and "TP" in b.bets      # only fade-mode exited
+    assert "T1" not in b.bets and "T2" in b.bets
     h = b.history[-1]
     assert h["faded"] is True and h["stopped"] is False and h["outcome"] is None
+    # exited near the peak run-up: this one actually LOCKED a small gain
+    assert h["pnl"] < 0.05                      # entry 70, exit 66, fees
 
 
 # ---- weather-book pyramiding (Adam 7/21: accentuate winners) ----

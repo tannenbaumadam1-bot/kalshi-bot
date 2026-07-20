@@ -56,7 +56,11 @@ PYRAMID_MAX = int(os.environ.get("DRIFT_PYRAMID_MAX", "2"))     # max adds per p
 # Adam 7/21: pyramid during PROBE too (it's all paper) - the gate still
 # controls base sizing; set DRIFT_PYRAMID_PROBE=0 to re-lock behind the gate
 PYRAMID_PROBE = os.environ.get("DRIFT_PYRAMID_PROBE", "1") == "1"
-FADE_DROP_C = int(os.environ.get("DRIFT_FADE_DROP_C", "15"))    # A/B: exit peak-15c even >50
+# Trailing momentum exit (Adam 7/22: EVERY trade, no more A/B): sell when the
+# price falls FADE_DROP_C off its peak even while still the favorite - exit
+# when momentum stalls, not only when it dies. Winners that never stall still
+# ride to settlement.
+FADE_DROP_C = int(os.environ.get("DRIFT_FADE_DROP_C", "15"))
 PROBE_COST_CENTS = int(os.environ.get("DRIFT_PROBE_COST", "60"))
 GATE_MIN_N = 30
 GATE_MAX_GAP = 0.05
@@ -217,10 +221,9 @@ class DriftPaper:
             smid = mid if b["side"] == "yes" else 100 - mid
             peak = max(float(b.get("peak", smid)), smid)
             b["peak"] = peak
-            # A/B experiment: 'fade'-mode bets also exit when momentum stalls
-            # (>= FADE_DROP_C off the peak) even while still the favorite
-            fade = (b.get("exitmode") == "fade" and smid >= DRIFT_STOP_C
-                    and peak - smid >= FADE_DROP_C)
+            # trailing exit (ALL bets, Adam 7/22): momentum stalled >=
+            # FADE_DROP_C off the peak -> take the exit even while favorite
+            fade = (smid >= DRIFT_STOP_C and peak - smid >= FADE_DROP_C)
             if smid >= DRIFT_STOP_C and not fade:
                 continue
             bid = yb if b["side"] == "yes" else 100 - ya
@@ -341,8 +344,6 @@ class DriftPaper:
                              "hl": ("lo" if mk["is_low"] else "hi"),
                              "date": mk.get("date", ""), "ots": now(),
                              "era": ERA, "trig": trig,
-                             "exitmode": ("fade" if self.placed % 2 == 0
-                                          else "plain"),
                              "peak": smid, "adds": 0,
                              "from_mid": prev, "at_mid": mid}
             ev_keys.add(ekey)
