@@ -43,6 +43,11 @@ DRIFT_MAX_PER_DAY = int(os.environ.get("DRIFT_MAX_PER_DAY", "20"))
 # the thesis is dead by its own logic, so cut the loss at the bid instead of
 # riding to zero. (Model books get a model-guard; drift has no model.)
 DRIFT_STOP_C = int(os.environ.get("DRIFT_STOP_C", "50"))
+# Market-price calibration (7/21, n=451): 80c+ favorites went 18/18 vs 86-94
+# implied, while 65-80c favorites underperformed (act 50 vs 73, n=8). So at
+# >= DRIFT_LEVEL_C the LEVEL alone qualifies (no climb needed - certainty is
+# underpriced); 65-80c entries remain the climb-gated experiment.
+DRIFT_LEVEL_C = int(os.environ.get("DRIFT_LEVEL_C", "80"))
 PROBE_COST_CENTS = int(os.environ.get("DRIFT_PROBE_COST", "60"))
 GATE_MIN_N = 30
 GATE_MAX_GAP = 0.05
@@ -264,7 +269,12 @@ class DriftPaper:
                 climbing = prev is not None and (prev - mid) >= DRIFT_UP_C
             else:
                 continue
-            if not climbing:
+            # >=80c: level alone is the proven signal; 65-80c: climb required
+            if smid >= DRIFT_LEVEL_C:
+                trig = "level"
+            elif climbing:
+                trig = "climb"
+            else:
                 continue
             if entry < 50 or entry > DRIFT_MAX_ENTRY:
                 continue                    # favorite at a real price only
@@ -290,7 +300,8 @@ class DriftPaper:
                              "cap": mk.get("cap"),
                              "hl": ("lo" if mk["is_low"] else "hi"),
                              "date": mk.get("date", ""), "ots": now(),
-                             "era": ERA, "from_mid": prev, "at_mid": mid}
+                             "era": ERA, "trig": trig,
+                             "from_mid": prev, "at_mid": mid}
             ev_keys.add(ekey)
             self.placed += 1
             placed += 1

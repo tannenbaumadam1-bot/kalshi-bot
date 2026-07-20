@@ -443,7 +443,7 @@ td.num,th.num{text-align:right}
 <h2>Momentum drift <span style="text-transform:none;letter-spacing:0">(paper &mdash; buy the climbing favorite at maker, no model, ride to settlement)</span></h2>
 <div class=grid id=drift></div>
 <div style="margin-top:10px"><table><thead><tr><th>Market</th><th>Side</th><th class=num>Mkt prob</th>
-<th class=num>From&rarr;At</th><th class=num>Entry</th><th class=num>Now</th><th class=num>Qty</th><th>Result</th><th class=num>P&amp;L</th></tr></thead>
+<th class=num>From&rarr;At</th><th class=num>Entry</th><th class=num>Now</th><th class=num>Qty</th><th class=num>Fee</th><th>Result</th><th class=num>P&amp;L</th></tr></thead>
 <tbody id=drifttbl></tbody></table></div>
 <h2>Sharp +EV sports <span style="text-transform:none;letter-spacing:0">(paper &mdash; sharp-book fair value vs Kalshi price, maker-only, gated)</span></h2>
 <div class=grid id=sev></div>
@@ -702,26 +702,28 @@ async function load(){
       tile('Unrealized (marked)',(dsm.unrealized!=null)?'<span class="'+C(dsm.unrealized)+'">'+M(dsm.unrealized)+'</span>':NA,
         (dsm.marked_nav!=null)?('marked NAV '+F(dsm.marked_nav)):''),
       tile('Gate',(dsm.gate||'probe')+' '+(dsm.gate_n||0)+'/30','pside = market prob \u2192 gate measures the drift premium'),
-      tile('Trigger','\u226565\u00a2 & climbing','maker join \u00b7 1/event \u00b7 stop <50\u00a2'),
+      tile('Trigger','\u226580\u00a2 level \u00b7 65\u201380\u00a2 climb','maker join \u00b7 1/event \u00b7 stop <50\u00a2'),
     ].join('');
     const dr=[];
     (D.open||[]).forEach(b=>dr.push('<tr>'+mkt(b)+side(b.side)
       +'<td class=num>'+Math.round((b.pside||0)*100)+'%</td>'
-      +'<td class=num>'+(b.from_mid!=null?Math.round(b.from_mid):'\u2013')+'\u2192'+(b.at_mid!=null?Math.round(b.at_mid):'\u2013')+'\u00a2</td>'
+      +'<td class=num>'+(b.trig==='level'?'<span class=mut>level</span>':((b.from_mid!=null?Math.round(b.from_mid):'\u2013')+'\u2192'+(b.at_mid!=null?Math.round(b.at_mid):'\u2013')+'\u00a2'))+'</td>'
       +'<td class=num>'+b.entry+'&cent;</td>'
       +'<td class=num>'+(b.now!=null?b.now+'&cent;':'&ndash;')+'</td>'
       +'<td class=num>'+b.count+'</td>'
+      +'<td class=num>'+feeC(b.fee)+'</td>'
       +'<td><span class=chip style="background:rgba(91,141,239,.13);color:var(--acc)">OPEN</span></td>'
       +'<td class=num>'+(b.upnl!=null?('<span class="'+C(b.upnl)+'">'+M(b.upnl)+'</span>'):'&ndash;')+'</td></tr>'));
     (D.settled||[]).slice(0,10).forEach(b=>{const won=Number(b.outcome)===1;
       dr.push('<tr>'+mkt(b)+side(b.side)
       +'<td class=num>'+Math.round((b.pside||0)*100)+'%</td><td class=num>&ndash;</td>'
       +'<td class=num>'+b.entry+'&cent;</td><td class=num>&ndash;</td><td class=num>'+b.count+'</td>'
+      +'<td class=num>'+feeC(b.fee)+'</td>'
       +'<td>'+(b.stopped?'<span class=chip style="background:rgba(232,180,76,.13);color:var(--amb)">STOP</span>':('<span class="'+(won?'won':'lost')+'">'+(won?'WON':'LOST')+'</span>'))+'</td>'
       +'<td class=num><span class="'+C(b.pnl)+'">'+M(b.pnl)+'</span></td></tr>');});
-    $('drifttbl').innerHTML=dr.join('')||'<tr><td colspan=9 class=empty>Waiting for a climbing favorite \u2014 needs two scans of the same market to see momentum.</td></tr>';
+    $('drifttbl').innerHTML=dr.join('')||'<tr><td colspan=10 class=empty>Waiting for a qualifying favorite \u2014 needs two scans of the same market to see momentum.</td></tr>';
   } else { $('drift').innerHTML='<div class=tile><div class=k>Momentum drift</div><div class=v>&ndash;</div><div class=s>starting&hellip;</div></div>';
-    $('drifttbl').innerHTML='<tr><td colspan=9 class=empty>No state yet.</td></tr>'; }
+    $('drifttbl').innerHTML='<tr><td colspan=10 class=empty>No state yet.</td></tr>'; }
   if(d.sharpev){const S=d.sharpev,ss=S.summary||{};
     $('sev').innerHTML=[
       tile('Bank (paper)',F(ss.cash),'started '+F(ss.start)),

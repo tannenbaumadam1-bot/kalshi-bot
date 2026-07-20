@@ -131,13 +131,38 @@ def test_no_salvage_when_model_still_believes(monkeypatch):
 
 def test_salvage_threshold_respected(monkeypatch):
     w = _wbot()
-    # 25c bid > SALVAGE_C 20 and model agrees it's weak -> normal path only
+    # 35c bid > SALVAGE_C 30 and model agrees it's weak -> normal path only
     # (needs 2 confirms), so after ONE check the position is still open
     monkeypatch.setattr(wp.WeatherPaper, "_reprice",
                         lambda self, *a, **k: (0.10, 0.35))
-    w._quote = lambda tk: (25, 29)
+    w._quote = lambda tk: (35, 39)
     w.exit_check()
     assert len(w.bets) == 1
+
+
+# ---- 80c level entries (7/21: certainty is underpriced, 18/18 evidence) ----
+
+def test_level_entry_needs_no_climb(tmp_path, monkeypatch):
+    b = _bot(tmp_path, monkeypatch)
+    # first sight at 84c mid: no momentum memory, but level >= 80 -> bet
+    assert b.place(mkts=[_mk(bid=82, ask=86)]) == 1
+    bet = next(iter(b.bets.values()))
+    assert bet["trig"] == "level" and bet["side"] == "yes" and bet["entry"] == 82
+
+
+def test_65_80_band_still_requires_climb(tmp_path, monkeypatch):
+    b = _bot(tmp_path, monkeypatch)
+    # 72c mid, first sight -> below level bar, no climb memory -> no bet
+    assert b.place(mkts=[_mk(bid=70, ask=74)]) == 0
+    # climbs 3c -> now the experiment fires, tagged as climb
+    assert b.place(mkts=[_mk(bid=73, ask=77)]) == 1
+    assert next(iter(b.bets.values()))["trig"] == "climb"
+
+
+def test_level_entry_respects_max_entry(tmp_path, monkeypatch):
+    b = _bot(tmp_path, monkeypatch)
+    # 94c mid -> entry 92 > DRIFT_MAX_ENTRY 90 -> skip (nothing left to win)
+    assert b.place(mkts=[_mk(bid=92, ask=96)]) == 0
 
 
 # ---- momentum stop (Adam 7/21: thesis dead below 50c -> cut the loss) ----

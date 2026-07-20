@@ -54,7 +54,9 @@ MIN_PSIDE = float(os.environ.get("WX_MIN_PSIDE", "0.50"))
 # marked at/below SALVAGE_C AND the re-forecasted model agrees it is dying,
 # sell IMMEDIATELY (no margin, no confirm delay) instead of riding to zero.
 # The model-agrees guard is what protects winners that merely dipped.
-SALVAGE_C = int(os.environ.get("WX_SALVAGE_C", "20"))
+# 7/21: threshold raised 20->30 - the market-price calibration shows the
+# whole 20-35c band is toxic (act 12.7% vs implied 27.3%), not just sub-20.
+SALVAGE_C = int(os.environ.get("WX_SALVAGE_C", "30"))
 # v7: LOW-temp markets were 40/44 of v6 bets and carried all the losses
 # (act 20% vs pred 36.5%). Cap them to half the book allowance until the
 # shadow report proves lo-calibration.
