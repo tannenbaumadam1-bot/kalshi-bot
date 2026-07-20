@@ -440,11 +440,16 @@ td.num,th.num{text-align:right}
 <div style="margin-top:10px"><table><thead><tr><th>Date</th><th>Market / activity</th>
 <th class=num>Alloc</th><th class=num>Net</th><th class=num>Bank after</th></tr></thead>
 <tbody id=polytbl></tbody></table></div>
-<h2>Momentum drift <span style="text-transform:none;letter-spacing:0">(paper &mdash; buy the climbing favorite at maker, no model, ride to settlement)</span></h2>
+<h2>Momentum drift <span style="text-transform:none;letter-spacing:0">(paper &mdash; buy the strong side at maker, no model, stop &lt;50&cent;)</span></h2>
 <div class=grid id=drift></div>
-<div style="margin-top:10px"><table><thead><tr><th>Market</th><th>Side</th><th class=num>Mkt prob</th>
-<th class=num>From&rarr;At</th><th class=num>Entry</th><th class=num>Now</th><th class=num>Qty</th><th class=num>Fee</th><th>Result</th><th class=num>P&amp;L</th></tr></thead>
+<div style="margin-top:10px"><div class=t style="margin-bottom:6px">Open positions (marked live)</div>
+<table><thead><tr><th>Market</th><th>Side</th><th class=num>Mkt prob</th>
+<th class=num>From&rarr;At</th><th class=num>Entry</th><th class=num>Now</th><th class=num>Qty</th><th class=num>Fee</th><th class=num>Value</th><th class=num>uP&amp;L</th></tr></thead>
 <tbody id=drifttbl></tbody></table></div>
+<div style="margin-top:14px"><div class=t style="margin-bottom:6px">Realized trades (settled &amp; stopped)</div>
+<table><thead><tr><th>Closed</th><th>Market</th><th>Side</th><th class=num>Mkt prob</th>
+<th class=num>Entry</th><th class=num>Exit/Settle</th><th class=num>Qty</th><th class=num>Fee</th><th>Result</th><th class=num>P&amp;L</th></tr></thead>
+<tbody id=driftreal></tbody></table></div>
 <h2>Sharp +EV sports <span style="text-transform:none;letter-spacing:0">(paper &mdash; sharp-book fair value vs Kalshi price, maker-only, gated)</span></h2>
 <div class=grid id=sev></div>
 <h2>Sharp strategy attribution</h2>
@@ -712,18 +717,23 @@ async function load(){
       +'<td class=num>'+(b.now!=null?b.now+'&cent;':'&ndash;')+'</td>'
       +'<td class=num>'+b.count+'</td>'
       +'<td class=num>'+feeC(b.fee)+'</td>'
-      +'<td><span class=chip style="background:rgba(91,141,239,.13);color:var(--acc)">OPEN</span></td>'
+      +'<td class=num>'+(b.value!=null?F(b.value):'&ndash;')+'</td>'
       +'<td class=num>'+(b.upnl!=null?('<span class="'+C(b.upnl)+'">'+M(b.upnl)+'</span>'):'&ndash;')+'</td></tr>'));
-    (D.settled||[]).slice(0,10).forEach(b=>{const won=Number(b.outcome)===1;
-      dr.push('<tr>'+mkt(b)+side(b.side)
-      +'<td class=num>'+Math.round((b.pside||0)*100)+'%</td><td class=num>&ndash;</td>'
-      +'<td class=num>'+b.entry+'&cent;</td><td class=num>&ndash;</td><td class=num>'+b.count+'</td>'
+    $('drifttbl').innerHTML=dr.join('')||'<tr><td colspan=10 class=empty>No open positions \u2014 waiting for a qualifying favorite.</td></tr>';
+    const rl=[];
+    (D.settled||[]).slice(0,20).forEach(b=>{const won=Number(b.outcome)===1;
+      rl.push('<tr><td class=mut>'+((b.ts||'').slice(5,16).replace('T',' '))+'</td>'+mkt(b)+side(b.side)
+      +'<td class=num>'+Math.round((b.pside||0)*100)+'%</td>'
+      +'<td class=num>'+b.entry+'&cent;</td>'
+      +'<td class=num>'+(b.exit_px!=null?b.exit_px+'&cent;':(won?'100&cent;':'0&cent;'))+'</td>'
+      +'<td class=num>'+b.count+'</td>'
       +'<td class=num>'+feeC(b.fee)+'</td>'
       +'<td>'+(b.stopped?'<span class=chip style="background:rgba(232,180,76,.13);color:var(--amb)">STOP</span>':('<span class="'+(won?'won':'lost')+'">'+(won?'WON':'LOST')+'</span>'))+'</td>'
       +'<td class=num><span class="'+C(b.pnl)+'">'+M(b.pnl)+'</span></td></tr>');});
-    $('drifttbl').innerHTML=dr.join('')||'<tr><td colspan=10 class=empty>Waiting for a qualifying favorite \u2014 needs two scans of the same market to see momentum.</td></tr>';
+    $('driftreal').innerHTML=rl.join('')||'<tr><td colspan=10 class=empty>No realized trades yet \u2014 weather markets settle the next morning; stops fire intraday if a favorite falls below 50&cent;.</td></tr>';
   } else { $('drift').innerHTML='<div class=tile><div class=k>Momentum drift</div><div class=v>&ndash;</div><div class=s>starting&hellip;</div></div>';
-    $('drifttbl').innerHTML='<tr><td colspan=10 class=empty>No state yet.</td></tr>'; }
+    $('drifttbl').innerHTML='<tr><td colspan=10 class=empty>No state yet.</td></tr>';
+    $('driftreal').innerHTML='<tr><td colspan=10 class=empty>No state yet.</td></tr>'; }
   if(d.sharpev){const S=d.sharpev,ss=S.summary||{};
     $('sev').innerHTML=[
       tile('Bank (paper)',F(ss.cash),'started '+F(ss.start)),
