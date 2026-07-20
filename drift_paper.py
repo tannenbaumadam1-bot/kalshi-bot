@@ -53,6 +53,9 @@ VOL_CONFIRM = os.environ.get("DRIFT_VOL_CONFIRM", "1") == "1"   # climbs need vo
 CLIMB_SAMEDAY = os.environ.get("DRIFT_CLIMB_SAMEDAY", "1") == "1"  # info arrives on settle day
 PYRAMID_UP_C = int(os.environ.get("DRIFT_PYRAMID_UP_C", "10"))  # add-on trigger (post-gate)
 PYRAMID_MAX = int(os.environ.get("DRIFT_PYRAMID_MAX", "2"))     # max adds per position
+# Adam 7/21: pyramid during PROBE too (it's all paper) - the gate still
+# controls base sizing; set DRIFT_PYRAMID_PROBE=0 to re-lock behind the gate
+PYRAMID_PROBE = os.environ.get("DRIFT_PYRAMID_PROBE", "1") == "1"
 FADE_DROP_C = int(os.environ.get("DRIFT_FADE_DROP_C", "15"))    # A/B: exit peak-15c even >50
 PROBE_COST_CENTS = int(os.environ.get("DRIFT_PROBE_COST", "60"))
 GATE_MIN_N = 30
@@ -353,10 +356,11 @@ class DriftPaper:
         return placed
 
     def _maybe_pyramid(self, tk, mk, mid, mode):
-        """Trend-follower add-on: POST-GATE ONLY, add one probe-size unit when
-        an open position has run PYRAMID_UP_C past its (average) entry.
-        Adds to winners, never losers; capped at PYRAMID_MAX adds."""
-        if mode != "scale":
+        """Trend-follower add-on: add one probe-size unit when an open
+        position has run PYRAMID_UP_C past its (average) entry.
+        Adds to winners, never losers; capped at PYRAMID_MAX adds.
+        Active in probe too (paper, Adam 7/21) unless DRIFT_PYRAMID_PROBE=0."""
+        if mode != "scale" and not PYRAMID_PROBE:
             return False
         b = self.bets[tk]
         if int(b.get("adds", 0)) >= PYRAMID_MAX:

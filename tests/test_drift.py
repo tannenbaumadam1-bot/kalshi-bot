@@ -252,22 +252,31 @@ def test_candidates_ranked_by_strength(tmp_path, monkeypatch):
     assert "T-big" in b.bets and "T-small" not in b.bets
 
 
-def test_pyramid_only_post_gate(tmp_path, monkeypatch):
+def test_pyramid_active_in_probe_and_capped(tmp_path, monkeypatch):
+    # Adam 7/21: pyramiding runs during probe too (paper trading)
     b = _bot(tmp_path, monkeypatch)
     b.bets = {"TK1": {"side": "yes", "entry": 70, "count": 1, "fee": 1,
                       "pside": 0.72, "city": "boston", "strike": 80,
                       "kind": "ge", "cap": None, "hl": "hi", "date": TODAY,
                       "ots": TODAY + "T10:00:00", "era": "drift1", "adds": 0}}
     ran = _mk(tk="TK1", bid=83, ask=87)      # +13c past entry
-    b.place(mkts=[ran])                       # gate=probe -> NO pyramid
-    assert b.bets["TK1"]["count"] == 1 and b.bets["TK1"]["adds"] == 0
-    b.history = [{"era": "drift1", "outcome": 1, "pnl": 0.3, "pside": 0.8}] * 40
-    b.place(mkts=[ran])                       # gate=scale -> add one unit
+    b.place(mkts=[ran])                       # probe -> pyramid fires anyway
     bet = b.bets["TK1"]
     assert bet["adds"] == 1 and bet["count"] == 2
     assert 70 < bet["entry"] <= 83            # weighted-average entry
     b.place(mkts=[ran]); b.place(mkts=[ran])
     assert b.bets["TK1"]["adds"] <= dp.PYRAMID_MAX
+
+
+def test_pyramid_knob_can_relock_behind_gate(tmp_path, monkeypatch):
+    b = _bot(tmp_path, monkeypatch)
+    monkeypatch.setattr(dp, "PYRAMID_PROBE", False)
+    b.bets = {"TK1": {"side": "yes", "entry": 70, "count": 1, "fee": 1,
+                      "pside": 0.72, "city": "boston", "strike": 80,
+                      "kind": "ge", "cap": None, "hl": "hi", "date": TODAY,
+                      "ots": TODAY + "T10:00:00", "era": "drift1", "adds": 0}}
+    b.place(mkts=[_mk(tk="TK1", bid=83, ask=87)])
+    assert b.bets["TK1"]["adds"] == 0         # probe + knob off -> no adds
 
 
 def test_fade_mode_exits_on_stall_plain_does_not(tmp_path, monkeypatch):
