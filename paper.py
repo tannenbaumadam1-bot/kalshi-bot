@@ -79,6 +79,10 @@ try:
     import weather_live
 except Exception:
     weather_live = None
+try:
+    import drift_paper
+except Exception:
+    drift_paper = None
 
 from kalshibot.config import load_config
 from kalshibot.fees import fee_cents
@@ -547,6 +551,12 @@ def main():
             wl_dry = weather_live.WeatherLive(None, mode="DRY")
         except Exception:
             wl_dry = None
+    drift_bot = None
+    if drift_paper is not None:
+        try:
+            drift_bot = drift_paper.DriftPaper()
+        except Exception:
+            drift_bot = None
     # funding carry strategy removed 2026-07-18: purge its orphaned paper book
     try:
         _fs = os.path.join("logs", "funding_state.json")
@@ -651,6 +661,16 @@ def main():
                               f"{ps['days']}d | APY~{ps['apy']}% | {len(picks)} mkts")
                 except Exception as e:
                     print(f"  poly step skipped: {e}")
+            if drift_bot is not None and n % 20 == 11:
+                try:
+                    nd = drift_bot.step()
+                    ds = drift_bot.summary()
+                    if nd or ds["open"]:
+                        print(f"  DRIFT(paper): {nd} placed | bank ${ds['cash']:.2f} | "
+                              f"{ds['wins']}W/{ds['losses']}L | open {ds['open']} | "
+                              f"gate {ds['gate']} {ds['gate_n']}/30")
+                except Exception as e:
+                    print(f"  drift step skipped: {e}")
             if (wl_dry is not None and n % 20 == 3
                     and not os.path.exists(weather_live.ARM_FILE)
                     and os.environ.get("KALSHI_WEATHER_LIVE", "") != "1"):

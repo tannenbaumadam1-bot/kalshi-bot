@@ -1,0 +1,251 @@
+#!/usr/bin/env python3
+"""Momentum drift book (era "drift1") - PAPER, own $100 ledger, own gate.
+
+Adam's momentum thesis (2026-07-20): in a binary market, price finishes at 0
+or 100. When a weather contract strengthens (60c -> 70c) the market is usually
+right but UNDERreacting - our shadow data shows the favorite side is
+systematically underpriced (mid 65c wins ~75%, mid 42c wins ~48%). So: buy
+the strong side at maker when it is BOTH high-priced and still climbing, no
+model opinion at all, hold to settlement.
+
+Discipline (identical contract to every other book):
+  - probe stakes (<= 60c cost/bet) until a 30-bet gate on era "drift1" shows
+    positive expectancy AND calibration within 5pts; pside recorded = the
+    MARKET's own implied prob, so the gate directly measures the drift premium
+  - maker entries only (join the bid of the side we buy)
+  - momentum trigger: side price >= DRIFT_MIN_C (65) AND it moved up
+    >= DRIFT_UP_C (2c) since the previous scan (memory persisted)
+  - 1 bet per city-day event (strikes in one ladder are the same weather call)
+  - no exits: drift bets ride to settlement by design
+
+State -> logs/drift_state.json (dashboard picks it up)
+Bets  -> logs/drift_bets.csv
+"""
+from __future__ import annotations
+import os, csv, json, datetime
+
+import weather_edge as we
+from weather_paper import fetch_result
+from kalshibot.fees import fee_cents
+
+STATE = os.path.join("logs", "drift_state.json")
+BETS = os.path.join("logs", "drift_bets.csv")
+ERA = "drift1"
+
+DRIFT_MIN_C = int(os.environ.get("DRIFT_MIN_C", "65"))       # side price floor
+DRIFT_UP_C = float(os.environ.get("DRIFT_UP_C", "2"))        # min climb since last scan
+DRIFT_MAX_ENTRY = int(os.environ.get("DRIFT_MAX_ENTRY", "90"))  # no near-certainties
+DRIFT_MAX_PER_DAY = int(os.environ.get("DRIFT_MAX_PER_DAY", "20"))
+PROBE_COST_CENTS = int(os.environ.get("DRIFT_PROBE_COST", "60"))
+GATE_MIN_N = 30
+GATE_MAX_GAP = 0.05
+PER_BET_CAP = 0.015
+
+
+def now():
+    return datetime.datetime.now().isoformat(timespec="seconds")
+
+
+class DriftPaper:
+    def __init__(self, start_cents=10000):
+        self.start = start_cents
+        self.cash = float(start_cents)
+        self.bets = {}
+        self.history = []
+        self.last_mid = {}       # ticker -> yes-mid at the previous scan
+        self.wins = 0
+        self.losses = 0
+        self.fees = 0.0
+        self.placed = 0
+        self.load()
+
+    # ---- persistence ----
+    def load(self):
+        if os.path.exists(STATE):
+            try:
+                d = json.load(open(STATE))
+                for k in ("start", "cash", "bets", "history", "last_mid",
+                          "wins", "losses", "fees", "placed"):
+                    if k in d:
+                        setattr(self, k, d[k])
+            except Exception:
+                pass
+
+    def save(self):
+        try:
+            os.makedirs("logs", exist_ok=True)
+            mode, n = self._gate()
+            d = {"updated": now(), "start": self.start, "cash": self.cash,
+                 "bets": self.bets, "history": self.history[-120:],
+                 "last_mid": self.last_mid,
+                 "wins": self.wins, "losses": self.losses, "fees": self.fees,
+                 "placed": self.placed,
+                 "summary": {
+                     "start": round(self.start / 100.0, 2),
+                     "cash": round(self.cash / 100.0, 2),
+                     "net": round((self.cash + self._open_value_c()
+                                   - self.start) / 100.0, 2),
+                     "realized": round(sum(h.get("pnl", 0)
+                                           for h in self.history), 2),
+                     "wins": self.wins, "losses": self.losses,
+                     "open": len(self.bets), "placed": self.placed,
+                     "fees": round(self.fees / 100.0, 2),
+                     "gate": mode, "gate_n": n},
+                 "open": [dict(b, ticker=tk) for tk, b in self.bets.items()],
+                 "settled": list(reversed(self.history[-40:]))}
+            json.dump(d, open(STATE, "w"))
+        except Exception:
+            pass
+
+    def _log(self, row):
+        try:
+            os.makedirs("logs", exist_ok=True)
+            new = not os.path.exists(BETS)
+            with open(BETS, "a", newline="") as f:
+                w = csv.writer(f)
+                if new:
+                    w.writerow(["timestamp", "event", "ticker", "city", "strike",
+                                "hl", "side", "mkt_prob", "entry_c", "count",
+                                "outcome", "pnl_$"])
+                w.writerow(row)
+        except Exception:
+            pass
+
+    def _open_value_c(self):
+        return sum(b["entry"] * b["count"] for b in self.bets.values())
+
+    # ---- gate: same contract as every other book ----
+    def _gate(self):
+        cur = [h for h in self.history if h.get("outcome") in (0, 1)][-60:]
+        n = len(cur)
+        if n < GATE_MIN_N:
+            return "probe", n
+        expectancy = sum(h["pnl"] for h in cur) / n
+        pred = sum(h["pside"] for h in cur) / n
+        act = sum(h["outcome"] for h in cur) / n
+        if expectancy > 0 and (pred - act) <= GATE_MAX_GAP:
+            return "scale", n
+        return "probe", n
+
+    def _placed_today(self):
+        today = datetime.date.today().isoformat()
+        n = sum(1 for b in self.bets.values() if (b.get("ots") or "")[:10] == today)
+        n += sum(1 for h in self.history if (h.get("ots") or "")[:10] == today)
+        return n
+
+    # ---- core ----
+    def settle(self):
+        for tk, b in list(self.bets.items()):
+            res = fetch_result(tk)
+            if res is None:
+                continue
+            won = (res == b["side"])
+            payout = 100 if won else 0
+            net = (payout - b["entry"]) * b["count"] - b.get("fee", 0)
+            self.cash += payout * b["count"]
+            self.wins += int(won)
+            self.losses += int(not won)
+            self.history.append({"city": b["city"], "strike": b["strike"],
+                                 "kind": b.get("kind", "ge"), "cap": b.get("cap"),
+                                 "hl": b["hl"], "side": b["side"],
+                                 "pside": round(b["pside"], 3),
+                                 "entry": b["entry"], "count": b["count"],
+                                 "fee": b.get("fee", 0),
+                                 "outcome": 1 if won else 0,
+                                 "pnl": round(net / 100.0, 2), "ts": now(),
+                                 "ots": b.get("ots", ""), "era": ERA})
+            self.history = self.history[-120:]
+            self._log([now(), "SETTLE", tk, b["city"], b["strike"], b["hl"],
+                       b["side"], round(b["pside"], 3), b["entry"], b["count"],
+                       1 if won else 0, round(net / 100.0, 2)])
+            del self.bets[tk]
+
+    def place(self, mkts=None):
+        """Momentum entries: side price >= DRIFT_MIN_C and climbing."""
+        if mkts is None:
+            try:
+                mkts = we.find_temp_markets(max_days=1)
+            except Exception:
+                return 0
+        mode, _n = self._gate()
+        budget = DRIFT_MAX_PER_DAY - self._placed_today()
+        ev_keys = {(b["city"], b.get("date", ""), b["hl"])
+                   for b in self.bets.values()}
+        new_mid = {}
+        placed = 0
+        for mk in mkts:
+            tk = mk["ticker"]
+            bid, ask = mk["yes_bid"], mk["yes_ask"]
+            if bid <= 0 or ask <= 0:
+                continue
+            mid = (bid + ask) / 2.0
+            prev = self.last_mid.get(tk)
+            new_mid[tk] = mid
+            if tk in self.bets or placed >= budget:
+                continue
+            ekey = (mk["city"], mk.get("date", ""),
+                    "lo" if mk["is_low"] else "hi")
+            if ekey in ev_keys:
+                continue                    # one drift bet per weather event
+            # which side is strong, and is it still climbing?
+            if mid >= DRIFT_MIN_C:
+                side, entry, smid = "yes", bid, mid
+                climbing = prev is not None and (mid - prev) >= DRIFT_UP_C
+            elif mid <= 100 - DRIFT_MIN_C:
+                side, entry, smid = "no", 100 - ask, 100 - mid
+                climbing = prev is not None and (prev - mid) >= DRIFT_UP_C
+            else:
+                continue
+            if not climbing:
+                continue
+            if entry < 50 or entry > DRIFT_MAX_ENTRY:
+                continue                    # favorite at a real price only
+            pside = smid / 100.0            # market's own prob = our prediction
+            if mode == "probe":
+                size = max(1, PROBE_COST_CENTS // entry)
+            else:
+                b_odds = (100 - entry) / entry
+                f_star = max(0.0, pside - (1 - pside) / b_odds) * 0.25
+                bankroll = self.cash + self._open_value_c()
+                size = int(min(f_star, PER_BET_CAP) * bankroll // entry)
+                if size < 1:
+                    continue
+            fee = fee_cents(entry, size, taker=False)   # maker join
+            cost = entry * size + fee
+            if self.cash - cost < 100:
+                continue
+            self.cash -= cost
+            self.fees += fee
+            self.bets[tk] = {"side": side, "entry": entry, "count": size,
+                             "fee": fee, "pside": pside, "city": mk["city"],
+                             "strike": mk["strike"], "kind": mk.get("kind", "ge"),
+                             "cap": mk.get("cap"),
+                             "hl": ("lo" if mk["is_low"] else "hi"),
+                             "date": mk.get("date", ""), "ots": now(),
+                             "era": ERA, "from_mid": prev, "at_mid": mid}
+            ev_keys.add(ekey)
+            self.placed += 1
+            placed += 1
+            self._log([now(), "OPEN", tk, mk["city"], mk["strike"],
+                       ("lo" if mk["is_low"] else "hi"), side,
+                       round(pside, 3), entry, size, "", ""])
+        self.last_mid = new_mid             # momentum memory = last scan only
+        return placed
+
+    def step(self):
+        self.settle()
+        n = self.place()
+        self.save()
+        return n
+
+    def summary(self):
+        mode, n = self._gate()
+        return {"cash": round(self.cash / 100.0, 2), "wins": self.wins,
+                "losses": self.losses, "open": len(self.bets),
+                "gate": mode, "gate_n": n}
+
+
+if __name__ == "__main__":
+    d = DriftPaper()
+    d.step()
+    print(json.dumps(d.summary(), indent=2))

@@ -49,6 +49,12 @@ MIN_PRICE, MAX_PRICE = 30, 85
 # +7/+8pts). We only bet when the blended model makes OUR side the favorite;
 # the shadow log still measures the retired band for free.
 MIN_PSIDE = float(os.environ.get("WX_MIN_PSIDE", "0.50"))
+# v8 salvage exit (Adam 7/20): shadow data shows cheap weather contracts are
+# OVERPRICED (mkt ~8c wins 1.5%, ~18c wins 8.6%) - so once a position is
+# marked at/below SALVAGE_C AND the re-forecasted model agrees it is dying,
+# sell IMMEDIATELY (no margin, no confirm delay) instead of riding to zero.
+# The model-agrees guard is what protects winners that merely dipped.
+SALVAGE_C = int(os.environ.get("WX_SALVAGE_C", "20"))
 # v7: LOW-temp markets were 40/44 of v6 bets and carried all the losses
 # (act 20% vs pred 36.5%). Cap them to half the book allowance until the
 # shadow report proves lo-calibration.
@@ -417,9 +423,12 @@ class WeatherPaper:
             exit_ev = bid - exit_fee_per                # per-contract net if we sell now
             # hold value = entry-consistent blend of updated model and market
             hold_ev = (wgt * p_new + (1 - wgt) * mid_p) * 100
-            if exit_ev > hold_ev + margin_c:
+            # SALVAGE: deep underwater + model agrees -> sell NOW (cheap
+            # contracts are overpriced; waiting for confirms rode 30c -> 3c)
+            salvage = (bid <= SALVAGE_C and p_new <= mid_p + 0.05)
+            if salvage or exit_ev > hold_ev + margin_c:
                 b["exit_streak"] = int(b.get("exit_streak", 0)) + 1
-                if b["exit_streak"] < EXIT_CONFIRMS:
+                if not salvage and b["exit_streak"] < EXIT_CONFIRMS:
                     continue                  # flagged; confirm on the next check
                 cnt = b["count"]
                 exit_fee = fee_cents(bid, cnt, taker=True)
@@ -432,6 +441,7 @@ class WeatherPaper:
                                      "hl": b["hl"], "side": side, "pside": round(b["pside"], 3),
                                      "entry": b["entry"], "count": cnt, "fee": b.get("fee", 0),
                                      "outcome": None, "exited": True,
+                                     "salvaged": bool(salvage),
                                      "pnl": round(net / 100.0, 2), "p_new": round(p_new, 3),
                                      "exit_px": bid,
                                      "ts": datetime.datetime.now().isoformat(timespec="seconds"),

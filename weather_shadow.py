@@ -247,8 +247,21 @@ def report_data():
                 "model": round(100 * sum(r["mp"] for r in sel) / len(sel), 1),
                 "actual": round(100 * sum(r["out"] for r in sel) / len(sel), 1),
                 "mkt": round(100 * sum(r["mid"] for r in sel) / len(sel), 1)})
+    # MARKET-price buckets: same joined rows keyed by what the MARKET said
+    # early - the favorite-longshot evidence behind the drift book + salvage
+    mkt_buckets = []
+    for lo, hi in [(0, .1), (.1, .2), (.2, .35), (.35, .5),
+                   (.5, .65), (.65, .8), (.8, .9), (.9, 1.01)]:
+        sel = [r for r in rows if lo <= r["mid"] < hi]
+        if sel:
+            mkt_buckets.append({
+                "bucket": "%d-%d" % (lo * 100, min(100, hi * 100)),
+                "n": len(sel),
+                "mkt": round(100 * sum(r["mid"] for r in sel) / len(sel), 1),
+                "actual": round(100 * sum(r["out"] for r in sel) / len(sel), 1)})
     # fit uses its own POST-CUTOFF join (buckets above show full history)
-    return {"n": len(rows), "buckets": buckets, "fit": fit_weight()}
+    return {"n": len(rows), "buckets": buckets, "mkt_buckets": mkt_buckets,
+            "fit": fit_weight()}
 
 
 def report():

@@ -290,6 +290,12 @@ def build_data():
             out["poly"] = json.load(open(poly_path))
         except Exception:
             pass
+    drift_path = os.path.join("logs", "drift_state.json")
+    if os.path.exists(drift_path):
+        try:
+            out["drift"] = json.load(open(drift_path))
+        except Exception:
+            pass
     sev_path = os.path.join("logs", "sharpev_state.json")
     if os.path.exists(sev_path):
         try:
@@ -391,6 +397,9 @@ td.num,th.num{text-align:right}
 <h2>Model calibration <span style="text-transform:none;letter-spacing:0">(predicted vs realized win rate &mdash; the go-live gate &middot; sub-50% buckets RETIRED 7/18, shadow-only)</span></h2>
 <table><thead><tr><th>Confidence bucket</th><th class=num>Bets</th><th class=num>Predicted</th>
 <th class=num>Realized</th><th class=num>Gap</th></tr></thead><tbody id=calib></tbody></table>
+<h2>Market-price calibration <span style="text-transform:none;letter-spacing:0">(what the market said vs what happened &mdash; the drift + salvage evidence)</span></h2>
+<table><thead><tr><th>Market price</th><th class=num>Markets</th><th class=num>Mkt implied</th>
+<th class=num>Actually won</th><th class=num>Bias</th></tr></thead><tbody id=mktcal></tbody></table>
 <h2>Open positions (marked to market)</h2>
 <table><thead><tr><th>Market</th><th>Side</th><th>Model</th><th class=num>Our prob</th>
 <th class=num>Entry</th><th class=num>Mark</th><th class=num>Qty</th>
@@ -405,6 +414,11 @@ td.num,th.num{text-align:right}
 <div style="margin-top:10px"><table><thead><tr><th>Date</th><th>Market / activity</th>
 <th class=num>Alloc</th><th class=num>Net</th><th class=num>Bank after</th></tr></thead>
 <tbody id=polytbl></tbody></table></div>
+<h2>Momentum drift <span style="text-transform:none;letter-spacing:0">(paper &mdash; buy the climbing favorite at maker, no model, ride to settlement)</span></h2>
+<div class=grid id=drift></div>
+<div style="margin-top:10px"><table><thead><tr><th>Market</th><th>Side</th><th class=num>Mkt prob</th>
+<th class=num>From&rarr;At</th><th class=num>Entry</th><th class=num>Qty</th><th>Result</th><th class=num>P&amp;L</th></tr></thead>
+<tbody id=drifttbl></tbody></table></div>
 <h2>Sharp +EV sports <span style="text-transform:none;letter-spacing:0">(paper &mdash; sharp-book fair value vs Kalshi price, maker-only, gated)</span></h2>
 <div class=grid id=sev></div>
 <h2>Sharp strategy attribution</h2>
@@ -515,7 +529,10 @@ async function load(){
     const wStart=Number(s.start||0);
     const wNav=(k.nav!=null?Number(k.nav):(wStart+Number(s.total||0)));
     const wSettled=Number((k.era_current&&k.era_current.n)||0);
-    const P=d.poly||null, E=d.sharpev||null;
+    const P=d.poly||null, E=d.sharpev||null, DR=d.drift||null;
+    const drSum=DR?(DR.summary||{}):{};
+    const drOpenStake=DR?(DR.open||[]).reduce((a,b)=>a+(b.entry||0)*(b.count||0)/100,0):0;
+    const drBank=DR?(Number(drSum.cash||0)+drOpenStake):null, drStart=DR?Number(drSum.start||0):0;
     const eSum=E?(E.summary||{}):{};
     const eOpenStake=E?(E.open||[]).reduce((a,b)=>a+(b.entry||0)*(b.count||0)/100,0):0;
     const eBank=E?(Number(eSum.cash||0)+eOpenStake):null, eStart=E?Number(eSum.start||0):0;
@@ -531,6 +548,11 @@ async function load(){
         P?F(pBank):NA, P?'<span class="'+C(P.earned)+'">'+M(P.earned)+'</span>':NA,
         P?('&middot; '+(P.days||0)+'d &middot; APY ~'+(P.apy_annualized!=null?P.apy_annualized:'&ndash;')+'%'):'&middot; starting',
         'reinvesting','era'),
+      stratCard('Momentum drift &middot; drift1','momentum','yes',
+        DR?F(drBank):NA,
+        DR?'<span class="'+C(drBank-drStart)+'">'+M(drBank-drStart)+'</span>':NA,
+        DR?('&middot; '+(drSum.wins||0)+'W/'+(drSum.losses||0)+'L &middot; '+(drSum.open||0)+' open &middot; buy strength, no model'):'&middot; starting',
+        DR?((drSum.gate==='scale'?'gate: passed':'probing '+(drSum.gate_n||0)+'/30')):'starting','leg'),
       stratCard('Sharp +EV &middot; v3 band','anchor','era',
         E?F(eBank):NA,
         E?'<span class="'+C((E.era_current||{}).net)+'">'+M((E.era_current||{}).net||0)+'</span>':NA,
@@ -541,7 +563,7 @@ async function load(){
     ];
     $('strat').innerHTML=cards.join('');
     let tStart=wStart, tNav=wNav, nb=1;
-    if(P){tStart+=pStart;tNav+=pBank;nb++;}
+    if(P){tStart+=pStart;tNav+=pBank;nb++;} if(DR){tStart+=drStart;tNav+=drBank;nb++;}
     if(E){tStart+=eStart;tNav+=eBank;nb++;}
     $('combined').innerHTML='<div style="display:flex;align-items:baseline;gap:12px;flex-wrap:wrap;">'
       +'<span style="font-size:11px;color:var(--mut);text-transform:uppercase;letter-spacing:.12em;">Combined paper NAV</span>'
@@ -597,6 +619,12 @@ async function load(){
   drawDaily($('daily'),k.daily);
   $('eracur').innerHTML=eraRows(k.era_current||{});
   $('eraleg').innerHTML=eraRows(k.era_legacy||{});
+  $('mktcal').innerHTML=((d.shadow&&d.shadow.mkt_buckets)||[]).map(c=>{
+    const bias=(c.actual!=null&&c.mkt!=null)?Math.round((c.actual-c.mkt)*10)/10:null;
+    return '<tr><td>'+c.bucket+'\u00a2</td><td class=num>'+c.n+'</td>'
+      +'<td class=num>'+c.mkt+'%</td><td class=num>'+c.actual+'%</td>'
+      +'<td class=num>'+(bias==null?'&ndash;':'<span class="'+(bias>=0?'pos':'neg')+'">'+(bias>0?'+':'')+bias+' pts</span>')+'</td></tr>';
+  }).join('')||'<tr><td colspan=5 class=empty>Accumulating shadow outcomes&hellip;</td></tr>';
   $('calib').innerHTML=(k.calibration||[]).map(c=>{
     const ok=c.delta==null?null:Math.abs(c.delta)<=10;
     return '<tr><td>'+c.bucket+'</td><td class=num>'+c.n+'</td>'
@@ -625,7 +653,7 @@ async function load(){
       return '<tr>'+mkt(b)+side(b.side)+era(b)+prob(b.pside)
       +'<td class=num>'+b.entry+'&cent;</td><td class=num>'+b.count+'</td>'
       +'<td class=num>'+feeC(b.fee)+'</td>'
-      +'<td>'+(b.exited?'<span class=chip style="background:rgba(232,180,76,.13);color:var(--amb)">EXIT</span>':'<span class="'+(won?'won':'lost')+'">'+(won?'WON':'LOST')+'</span>')+'</td>'
+      +'<td>'+(b.exited?('<span class=chip style="background:rgba(232,180,76,.13);color:var(--amb)">'+(b.salvaged?'SALV':'EXIT')+'</span>'):'<span class="'+(won?'won':'lost')+'">'+(won?'WON':'LOST')+'</span>')+'</td>'
       +'<td class=num><span class="'+C(b.pnl)+'">'+M(b.pnl)+'</span></td></tr>';
     }).join('')||'<tr><td colspan=9 class=empty>No current-model bets settled yet \u2014 the open v6-ens positions settle daily.</td></tr>';
   }
@@ -640,6 +668,29 @@ async function load(){
   } else { $('poly').innerHTML='<div class=tile><div class=k>Polymarket</div><div class=v>&ndash;</div><div class=s>paper sim starting&hellip;</div></div>'; }
   $('polytbl').innerHTML=actRows(d.poly,(d.poly&&d.poly.positions||[]).map(p=>({name:p.q,alloc:p.alloc,net:p.net})),'markets')
     ||'<tr><td colspan=5 class=empty>No activity yet \u2014 allocations post once per day.</td></tr>';
+  if(d.drift){const D=d.drift,dsm=D.summary||{};
+    $('drift').innerHTML=[
+      tile('Bank (paper)',F(dsm.cash||0),'started '+F(dsm.start||0)),
+      tile('Record',(dsm.wins||0)+'W / '+(dsm.losses||0)+'L',(dsm.open||0)+' open'),
+      tile('Realized P&L',(dsm.realized!=null)?'<span class="'+C(dsm.realized)+'">'+M(dsm.realized)+'</span>':NA,''),
+      tile('Gate',(dsm.gate||'probe')+' '+(dsm.gate_n||0)+'/30','pside = market prob \u2192 gate measures the drift premium'),
+      tile('Trigger','\u226565\u00a2 & climbing','maker join \u00b7 1/event \u00b7 no exits'),
+    ].join('');
+    const dr=[];
+    (D.open||[]).forEach(b=>dr.push('<tr>'+mkt(b)+side(b.side)
+      +'<td class=num>'+Math.round((b.pside||0)*100)+'%</td>'
+      +'<td class=num>'+(b.from_mid!=null?Math.round(b.from_mid):'\u2013')+'\u2192'+(b.at_mid!=null?Math.round(b.at_mid):'\u2013')+'\u00a2</td>'
+      +'<td class=num>'+b.entry+'&cent;</td><td class=num>'+b.count+'</td>'
+      +'<td><span class=chip style="background:rgba(91,141,239,.13);color:var(--acc)">OPEN</span></td><td class=num>&ndash;</td></tr>'));
+    (D.settled||[]).slice(0,10).forEach(b=>{const won=Number(b.outcome)===1;
+      dr.push('<tr>'+mkt(b)+side(b.side)
+      +'<td class=num>'+Math.round((b.pside||0)*100)+'%</td><td class=num>&ndash;</td>'
+      +'<td class=num>'+b.entry+'&cent;</td><td class=num>'+b.count+'</td>'
+      +'<td><span class="'+(won?'won':'lost')+'">'+(won?'WON':'LOST')+'</span></td>'
+      +'<td class=num><span class="'+C(b.pnl)+'">'+M(b.pnl)+'</span></td></tr>');});
+    $('drifttbl').innerHTML=dr.join('')||'<tr><td colspan=8 class=empty>Waiting for a climbing favorite \u2014 needs two scans of the same market to see momentum.</td></tr>';
+  } else { $('drift').innerHTML='<div class=tile><div class=k>Momentum drift</div><div class=v>&ndash;</div><div class=s>starting&hellip;</div></div>';
+    $('drifttbl').innerHTML='<tr><td colspan=8 class=empty>No state yet.</td></tr>'; }
   if(d.sharpev){const S=d.sharpev,ss=S.summary||{};
     $('sev').innerHTML=[
       tile('Bank (paper)',F(ss.cash),'started '+F(ss.start)),

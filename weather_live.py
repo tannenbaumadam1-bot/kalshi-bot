@@ -296,9 +296,10 @@ class WeatherLive:
             mid_p = max(0.0, min(1.0, (bid + ask) / 200.0))
             exit_fee_per = fee_cents(bid, 1, taker=True)
             hold_ev = (wgt * p_new + (1 - wgt) * mid_p) * 100
-            if bid - exit_fee_per > hold_ev + margin_c:
+            salvage = (bid <= wp.SALVAGE_C and p_new <= mid_p + 0.05)
+            if salvage or bid - exit_fee_per > hold_ev + margin_c:
                 b["exit_streak"] = int(b.get("exit_streak", 0)) + 1
-                if b["exit_streak"] < wp.EXIT_CONFIRMS:
+                if not salvage and b["exit_streak"] < wp.EXIT_CONFIRMS:
                     continue
                 cnt = b["count"]
                 if self.client is not None:
@@ -320,6 +321,7 @@ class WeatherLive:
                                      "pside": round(b["pside"], 3),
                                      "entry": b["entry"], "count": cnt,
                                      "outcome": None, "exited": True,
+                                     "salvaged": bool(salvage),
                                      "pnl": round(net / 100, 2),
                                      "exit_px": bid, "ts": now(),
                                      "ots": b.get("ots", ""), "era": ERA})
