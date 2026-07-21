@@ -251,7 +251,7 @@ def report_data():
     # early - the favorite-longshot evidence behind the drift book + salvage
     mkt_buckets = []
     for lo, hi in [(0, .1), (.1, .2), (.2, .35), (.35, .5),
-                   (.5, .65), (.65, .8), (.8, .9), (.9, 1.01)]:
+                   (.5, .65), (.65, .8), (.8, .9), (.9, .95), (.95, 1.01)]:
         sel = [r for r in rows if lo <= r["mid"] < hi]
         if sel:
             mkt_buckets.append({

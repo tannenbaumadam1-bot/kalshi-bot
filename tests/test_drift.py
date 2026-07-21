@@ -422,3 +422,39 @@ def test_threshold_bets_keep_model_veto(monkeypatch):
     w.exit_check()
     w.exit_check()
     assert len(w.bets) == 1      # model still believes -> ge bets may hold
+
+
+# ---- nickel experiment (Adam 7/22: 10 contracts at >=95c, hold to settle) ----
+
+def test_nickel_places_ten_contracts(tmp_path, monkeypatch):
+    b = _bot(tmp_path, monkeypatch)
+    # first sight, no climb needed: mid 96 -> nickel entry at the 95c bid
+    assert b.place(mkts=[_mk(bid=95, ask=97)]) == 1
+    bet = next(iter(b.bets.values()))
+    assert bet["trig"] == "nickel" and bet["count"] == dp.NICKEL_COUNT
+    assert bet["entry"] == 95
+
+
+def test_nickel_needs_upside_left(tmp_path, monkeypatch):
+    b = _bot(tmp_path, monkeypatch)
+    # 99c bid: nothing left to win after fees -> skip
+    assert b.place(mkts=[_mk(bid=99, ask=100)]) == 0
+
+
+def test_nickel_concurrent_cap(tmp_path, monkeypatch):
+    b = _bot(tmp_path, monkeypatch)
+    b.bets = {f"N{i}": {"trig": "nickel", "entry": 95, "count": 10, "fee": 1,
+                        "side": "yes", "pside": 0.96, "city": f"c{i}",
+                        "strike": 80, "kind": "ge", "cap": None, "hl": "hi",
+                        "date": TODAY, "ots": TODAY + "T10:00:00",
+                        "era": "drift1"} for i in range(dp.NICKEL_MAX_OPEN)}
+    assert b.place(mkts=[_mk(tk="N-new", bid=95, ask=97, city="boston")]) == 0
+
+
+def test_nickel_excluded_from_drift_gate(tmp_path, monkeypatch):
+    b = _bot(tmp_path, monkeypatch)
+    b.history = [{"trig": "nickel", "outcome": 1, "pnl": 0.4, "pside": 0.96}] * 40
+    mode, n = b._gate()
+    assert n == 0 and mode == "probe"          # nickels never drive the gate
+    st = b._nickel_stats()
+    assert st["n"] == 40 and st["wins"] == 40 and st["net"] == 16.0

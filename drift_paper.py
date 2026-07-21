@@ -61,6 +61,18 @@ PYRAMID_PROBE = os.environ.get("DRIFT_PYRAMID_PROBE", "1") == "1"
 # when momentum stalls, not only when it dies. Winners that never stall still
 # ride to settlement.
 FADE_DROP_C = int(os.environ.get("DRIFT_FADE_DROP_C", "15"))
+# NICKEL experiment (Adam 7/22): buy 10 contracts whenever a side crosses 95c
+# and hold to settlement - harvesting the last nickels of underpriced
+# certainty (90-100c bucket ran +6 to +14pts on our calibration). Tracked as
+# its OWN experiment: nickel trades are EXCLUDED from the drift gate (a -$9.50
+# gap loss or +$0.40 win would swamp the drift-premium math) and get their own
+# stats block. The 50c stop and 15c trail still protect them when a path
+# exists; gap losses are the known, accepted risk of this trade.
+NICKEL_ON = os.environ.get("DRIFT_NICKEL", "1") == "1"
+NICKEL_MIN_C = int(os.environ.get("DRIFT_NICKEL_MIN_C", "95"))   # side-mid trigger
+NICKEL_MAX_ENTRY = int(os.environ.get("DRIFT_NICKEL_MAX_ENTRY", "98"))
+NICKEL_COUNT = int(os.environ.get("DRIFT_NICKEL_COUNT", "10"))   # Adam's size
+NICKEL_MAX_OPEN = int(os.environ.get("DRIFT_NICKEL_MAX_OPEN", "3"))
 PROBE_COST_CENTS = int(os.environ.get("DRIFT_PROBE_COST", "60"))
 GATE_MIN_N = 30
 GATE_MAX_GAP = 0.05
@@ -117,6 +129,7 @@ class DriftPaper:
                      "open": len(self.bets), "placed": self.placed,
                      "fees": round(self.fees / 100.0, 2),
                      "gate": mode, "gate_n": n},
+                 "nickel": self._nickel_stats(),
                  "open": [dict(b, ticker=tk) for tk, b in self.bets.items()],
                  "settled": list(reversed(self.history[-40:]))}
             json.dump(d, open(STATE, "w"))
@@ -142,7 +155,8 @@ class DriftPaper:
 
     # ---- gate: same contract as every other book ----
     def _gate(self):
-        cur = [h for h in self.history if h.get("outcome") in (0, 1)][-60:]
+        cur = [h for h in self.history if h.get("outcome") in (0, 1)
+               and h.get("trig") != "nickel"][-60:]
         n = len(cur)
         if n < GATE_MIN_N:
             return "probe", n
@@ -152,6 +166,15 @@ class DriftPaper:
         if expectancy > 0 and (pred - act) <= GATE_MAX_GAP:
             return "scale", n
         return "probe", n
+
+    def _nickel_stats(self):
+        rows = [h for h in self.history if h.get("trig") == "nickel"]
+        settled = [h for h in rows if h.get("outcome") in (0, 1)]
+        return {"open": sum(1 for b in self.bets.values()
+                            if b.get("trig") == "nickel"),
+                "n": len(settled),
+                "wins": sum(1 for h in settled if h["outcome"] == 1),
+                "net": round(sum(h.get("pnl", 0) for h in rows), 2)}
 
     def _placed_today(self):
         today = datetime.date.today().isoformat()
@@ -174,6 +197,7 @@ class DriftPaper:
             self.history.append({"city": b["city"], "strike": b["strike"],
                                  "kind": b.get("kind", "ge"), "cap": b.get("cap"),
                                  "hl": b["hl"], "side": b["side"],
+                                 "trig": b.get("trig"),
                                  "pside": round(b["pside"], 3),
                                  "entry": b["entry"], "count": b["count"],
                                  "fee": b.get("fee", 0),
@@ -237,6 +261,7 @@ class DriftPaper:
             self.history.append({"city": b["city"], "strike": b["strike"],
                                  "kind": b.get("kind", "ge"), "cap": b.get("cap"),
                                  "hl": b["hl"], "side": b["side"],
+                                 "trig": b.get("trig"),
                                  "pside": round(b["pside"], 3),
                                  "entry": b["entry"], "count": cnt,
                                  "fee": b.get("fee", 0),
@@ -297,6 +322,13 @@ class DriftPaper:
             else:
                 continue
             climbing = climb_c is not None and climb_c >= DRIFT_UP_C
+            # NICKEL zone first: >=95c mid -> 10-contract certainty harvest
+            if NICKEL_ON and smid >= NICKEL_MIN_C:
+                if entry < 93 or entry > NICKEL_MAX_ENTRY:
+                    continue                # need a real bid with upside left
+                cands.append(("nickel", smid, mk, side, entry, smid, prev,
+                              mid, ekey))
+                continue
             # >=80c: level alone is the proven signal; 65-80c: climb required,
             # and the climb must be REAL (same-day info + actual trading)
             if smid >= DRIFT_LEVEL_C:
@@ -322,7 +354,12 @@ class DriftPaper:
                 continue
             tk = mk["ticker"]
             pside = smid / 100.0            # market's own prob = our prediction
-            if mode == "probe":
+            if trig == "nickel":
+                if sum(1 for b in self.bets.values()
+                       if b.get("trig") == "nickel") >= NICKEL_MAX_OPEN:
+                    continue
+                size = NICKEL_COUNT
+            elif mode == "probe":
                 size = max(1, PROBE_COST_CENTS // entry)
             else:
                 b_odds = (100 - entry) / entry

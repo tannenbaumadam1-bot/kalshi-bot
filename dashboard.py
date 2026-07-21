@@ -707,7 +707,9 @@ async function load(){
       tile('Unrealized (marked)',(dsm.unrealized!=null)?'<span class="'+C(dsm.unrealized)+'">'+M(dsm.unrealized)+'</span>':NA,
         (dsm.marked_nav!=null)?('marked NAV '+F(dsm.marked_nav)):''),
       tile('Gate',(dsm.gate||'probe')+' '+(dsm.gate_n||0)+'/30','pside = market prob \u2192 gate measures the drift premium'),
-      tile('Trigger','\u226580\u00a2 level \u00b7 65\u201380\u00a2 climb','vol-confirmed \u00b7 same-day climbs \u00b7 ranked \u00b7 stop <50\u00a2 \u00b7 trail 15\u00a2 off peak'),
+      tile('Trigger','\u226580\u00a2 level \u00b7 65\u201380\u00a2 climb \u00b7 \u226595\u00a2 nickel\u00d710','vol-confirmed \u00b7 same-day climbs \u00b7 ranked \u00b7 stop <50\u00a2 \u00b7 trail 15\u00a2'),
+      tile('Nickel book (\u226595\u00a2 \u00d7 10)',(D.nickel&&D.nickel.n!=null)?((D.nickel.wins||0)+'W / '+((D.nickel.n||0)-(D.nickel.wins||0))+'L \u00b7 <span class="'+C(D.nickel.net)+'">'+M(D.nickel.net||0)+'</span>'):NA,
+        (D.nickel?((D.nickel.open||0)+' open \u00b7 win pays ~4\u00a2/ct, loss ~95\u00a2/ct'):'')),
     ].join('');
     const dr=[];
     (D.open||[]).forEach(b=>dr.push('<tr>'+mkt(b)+side(b.side)
