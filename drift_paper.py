@@ -344,12 +344,15 @@ class DriftPaper:
             if entry < 50 or entry > DRIFT_MAX_ENTRY:
                 continue                    # favorite at a real price only
             cands.append((trig, score, mk, side, entry, smid, prev, mid, ekey))
-        # cross-sectional ranking: strongest signals get the daily budget first
-        cands.sort(key=lambda c: (0 if c[0] == "level" else 1, -c[1]))
+        # cross-sectional ranking: nickels first (own lane, own cap), then
+        # proven level entries, then climbs - strongest first within each
+        cands.sort(key=lambda c: ({"nickel": 0, "level": 1}.get(c[0], 2), -c[1]))
         placed = 0
         for trig, score, mk, side, entry, smid, prev, mid, ekey in cands:
-            if placed >= budget:
-                break
+            # nickels have their own lane: capped by NICKEL_MAX_OPEN, not the
+            # drift daily budget (49 hot markets once starved them entirely)
+            if trig != "nickel" and placed >= budget:
+                continue
             if ekey in ev_keys:
                 continue
             tk = mk["ticker"]
