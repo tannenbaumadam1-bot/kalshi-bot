@@ -72,7 +72,8 @@ def test_probe_stakes_and_event_cap(tmp_path, monkeypatch):
     up2 = dict(m2, yes_bid=69, yes_ask=73, vol=160.0)
     assert b.place(mkts=[up1, up2]) == 1                # 1 bet per event only
     bet = next(iter(b.bets.values()))
-    assert bet["count"] == 1          # probe: one contract when entry > 60c
+    # 7/21 jugular sizing: probe $1.50 -> 2 contracts at 69c
+    assert bet["entry"] * bet["count"] <= dp.PROBE_COST_CENTS
 
 
 def test_mid_zone_ignored(tmp_path, monkeypatch):
@@ -299,7 +300,7 @@ def test_trailing_exit_applies_to_every_bet(tmp_path, monkeypatch):
 
 # ---- weather-book pyramiding (Adam 7/21: accentuate winners) ----
 
-def _wedge(tk="KXHIGHDEN-26JUL21-T95", entry_price=50, side="YES", fair=0.62):
+def _wedge(tk="KXHIGHDEN-26JUL21-T95", entry_price=50, side="YES", fair=0.75):
     mk = {"ticker": tk, "city": "denver", "is_low": False, "strike": 95,
           "kind": "ge", "cap": None, "yes_bid": entry_price,
           "yes_ask": entry_price + 4, "date": TODAY, "hrs": 8.0,
@@ -324,7 +325,7 @@ def test_weather_pyramid_adds_to_model_confirmed_runner():
     w = _wpbot()
     # price ran 40 -> 55 (+15 > +10) and the scan re-confirms the edge
     assert w._maybe_pyramid("KXHIGHDEN-26JUL21-T95", "YES",
-                            _wedge(entry_price=55)[2], 0.62) is True
+                            _wedge(entry_price=55)[2], 0.75) is True
     b = w.bets["KXHIGHDEN-26JUL21-T95"]
     assert b["adds"] == 1 and b["count"] == 2
     assert 40 < b["entry"] <= 55              # weighted-average entry
@@ -334,7 +335,7 @@ def test_weather_pyramid_skips_small_run_and_flipped_side():
     w = _wpbot()
     # only +5 past entry -> not a runner
     assert w._maybe_pyramid("KXHIGHDEN-26JUL21-T95", "YES",
-                            _wedge(entry_price=45)[2], 0.62) is False
+                            _wedge(entry_price=45)[2], 0.75) is False
     # model flipped to NO -> never add
     assert w._maybe_pyramid("KXHIGHDEN-26JUL21-T95", "NO",
                             _wedge(entry_price=55)[2], 0.38) is False
@@ -345,7 +346,7 @@ def test_weather_pyramid_respects_add_cap():
     w = _wpbot()
     w.bets["KXHIGHDEN-26JUL21-T95"]["adds"] = wp.WX_PYRAMID_MAX
     assert w._maybe_pyramid("KXHIGHDEN-26JUL21-T95", "YES",
-                            _wedge(entry_price=55)[2], 0.62) is False
+                            _wedge(entry_price=55)[2], 0.75) is False
 
 
 def test_live_dry_merges_pyramid_fill(tmp_path, monkeypatch):
@@ -364,7 +365,7 @@ def test_live_dry_merges_pyramid_fill(tmp_path, monkeypatch):
     b.wins = b.losses = b.placed = b.canceled = 0
     b.day, b.halted, b.dry_balance_c = wl.today(), False, 10000
     mk = _wedge(tk="TK1", entry_price=55)[2]
-    assert b._maybe_pyramid_order("TK1", "YES", mk, 0.62, 10000) is True
+    assert b._maybe_pyramid_order("TK1", "YES", mk, 0.75, 10000) is True
     assert len(b.pending) == 1
     # DRY fill happens in place(); simulate the merge path directly
     oid, o = next(iter(b.pending.items()))
@@ -469,3 +470,19 @@ def test_nickel_excluded_from_drift_gate(tmp_path, monkeypatch):
     assert n == 0 and mode == "probe"          # nickels never drive the gate
     st = b._nickel_stats()
     assert st["n"] == 40 and st["wins"] == 40 and st["net"] == 16.0
+
+
+
+# ---- Soros #1 (7/21): weather book is thresholds-only now ----
+
+def test_weather_bands_retired(monkeypatch):
+    w = _wbot()
+    w.bets = {}
+    band_mk = {"ticker": "B1", "city": "denver", "is_low": False, "strike": 95,
+               "kind": "band", "cap": 96, "yes_bid": 40, "yes_ask": 44,
+               "date": TODAY, "hrs": 8.0, "entry_price": 40, "maker": True,
+               "src": "nowcast", "w": 0.35, "vol": 100.0}
+    monkeypatch.setattr(wp.we, "scan", lambda **kw: [(5.0, "YES", band_mk, 0.85, 90.0)])
+    w.placed = 0
+    w.place()
+    assert len(w.bets) == 0            # band candidate skipped even at 85% conf

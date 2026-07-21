@@ -21,7 +21,7 @@ def _fresh():
     return w
 
 
-def _edge(entry_price, side="YES", fair=0.55, city="denver", strike=95):
+def _edge(entry_price, side="YES", fair=0.75, city="denver", strike=95):
     mk = {"ticker": "T-%s-%s" % (city, strike), "city": city, "is_low": False,
           "strike": strike, "yes_bid": entry_price, "yes_ask": entry_price + 8,
           "entry_price": entry_price, "maker": True}
@@ -45,7 +45,7 @@ def test_scan_prefers_maker_and_uses_maker_fee():
 
 def test_place_uses_maker_fee_and_entry_price(monkeypatch):
     w = _fresh()
-    monkeypatch.setattr(we, "scan", lambda **kw: _edge(35, "YES", fair=0.55))
+    monkeypatch.setattr(we, "scan", lambda **kw: _edge(35, "YES", fair=0.75))
     w.place()
     assert len(w.bets) == 1
     b = next(iter(w.bets.values()))
@@ -58,7 +58,7 @@ def test_place_uses_maker_fee_and_entry_price(monkeypatch):
 
 def test_probe_mode_keeps_stakes_tiny_when_unproven(monkeypatch):
     w = _fresh()
-    monkeypatch.setattr(we, "scan", lambda **kw: _edge(35, "YES", fair=0.55))
+    monkeypatch.setattr(we, "scan", lambda **kw: _edge(35, "YES", fair=0.75))
     w.place()
     b = next(iter(w.bets.values()))
     # unproven era -> probe: cost basis capped near PROBE_COST_CENTS

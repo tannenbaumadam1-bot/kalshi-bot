@@ -374,11 +374,11 @@ class WeatherLive:
                                mk["yes_ask"] if s == "yes" else (100 - mk["yes_bid"])))
             if price < wp.MIN_PRICE or price > wp.MAX_PRICE:
                 continue
+            if mk.get("kind", "ge") == "band" and not wp.WX_BANDS:
+                continue          # v9: bands retired
             p = fair if s == "yes" else (1 - fair)
             if p < wp.MIN_PSIDE:
-                continue          # v8: sub-50% confidence measured -EV in 3 eras
-            if mk.get("kind", "ge") == "band" and p < wp.WX_BAND_MIN_PSIDE:
-                continue          # 7/22: coin-flip bands were the loss center
+                continue          # v9: only the >=70%-conf bucket makes money
             b_odds = (100 - price) / price
             f_star = p - (1 - p) / b_odds
             if f_star <= 0:

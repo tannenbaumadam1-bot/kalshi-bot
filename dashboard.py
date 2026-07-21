@@ -29,7 +29,7 @@ PORT = int(os.environ.get("DASH_PORT", "8765"))
 TOKEN = os.environ.get("DASH_TOKEN", "")
 KALSHI = "https://api.elections.kalshi.com/trade-api/v2"
 
-CUR_ERA = "v7-obs"      # bets from the current model; everything else = legacy
+CUR_ERA = "v9-core"     # thresholds-only >=70% conf; everything else = legacy
 
 try:
     import weather_shadow as _wsh
@@ -411,8 +411,8 @@ td.num,th.num{text-align:right}
 </div>
 <h2>Strategy attribution</h2>
 <div class=eras>
-  <div class=panel><div class=t>Current model &middot; v7 obs-nowcast (calibration-gated)</div><table><tbody id=eracur></tbody></table></div>
-  <div class=panel><div class=t>Legacy (v2&ndash;v6 &mdash; wrong-day forecasts)</div><table><tbody id=eraleg></tbody></table></div>
+  <div class=panel><div class=t>Current model &middot; v9 core <span style="text-transform:none;letter-spacing:0">(thresholds only, &ge;70% conf &mdash; the proven bucket)</span></div><table><tbody id=eracur></tbody></table></div>
+  <div class=panel><div class=t>Legacy <span style="text-transform:none;letter-spacing:0">(v2&ndash;v8 &mdash; incl. the band experiment)</span></div><table><tbody id=eraleg></tbody></table></div>
 </div>
 <h2>Model calibration <span style="text-transform:none;letter-spacing:0">(predicted vs realized win rate &mdash; the go-live gate &middot; sub-50% buckets RETIRED 7/18, shadow-only)</span></h2>
 <table><thead><tr><th>Confidence bucket</th><th class=num>Bets</th><th class=num>Predicted</th>
@@ -457,8 +457,8 @@ function mkt(b){const kk=b.kind||'ge';
   const st=(kk==='band')?(b.strike+'&ndash;'+(b.cap!=null?b.cap:'?')+'&deg;'):((kk==='le')?'&le;'+b.strike+'&deg;':'&ge;'+b.strike+'&deg;');
   return '<td><span class=mkt>'+(b.city||'')+' '+st+' '+((b.hl==='lo')?'low':'high')+'</span></td>';}
 function side(s){s=(s||'').toLowerCase();return '<td><span class="chip '+(s==='yes'?'yes':'no')+'">'+s.toUpperCase()+'</span></td>';}
-function era(b){const cur=(b.era==='v7-obs');
-  return '<td><span class="chip '+(cur?'era':'leg')+'">'+(cur?'v7':'legacy')+'</span></td>';}
+function era(b){const cur=(b.era==='v9-core');
+  return '<td><span class="chip '+(cur?'era':'leg')+'">'+(cur?'v9':'legacy')+'</span></td>';}
 function prob(p){return '<td class=num>'+Math.round((Number(p)||0)*100)+'%</td>';}
 function tile(k,v,s){return '<div class=tile><div class=k>'+k+'</div><div class=v>'+v+'</div>'+(s?'<div class=s>'+s+'</div>':'')+'</div>';}
 function stratCard(name,kind,kindcls,bank,pnl,sub,status,statuscls){
@@ -549,12 +549,12 @@ async function load(){
     const drBank=DR?(drSum.marked_nav!=null?Number(drSum.marked_nav):(Number(drSum.cash||0)+drOpenStake)):null, drStart=DR?Number(drSum.start||0):0;
     const pBank=P?Number(P.cash||P.start||0):null, pStart=P?Number(P.start||0):0;
     const cards=[
-      stratCard('Weather edge &middot; v7-obs','forecast','era',F(wNav),
+      stratCard('Weather edge &middot; v9-core','forecast','era',F(wNav),
         '<span class="'+C((k.era_current||{}).net)+'">'+M((k.era_current||{}).net||0)+'</span>',
-        '&middot; v7: '+((k.era_current||{}).wins||0)+'W/'+((k.era_current||{}).losses||0)+'L'
+        '&middot; v9: '+((k.era_current||{}).wins||0)+'W/'+((k.era_current||{}).losses||0)+'L'
         +((k.era_current||{}).expectancy!=null?' &middot; '+M((k.era_current||{}).expectancy)+'/bet':'')
         +' <span class=mut>(bank incl. legacy '+M((k.era_legacy||{}).net||0)+')</span>',
-        wSettled>=30?'v7 gate: n\u226530 met':'v7 probing '+wSettled+'/30','leg'),
+        wSettled>=30?'v9 gate: n\u226530 met':'v9 probing '+wSettled+'/30','leg'),
       stratCard('Polymarket rewards','liquidity','yes',
         P?F(pBank):NA, P?'<span class="'+C(P.earned)+'">'+M(P.earned)+'</span>':NA,
         P?('&middot; '+(P.days||0)+'d &middot; APY ~'+(P.apy_annualized!=null?P.apy_annualized:'&ndash;')+'%'):'&middot; starting',
@@ -648,7 +648,7 @@ async function load(){
   }).join('')||'<tr><td colspan=11 class=empty>No open positions &mdash; waiting for a disciplined edge.</td></tr>';
   {
     const all=d.settled||[];
-    const cur=all.filter(b=>b.era==='v7-obs');
+    const cur=all.filter(b=>b.era==='v9-core');
     const nleg=all.length-cur.length;
     $('legnote').textContent=nleg>0?'('+nleg+' older legacy-model bets hidden \u2014 still counted in totals)':'';
     $('settled').innerHTML=cur.slice(0,15).map(b=>{

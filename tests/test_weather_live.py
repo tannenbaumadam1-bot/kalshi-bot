@@ -57,7 +57,7 @@ def _bot(client=None, mode="DRY", monkeypatch=None, tmp_path=None):
     return b
 
 
-def _edge(ticker="KXHIGHNY-26JUL19-T86", price=40, fair=0.52, kind="ge"):
+def _edge(ticker="KXHIGHNY-26JUL19-T86", price=40, fair=0.75, kind="ge"):
     mk = {"ticker": ticker, "city": "new york", "is_low": False, "strike": 87,
           "kind": kind, "cap": None, "yes_bid": price, "yes_ask": price + 4,
           "date": "2026-07-19", "hrs": 20.0, "title": "", "sub": "",

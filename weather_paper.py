@@ -35,7 +35,9 @@ MAX_BOOK_FRAC = 0.30
 # STAKES ("probe mode") until the current model demonstrates, on its own
 # settled bets, that (a) expectancy is positive and (b) predicted-vs-actual
 # calibration gap is within GATE_MAX_GAP. Only then scale to Kelly sizing.
-ERA = "v7-obs"   # nowcast + ticker-date fix + learned blend (bumped 2026-07-10)
+ERA = "v9-core"  # 7/21 Soros cut: thresholds-only, >=70% conf (v7/v8's ONLY
+                 # profitable bucket: pred 81 / act 88). Bands retired - the
+                 # model cannot price 2-degree windows (pred 63 / act 50).
 PER_BET_CAP = 0.015        # max bankroll fraction per bet once proven (was 3%)
 PROBE_COST_CENTS = 60      # max cost basis per bet while unproven
 GATE_MIN_N = 30            # settled current-era bets needed before scaling
@@ -48,7 +50,7 @@ MIN_PRICE, MAX_PRICE = 30, 85
 # bucket pred 39 vs act 28 = -11pts, while 50%+ buckets run UNDERconfident
 # +7/+8pts). We only bet when the blended model makes OUR side the favorite;
 # the shadow log still measures the retired band for free.
-MIN_PSIDE = float(os.environ.get("WX_MIN_PSIDE", "0.50"))
+MIN_PSIDE = float(os.environ.get("WX_MIN_PSIDE", "0.70"))
 # v8 salvage exit (Adam 7/20): shadow data shows cheap weather contracts are
 # OVERPRICED (mkt ~8c wins 1.5%, ~18c wins 8.6%) - so once a position is
 # marked at/below SALVAGE_C AND the re-forecasted model agrees it is dying,
@@ -72,6 +74,10 @@ WX_PYRAMID_MAX = int(os.environ.get("WX_PYRAMID_MAX", "2"))
 #  (b) a higher entry bar: model pside >= WX_BAND_MIN_PSIDE (vs 0.50 for ge/le)
 WX_BAND_STOP_C = int(os.environ.get("WX_BAND_STOP_C", "12"))
 WX_BAND_MIN_PSIDE = float(os.environ.get("WX_BAND_MIN_PSIDE", "0.60"))
+# 7/21: bands RETIRED from this book (drift owns bands, market as judge).
+# WX_BANDS=1 re-enables for experiments; the hard-stop above still protects
+# any legacy band positions until they clear.
+WX_BANDS = os.environ.get("WX_BANDS", "0") == "1"
 # v7: LOW-temp markets were 40/44 of v6 bets and carried all the losses
 # (act 20% vs pred 36.5%). Cap them to half the book allowance until the
 # shadow report proves lo-calibration.
@@ -306,11 +312,11 @@ class WeatherPaper:
             if price < MIN_PRICE or price > MAX_PRICE:
                 continue
             # direction check via Kelly; sizing depends on gate mode
+            if mk.get("kind", "ge") == "band" and not WX_BANDS:
+                continue          # v9: bands retired (model can't price them)
             p = fair if s == "yes" else (1 - fair)
             if p < MIN_PSIDE:
-                continue          # v8: sub-50% confidence measured -EV in 3 eras
-            if mk.get("kind", "ge") == "band" and p < WX_BAND_MIN_PSIDE:
-                continue          # 7/22: coin-flip bands were the loss center
+                continue          # v9: only the >=70%-conf bucket makes money
             b_odds = (100 - price) / price
             f_star = p - (1 - p) / b_odds
             if f_star <= 0:

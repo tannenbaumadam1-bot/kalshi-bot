@@ -16,7 +16,7 @@ def _fresh():
     return w
 
 
-def _edge(entry=35, fair=0.55, city="denver", strike=95, is_low=False, tk=None):
+def _edge(entry=35, fair=0.75, city="denver", strike=95, is_low=False, tk=None):
     mk = {"ticker": tk or "T-%s-%s" % (city, strike), "city": city,
           "is_low": is_low, "strike": strike, "yes_bid": entry,
           "yes_ask": entry + 6, "entry_price": entry, "maker": True,
@@ -49,10 +49,10 @@ def test_cooldown_blocks_reentry(monkeypatch):
 
 def test_min_price_30_rejects_cheap_entries(monkeypatch):
     w = _fresh()
-    monkeypatch.setattr(we, "scan", lambda **kw: [_edge(entry=20, fair=0.55, tk="T-cheap")])
+    monkeypatch.setattr(we, "scan", lambda **kw: [_edge(entry=20, fair=0.75, tk="T-cheap")])
     w.place()
     assert len(w.bets) == 0                       # 20c < MIN_PRICE 30 -> no bet
-    monkeypatch.setattr(we, "scan", lambda **kw: [_edge(entry=30, fair=0.55, tk="T-ok")])
+    monkeypatch.setattr(we, "scan", lambda **kw: [_edge(entry=30, fair=0.75, tk="T-ok")])
     w.place()
     assert len(w.bets) == 1
 
@@ -60,14 +60,14 @@ def test_min_price_30_rejects_cheap_entries(monkeypatch):
 def test_lo_market_book_cap(monkeypatch):
     w = _fresh()
     # bankroll 10000c -> lo allowance = 0.5 * 0.30 * 10000 = 1500c
-    los = [_edge(entry=50, fair=0.65, city="c%d" % i, strike=70, is_low=True,
+    los = [_edge(entry=50, fair=0.75, city="c%d" % i, strike=70, is_low=True,
                  tk="T-lo-%d" % i) for i in range(40)]
     monkeypatch.setattr(we, "scan", lambda **kw: los)
     w.place()
     lo_stake = sum(b["entry"] * b["count"] for b in w.bets.values() if b["hl"] == "lo")
     assert 0 < lo_stake <= wp.LO_BOOK_FRAC * wp.MAX_BOOK_FRAC * 10000
     # a HI bet must still be allowed after the lo cap binds
-    monkeypatch.setattr(we, "scan", lambda **kw: [_edge(entry=50, fair=0.65, tk="T-hi")])
+    monkeypatch.setattr(we, "scan", lambda **kw: [_edge(entry=50, fair=0.75, tk="T-hi")])
     w.place()
     assert "T-hi" in w.bets
 
@@ -89,14 +89,14 @@ def test_scale_mode_sizes_on_calibrated_prob(monkeypatch):
     # whose RAW Kelly is positive but CALIBRATED Kelly is negative gets skipped
     w = _fresh()
     monkeypatch.setattr(w, "_gate", lambda: ("scale", 30))
-    monkeypatch.setattr(w, "_calibrate", lambda p: p * 0.6)   # harsh empirical shrink
-    monkeypatch.setattr(we, "scan", lambda **kw: [_edge(entry=45, fair=0.60, tk="T-k")])
+    monkeypatch.setattr(w, "_calibrate", lambda p: p * 0.55)  # harsh empirical shrink
+    monkeypatch.setattr(we, "scan", lambda **kw: [_edge(entry=55, fair=0.72, tk="T-k")])
     w.place()
-    # raw f* = .60-.40/(55/45) = +0.27 ; calibrated p=.36 -> f* = .36-.64/1.222 < 0
+    # raw f* = .72-.28/(45/55) > 0 ; calibrated p=.396 -> f* = .396-.604/.818 < 0
     assert "T-k" not in w.bets
     # and a genuinely strong calibrated edge still gets sized > probe
     monkeypatch.setattr(w, "_calibrate", lambda p: p)
-    monkeypatch.setattr(we, "scan", lambda **kw: [_edge(entry=35, fair=0.60, tk="T-big")])
+    monkeypatch.setattr(we, "scan", lambda **kw: [_edge(entry=35, fair=0.75, tk="T-big")])
     w.place()
     assert "T-big" in w.bets
     b = w.bets["T-big"]
@@ -190,12 +190,12 @@ def test_quote_returns_tuple_on_success_and_failure(monkeypatch):
     assert w._quote("T-x") == (None, None)
 
 
-def test_min_pside_filter_blocks_sub50(monkeypatch):
-    # v8: sub-50% confidence retired (3 eras of -EV evidence)
+def test_min_pside_filter_blocks_below_70(monkeypatch):
+    # v9: only the >=70%-confidence bucket makes money (pred 81 / act 88)
     w = _fresh()
-    monkeypatch.setattr(we, "scan", lambda **kw: [_edge(entry=35, fair=0.45, tk="T-low")])
+    monkeypatch.setattr(we, "scan", lambda **kw: [_edge(entry=35, fair=0.65, tk="T-low")])
     w.place()
     assert len(w.bets) == 0
-    monkeypatch.setattr(we, "scan", lambda **kw: [_edge(entry=35, fair=0.55, tk="T-hi2")])
+    monkeypatch.setattr(we, "scan", lambda **kw: [_edge(entry=35, fair=0.75, tk="T-hi2")])
     w.place()
     assert len(w.bets) == 1

@@ -75,10 +75,13 @@ NICKEL_MIN_C = int(os.environ.get("DRIFT_NICKEL_MIN_C", "95"))   # side-mid trig
 NICKEL_MAX_ENTRY = int(os.environ.get("DRIFT_NICKEL_MAX_ENTRY", "96"))
 NICKEL_COUNT = int(os.environ.get("DRIFT_NICKEL_COUNT", "10"))   # Adam's size
 NICKEL_MAX_OPEN = int(os.environ.get("DRIFT_NICKEL_MAX_OPEN", "3"))
-PROBE_COST_CENTS = int(os.environ.get("DRIFT_PROBE_COST", "60"))
+# 7/21 Soros press-the-winner: 14/14 at settlement -> probe stakes 60c->150c
+# (median displayed depth at our entries measured $2.40, so fills stay honest)
+# and post-gate Kelly cap 1.5%->3% - the proven book gets the capital.
+PROBE_COST_CENTS = int(os.environ.get("DRIFT_PROBE_COST", "150"))
 GATE_MIN_N = 30
 GATE_MAX_GAP = 0.05
-PER_BET_CAP = 0.015
+PER_BET_CAP = float(os.environ.get("DRIFT_PER_BET_CAP", "0.03"))
 
 
 def now():
