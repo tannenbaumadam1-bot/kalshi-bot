@@ -72,10 +72,6 @@ try:
 except Exception:
     poly_paper = None
 try:
-    import sharp_ev
-except Exception:
-    sharp_ev = None
-try:
     import weather_live
 except Exception:
     weather_live = None
@@ -539,12 +535,6 @@ def main():
             pp_bot = poly_paper.PolyPaper()
         except Exception:
             pp_bot = None
-    sev_bot = None
-    if sharp_ev is not None:
-        try:
-            sev_bot = sharp_ev.SharpEV()
-        except Exception:
-            sev_bot = None
     wl_dry = None
     if weather_live is not None:
         try:
@@ -557,14 +547,15 @@ def main():
             drift_bot = drift_paper.DriftPaper()
         except Exception:
             drift_bot = None
-    # funding carry strategy removed 2026-07-18: purge its orphaned paper book
-    try:
-        _fs = os.path.join("logs", "funding_state.json")
-        if os.path.exists(_fs):
-            os.remove(_fs)
-            print("removed orphaned logs/funding_state.json (funding strategy retired)")
-    except Exception:
-        pass
+    # retired strategies (funding 7/18, sports/sharp 7/21): purge orphaned books
+    for _fs in ("funding_state.json", "sharpev_state.json", "sharpev_sim.json"):
+        try:
+            _fp = os.path.join("logs", _fs)
+            if os.path.exists(_fp):
+                os.remove(_fp)
+                print(f"removed orphaned logs/{_fs} (strategy retired)")
+        except Exception:
+            pass
     _serve_dashboard()
     if sim.load(SIM_PATH):
         print(f"Resumed previous session: ${sim.cash/100:.2f} cash, "
@@ -681,15 +672,6 @@ def main():
                     ws_ = wl_dry.save  # state written inside step()
                 except Exception as e:
                     print(f"  weather-live dry step skipped: {e}")
-            if sev_bot is not None and n % 20 == 1:
-                try:
-                    nc, npl = sev_bot.step()
-                    es = sev_bot.summary()
-                    if nc or npl or es["open_bets"]:
-                        print(f"  SHARP-EV(paper): {nc} cands, {npl} placed | bank ${es['cash']:.2f} | "
-                              f"{es['wins']}W/{es['losses']}L | open {es['open_bets']} | gate {es['gate']} {es['gate_n']}/30")
-                except Exception as e:
-                    print(f"  sharp-ev step skipped: {e}")
             if cycles == 0 or n < cycles:
                 time.sleep(cfg.engine.cycle_seconds)
     except KeyboardInterrupt:
