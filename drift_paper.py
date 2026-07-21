@@ -70,7 +70,9 @@ FADE_DROP_C = int(os.environ.get("DRIFT_FADE_DROP_C", "15"))
 # exists; gap losses are the known, accepted risk of this trade.
 NICKEL_ON = os.environ.get("DRIFT_NICKEL", "1") == "1"
 NICKEL_MIN_C = int(os.environ.get("DRIFT_NICKEL_MIN_C", "95"))   # side-mid trigger
-NICKEL_MAX_ENTRY = int(os.environ.get("DRIFT_NICKEL_MAX_ENTRY", "98"))
+# 7/21 Adam: 98c entries are pointless (win 2c / lose 98c = breakeven 98%).
+# Cap entries at 96c (win >= 4c/ct, breakeven ~96%) and pick CHEAPEST first.
+NICKEL_MAX_ENTRY = int(os.environ.get("DRIFT_NICKEL_MAX_ENTRY", "96"))
 NICKEL_COUNT = int(os.environ.get("DRIFT_NICKEL_COUNT", "10"))   # Adam's size
 NICKEL_MAX_OPEN = int(os.environ.get("DRIFT_NICKEL_MAX_OPEN", "3"))
 PROBE_COST_CENTS = int(os.environ.get("DRIFT_PROBE_COST", "60"))
@@ -330,8 +332,10 @@ class DriftPaper:
                     continue                # need a real bid with upside left
                 if ekey in nk_keys:
                     continue                # but only ONE nickel per event
-                cands.append(("nickel", smid, mk, side, entry, smid, prev,
-                              mid, ekey))
+                # score = payoff (100-entry): CHEAPEST entry ranks first -
+                # the old smid score picked the worst-payoff 98c fills first
+                cands.append(("nickel", 100.0 - entry, mk, side, entry, smid,
+                              prev, mid, ekey))
                 continue
             if ekey in ev_keys:
                 continue                    # one drift bet per weather event

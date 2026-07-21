@@ -439,6 +439,17 @@ def test_nickel_needs_upside_left(tmp_path, monkeypatch):
     b = _bot(tmp_path, monkeypatch)
     # 99c bid: nothing left to win after fees -> skip
     assert b.place(mkts=[_mk(bid=99, ask=100)]) == 0
+    # 98c entry: breakeven 98% - rejected since 7/21 (max entry 96c)
+    assert b.place(mkts=[_mk(tk="T98", bid=98, ask=99, city="boston")]) == 0
+
+
+def test_nickel_prefers_cheapest_entry(tmp_path, monkeypatch):
+    b = _bot(tmp_path, monkeypatch)
+    monkeypatch.setattr(dp, "NICKEL_MAX_OPEN", 1)
+    rich = _mk(tk="T-rich", bid=96, ask=98, city="boston")   # entry 96, win 4c
+    cheap = _mk(tk="T-cheap", bid=94, ask=96, city="denver") # entry 94, win 6c
+    assert b.place(mkts=[rich, cheap]) == 1
+    assert "T-cheap" in b.bets and "T-rich" not in b.bets
 
 
 def test_nickel_concurrent_cap(tmp_path, monkeypatch):
