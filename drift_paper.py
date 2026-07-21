@@ -292,7 +292,9 @@ class DriftPaper:
         mode, _n = self._gate()
         budget = DRIFT_MAX_PER_DAY - self._placed_today()
         ev_keys = {(b["city"], b.get("date", ""), b["hl"])
-                   for b in self.bets.values()}
+                   for b in self.bets.values() if b.get("trig") != "nickel"}
+        nk_keys = {(b["city"], b.get("date", ""), b["hl"])
+                   for b in self.bets.values() if b.get("trig") == "nickel"}
         new_mid, new_vol, cands = {}, {}, []
         today_iso = datetime.date.today().isoformat()
         for mk in mkts:
@@ -311,8 +313,6 @@ class DriftPaper:
                 continue
             ekey = (mk["city"], mk.get("date", ""),
                     "lo" if mk["is_low"] else "hi")
-            if ekey in ev_keys:
-                continue                    # one drift bet per weather event
             if mid >= DRIFT_MIN_C:
                 side, entry, smid = "yes", bid, mid
                 climb_c = (mid - prev) if prev is not None else None
@@ -322,13 +322,19 @@ class DriftPaper:
             else:
                 continue
             climbing = climb_c is not None and climb_c >= DRIFT_UP_C
-            # NICKEL zone first: >=95c mid -> 10-contract certainty harvest
+            # NICKEL zone first: >=95c mid -> 10-contract certainty harvest.
+            # Nickels use their OWN event ledger: a regular drift bet in the
+            # same event does NOT block them (own experiment, own caps).
             if NICKEL_ON and smid >= NICKEL_MIN_C:
                 if entry < 93 or entry > NICKEL_MAX_ENTRY:
                     continue                # need a real bid with upside left
+                if ekey in nk_keys:
+                    continue                # but only ONE nickel per event
                 cands.append(("nickel", smid, mk, side, entry, smid, prev,
                               mid, ekey))
                 continue
+            if ekey in ev_keys:
+                continue                    # one drift bet per weather event
             # >=80c: level alone is the proven signal; 65-80c: climb required,
             # and the climb must be REAL (same-day info + actual trading)
             if smid >= DRIFT_LEVEL_C:
@@ -353,7 +359,7 @@ class DriftPaper:
             # drift daily budget (49 hot markets once starved them entirely)
             if trig != "nickel" and placed >= budget:
                 continue
-            if ekey in ev_keys:
+            if ekey in (nk_keys if trig == "nickel" else ev_keys):
                 continue
             tk = mk["ticker"]
             pside = smid / 100.0            # market's own prob = our prediction
@@ -386,7 +392,7 @@ class DriftPaper:
                              "era": ERA, "trig": trig,
                              "peak": smid, "adds": 0,
                              "from_mid": prev, "at_mid": mid}
-            ev_keys.add(ekey)
+            (nk_keys if trig == "nickel" else ev_keys).add(ekey)
             self.placed += 1
             placed += 1
             self._log([now(), "OPEN", tk, mk["city"], mk["strike"],
