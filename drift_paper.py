@@ -74,7 +74,16 @@ NICKEL_MIN_C = int(os.environ.get("DRIFT_NICKEL_MIN_C", "95"))   # side-mid trig
 # Cap entries at 96c (win >= 4c/ct, breakeven ~96%) and pick CHEAPEST first.
 NICKEL_MAX_ENTRY = int(os.environ.get("DRIFT_NICKEL_MAX_ENTRY", "96"))
 NICKEL_COUNT = int(os.environ.get("DRIFT_NICKEL_COUNT", "10"))   # Adam's size
-NICKEL_MAX_OPEN = int(os.environ.get("DRIFT_NICKEL_MAX_OPEN", "3"))
+# 7/22 Adam press-the-nickel: lanes 3->5 now (breadth = independent city-days,
+# each loss still capped ~$9.60), and size steps up ON PROOF - the 3 settled
+# wins so far are all old 98c entries, so the <=96c era must earn its own
+# scale: 10ct base -> 15ct after 10 settled <=96c nickels net-positive ->
+# 20ct after 20. Auto, no redeploy needed.
+NICKEL_MAX_OPEN = int(os.environ.get("DRIFT_NICKEL_MAX_OPEN", "5"))
+NICKEL_STEP1_N = int(os.environ.get("DRIFT_NICKEL_STEP1_N", "10"))
+NICKEL_STEP1_CT = int(os.environ.get("DRIFT_NICKEL_STEP1_CT", "15"))
+NICKEL_STEP2_N = int(os.environ.get("DRIFT_NICKEL_STEP2_N", "20"))
+NICKEL_STEP2_CT = int(os.environ.get("DRIFT_NICKEL_STEP2_CT", "20"))
 # 7/21 Soros press-the-winner: 14/14 at settlement -> probe stakes 60c->150c
 # (median displayed depth at our entries measured $2.40, so fills stay honest)
 # and post-gate Kelly cap 1.5%->3% - the proven book gets the capital.
@@ -172,6 +181,20 @@ class DriftPaper:
             return "scale", n
         return "probe", n
 
+    def _nickel_count(self):
+        """Contracts per nickel: base 10, steps to 15/20 as the <=96c-entry
+        era proves itself (settled n and positive net; 98c grandfathers
+        excluded - they never had the payoff to justify scale)."""
+        rows = [h for h in self.history
+                if h.get("trig") == "nickel" and h.get("outcome") in (0, 1)
+                and (h.get("entry") or 99) <= NICKEL_MAX_ENTRY]
+        net = sum(h.get("pnl", 0) for h in rows)
+        if len(rows) >= NICKEL_STEP2_N and net > 0:
+            return NICKEL_STEP2_CT
+        if len(rows) >= NICKEL_STEP1_N and net > 0:
+            return NICKEL_STEP1_CT
+        return NICKEL_COUNT
+
     def _nickel_stats(self):
         rows = [h for h in self.history if h.get("trig") == "nickel"]
         settled = [h for h in rows if h.get("outcome") in (0, 1)]
@@ -179,7 +202,8 @@ class DriftPaper:
                             if b.get("trig") == "nickel"),
                 "n": len(settled),
                 "wins": sum(1 for h in settled if h["outcome"] == 1),
-                "net": round(sum(h.get("pnl", 0) for h in rows), 2)}
+                "net": round(sum(h.get("pnl", 0) for h in rows), 2),
+                "size": self._nickel_count(), "max_open": NICKEL_MAX_OPEN}
 
     def _placed_today(self):
         today = datetime.date.today().isoformat()
@@ -374,7 +398,7 @@ class DriftPaper:
                 if sum(1 for b in self.bets.values()
                        if b.get("trig") == "nickel") >= NICKEL_MAX_OPEN:
                     continue
-                size = NICKEL_COUNT
+                size = self._nickel_count()
             elif mode == "probe":
                 size = max(1, PROBE_COST_CENTS // entry)
             else:

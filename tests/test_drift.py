@@ -486,3 +486,27 @@ def test_weather_bands_retired(monkeypatch):
     w.placed = 0
     w.place()
     assert len(w.bets) == 0            # band candidate skipped even at 85% conf
+
+
+# ---- nickel scale-on-proof (Adam 7/22: press the nickel winner) ----
+
+def test_nickel_size_steps_up_on_proof(tmp_path, monkeypatch):
+    b = _bot(tmp_path, monkeypatch)
+    assert b._nickel_count() == dp.NICKEL_COUNT          # base 10
+    # 3 grandfathered 98c wins do NOT scale it (entry > 96c cap)
+    b.history = [{"trig": "nickel", "outcome": 1, "pnl": 0.19, "entry": 98}] * 10
+    assert b._nickel_count() == dp.NICKEL_COUNT
+    # 10 settled <=96c nickels, net positive -> 15ct
+    b.history = [{"trig": "nickel", "outcome": 1, "pnl": 0.5, "entry": 94}] * 10
+    assert b._nickel_count() == dp.NICKEL_STEP1_CT
+    # 20 -> 20ct
+    b.history *= 2
+    assert b._nickel_count() == dp.NICKEL_STEP2_CT
+    # net NEGATIVE at any n -> back to base (proof revoked)
+    b.history = ([{"trig": "nickel", "outcome": 1, "pnl": 0.4, "entry": 94}] * 15
+                 + [{"trig": "nickel", "outcome": 0, "pnl": -9.4, "entry": 94}])
+    assert b._nickel_count() == dp.NICKEL_COUNT
+
+
+def test_nickel_lanes_widened_to_five(tmp_path, monkeypatch):
+    assert dp.NICKEL_MAX_OPEN == 5
