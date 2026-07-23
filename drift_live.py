@@ -272,7 +272,8 @@ class DriftLive:
                 fills_by_oid = {}
                 for f in self.client.get_fills(limit=100):
                     fo = f.get("order_id")
-                    fills_by_oid[fo] = fills_by_oid.get(fo, 0) + int(f.get("count", 0))
+                    fc = int(round(float(f.get("count_fp") or f.get("count") or 0)))
+                    fills_by_oid[fo] = fills_by_oid.get(fo, 0) + fc
             except Exception:
                 fills_by_oid = None         # fills unknown this cycle
         nowdt = datetime.datetime.now()
@@ -348,13 +349,24 @@ class DriftLive:
             mps = self.client.get_positions()
         except Exception:
             return 0
+        def _num(p, fp_key, int_key, dollars=False):
+            """Kalshi runs two schemas: new '*_fp'/'*_dollars' STRING floats
+            (live 7/23) and old integer fields. Read either."""
+            v = p.get(fp_key)
+            if v is None:
+                v = p.get(int_key)
+                if v is None:
+                    return 0.0
+                return float(v) / (100.0 if dollars else 1.0)
+            return float(v)
+
         by_tk = {}
         for p in mps:
             if p.get("ticker"):
                 by_tk[p["ticker"]] = p
         changed = 0
         for tk, p in by_tk.items():
-            pos = int(p.get("position", 0) or 0)
+            pos = int(round(_num(p, "position_fp", "position")))
             if pos == 0:
                 continue
             side = "yes" if pos > 0 else "no"
@@ -362,16 +374,18 @@ class DriftLive:
             b = self.bets.get(tk)
             if b is not None and b.get("side") == side and int(b.get("count", 0)) == cnt:
                 continue
-            exposure = abs(int(p.get("market_exposure", 0) or 0))
+            exposure_c = abs(_num(p, "market_exposure_dollars",
+                                  "market_exposure", dollars=True)) * 100.0
             entry = (b or {}).get("entry")
-            if exposure and cnt:
-                entry = max(1, min(99, int(round(exposure / cnt))))
+            if exposure_c and cnt:
+                entry = max(1, min(99, int(round(exposure_c / cnt))))
             if not entry:
                 entry = 50
             meta = self._tk_meta(tk)
             keep = b or {}
+            fee_c = _num(p, "fees_paid_dollars", "fees_paid", dollars=True) * 100.0
             self.bets[tk] = {"side": side, "entry": entry, "count": cnt,
-                             "fee": int(p.get("fees_paid", 0) or 0),
+                             "fee": int(round(fee_c)),
                              "pside": round(entry / 100.0, 3), **meta,
                              "trig": keep.get("trig", "adopt"),
                              "peak": float(keep.get("peak", entry)),
@@ -382,7 +396,7 @@ class DriftLive:
             changed += 1
         for tk in list(self.bets):
             p = by_tk.get(tk)
-            if p is None or int(p.get("position", 0) or 0) == 0:
+            if p is None or int(round(_num(p, "position_fp", "position"))) == 0:
                 # flat on the exchange but open in our book: settled markets
                 # are handled by settle() (which runs right after and books
                 # the P&L properly); anything else was closed outside us
