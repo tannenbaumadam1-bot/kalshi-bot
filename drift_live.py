@@ -235,19 +235,42 @@ class DriftLive:
         """Promote fills (INCLUDING partial fills on still-resting orders -
         learned live 7/23: balance dropped $6+ at '0 filled' because Kalshi
         fills resting makers incrementally), cancel stale orders, and never
-        lose the filled portion of a canceled order."""
+        lose the filled portion of a canceled order. Also HEALS order-ids:
+        if our stored oid doesn't match the resting book but an order for
+        the same ticker is resting, adopt its real order_id (learned live
+        7/23: a create-order response parse fallback left synthetic ids ->
+        every order looked canceled one cycle later while the real orders
+        kept resting and filling unmanaged)."""
         if not self.pending:
             return
         resting_ids = set()
+        resting_by_tk = {}
         fills_by_oid = None
         if self.client is not None:
             try:
-                resting_ids = {o.get("order_id") for o in self.client.get_resting_orders()}
+                for ro in self.client.get_resting_orders():
+                    roid = ro.get("order_id") or ro.get("id")
+                    resting_ids.add(roid)
+                    resting_by_tk.setdefault(ro.get("ticker"), []).append(roid)
             except Exception:
                 return                      # can't verify -> touch nothing
+            # heal synthetic/mismatched oids by ticker before lifecycle checks
+            owned = {oid for oid in self.pending}
+            for oid, o in list(self.pending.items()):
+                if oid in resting_ids:
+                    continue
+                for cand in resting_by_tk.get(o["ticker"], []):
+                    if cand and cand not in owned:
+                        self.pending[cand] = self.pending.pop(oid)
+                        owned.add(cand)
+                        self._log([now(), "HEAL-OID", self.mode, o["city"],
+                                   o["strike"], o["hl"], o["side"],
+                                   round(o["pside"], 3), o["entry"],
+                                   o["count"], "", "", f"{oid}->{cand}"])
+                        break
             try:
                 fills_by_oid = {}
-                for f in self.client.get_fills(limit=200):
+                for f in self.client.get_fills(limit=100):
                     fo = f.get("order_id")
                     fills_by_oid[fo] = fills_by_oid.get(fo, 0) + int(f.get("count", 0))
             except Exception:
@@ -290,6 +313,90 @@ class DriftLive:
                            o["hl"], o["side"], round(o["pside"], 3),
                            o["entry"], o["count"], "", "", oid])
                 del self.pending[oid]
+
+    # ---- position reconciliation: Kalshi is the source of truth ----
+    def _tk_meta(self, tk):
+        """Best-effort market meta from a weather ticker (display only -
+        stops/settles need side/entry/count, not meta)."""
+        city, is_low = we.SERIES.get(tk.split("-")[0], ("?", False))
+        strike, kind, cap = 0, "ge", None
+        try:
+            seg = tk.rsplit("-", 1)[1]
+            if seg.startswith("B"):
+                v = float(seg[1:])
+                strike, kind, cap = int(v), "band", int(v) + 1
+            elif seg.startswith("T"):
+                strike = int(float(seg[1:]))
+        except Exception:
+            pass
+        try:
+            date = we.ticker_date(tk) or ""
+        except Exception:
+            date = ""
+        return {"city": city, "strike": strike, "kind": kind, "cap": cap,
+                "hl": "lo" if is_low else "hi", "date": date}
+
+    def reconcile_positions(self):
+        """Every cycle: adopt any position Kalshi reports that our book
+        doesn't hold (orphans from missed fills - live 7/23: ~$31 of real
+        fills were invisible and unprotected), sync mismatched counts, and
+        drop book entries Kalshi says are flat. The exchange's portfolio is
+        the ledger of record; ours is a cache."""
+        if self.client is None:
+            return 0
+        try:
+            mps = self.client.get_positions()
+        except Exception:
+            return 0
+        by_tk = {}
+        for p in mps:
+            if p.get("ticker"):
+                by_tk[p["ticker"]] = p
+        changed = 0
+        for tk, p in by_tk.items():
+            pos = int(p.get("position", 0) or 0)
+            if pos == 0:
+                continue
+            side = "yes" if pos > 0 else "no"
+            cnt = abs(pos)
+            b = self.bets.get(tk)
+            if b is not None and b.get("side") == side and int(b.get("count", 0)) == cnt:
+                continue
+            exposure = abs(int(p.get("market_exposure", 0) or 0))
+            entry = (b or {}).get("entry")
+            if exposure and cnt:
+                entry = max(1, min(99, int(round(exposure / cnt))))
+            if not entry:
+                entry = 50
+            meta = self._tk_meta(tk)
+            keep = b or {}
+            self.bets[tk] = {"side": side, "entry": entry, "count": cnt,
+                             "fee": int(p.get("fees_paid", 0) or 0),
+                             "pside": round(entry / 100.0, 3), **meta,
+                             "trig": keep.get("trig", "adopt"),
+                             "peak": float(keep.get("peak", entry)),
+                             "ots": keep.get("ots", now()), "era": ERA}
+            self._log([now(), "ADOPT", self.mode, meta["city"], meta["strike"],
+                       meta["hl"], side, round(entry / 100.0, 3), entry, cnt,
+                       "", "", ""])
+            changed += 1
+        for tk in list(self.bets):
+            p = by_tk.get(tk)
+            if p is None or int(p.get("position", 0) or 0) == 0:
+                # flat on the exchange but open in our book: settled markets
+                # are handled by settle() (which runs right after and books
+                # the P&L properly); anything else was closed outside us
+                res = fetch_result(tk)
+                if res is None:
+                    self._log([now(), "DESYNC-DROP", self.mode,
+                               self.bets[tk].get("city", ""),
+                               self.bets[tk].get("strike", ""),
+                               self.bets[tk].get("hl", ""),
+                               self.bets[tk].get("side", ""), "", "", "",
+                               "", "", tk])
+                    del self.bets[tk]
+                    changed += 1
+        return changed
 
     # ---- settle ----
     def settle(self):
@@ -485,8 +592,9 @@ class DriftLive:
                 try:
                     resp = self.client.create_order(tk, action="buy", side=side,
                                                     count=size, price_cents=entry)
-                    oid = ((resp.get("order") or {}).get("order_id")
-                           or resp.get("order_id") or oid)
+                    ro = resp.get("order") or {}
+                    oid = (ro.get("order_id") or ro.get("id")
+                           or resp.get("order_id") or resp.get("id") or oid)
                 except Exception as e:
                     print(f"  order failed {tk}: {e}")
                     continue
@@ -571,8 +679,9 @@ class DriftLive:
             try:
                 resp = self.client.create_order(tk, action="buy", side=b["side"],
                                                 count=size, price_cents=entry_add)
-                oid = ((resp.get("order") or {}).get("order_id")
-                       or resp.get("order_id") or oid)
+                ro = resp.get("order") or {}
+                oid = (ro.get("order_id") or ro.get("id")
+                       or resp.get("order_id") or resp.get("id") or oid)
             except Exception:
                 return False
         if self.client is None:
@@ -591,6 +700,7 @@ class DriftLive:
     def step(self):
         self._roll_day()
         self.check_orders()
+        self.reconcile_positions()   # exchange = source of truth
         self.settle()
         self.stop_check()
         self.place()
