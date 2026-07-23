@@ -212,47 +212,68 @@ class DriftLive:
             return self.dry_balance_c
         return self.client.get_balance_cents()
 
-    # ---- resting order lifecycle (identical to weather_live) ----
+    # ---- resting order lifecycle ----
+    def _promote_fill(self, oid, o, filled):
+        """Fold `filled` contracts of a (possibly partial) fill into the book."""
+        tk = o["ticker"]
+        fee = fee_cents(o["entry"], filled, taker=False)
+        self.fees_c += fee
+        if tk in self.bets:
+            self._merge_fill(tk, o["entry"], filled, fee)
+        else:
+            self.bets[tk] = {**{k: o[k] for k in
+                                ("side", "entry", "city", "strike",
+                                 "kind", "cap", "hl", "pside", "date",
+                                 "trig", "peak")},
+                             "count": filled, "fee": fee, "oid": oid,
+                             "ots": o.get("ots", now()), "era": ERA}
+        self._log([now(), "FILL", self.mode, o["city"], o["strike"],
+                   o["hl"], o["side"], round(o["pside"], 3),
+                   o["entry"], filled, "", "", oid])
+
     def check_orders(self):
-        """Promote filled resting orders to positions; cancel stale ones."""
+        """Promote fills (INCLUDING partial fills on still-resting orders -
+        learned live 7/23: balance dropped $6+ at '0 filled' because Kalshi
+        fills resting makers incrementally), cancel stale orders, and never
+        lose the filled portion of a canceled order."""
         if not self.pending:
             return
         resting_ids = set()
+        fills_by_oid = None
         if self.client is not None:
             try:
                 resting_ids = {o.get("order_id") for o in self.client.get_resting_orders()}
             except Exception:
                 return                      # can't verify -> touch nothing
+            try:
+                fills_by_oid = {}
+                for f in self.client.get_fills(limit=200):
+                    fo = f.get("order_id")
+                    fills_by_oid[fo] = fills_by_oid.get(fo, 0) + int(f.get("count", 0))
+            except Exception:
+                fills_by_oid = None         # fills unknown this cycle
         nowdt = datetime.datetime.now()
         for oid, o in list(self.pending.items()):
-            tk = o["ticker"]
+            seen = int(o.get("filled_seen", 0))
             if self.client is not None and oid not in resting_ids:
-                filled = 0
-                try:
-                    for f in self.client.get_fills(limit=100):
-                        if f.get("order_id") == oid:
-                            filled += int(f.get("count", 0))
-                except Exception:
-                    filled = o["count"]     # assume full fill; settle() reconciles
-                if filled > 0:
-                    fee = fee_cents(o["entry"], filled, taker=False)
-                    self.fees_c += fee
-                    if tk in self.bets and o.get("is_add"):
-                        self._merge_fill(tk, o["entry"], filled, fee)
-                    else:
-                        self.bets[tk] = {**{k: o[k] for k in
-                                            ("side", "entry", "city", "strike",
-                                             "kind", "cap", "hl", "pside", "date",
-                                             "trig", "peak")},
-                                         "count": filled, "fee": fee, "oid": oid,
-                                         "ots": o.get("ots", now()), "era": ERA}
-                    self._log([now(), "FILL", self.mode, o["city"], o["strike"],
-                               o["hl"], o["side"], round(o["pside"], 3),
-                               o["entry"], filled, "", "", oid])
+                # gone from the resting book: filled and/or canceled
+                if fills_by_oid is not None:
+                    filled = max(0, fills_by_oid.get(oid, 0) - seen)
                 else:
+                    filled = max(0, o["count"] - seen)  # assume rest filled
+                if filled > 0:
+                    self._promote_fill(oid, o, filled)
+                if filled == 0 and seen == 0:
                     self.canceled += 1
                 del self.pending[oid]
                 continue
+            # still resting: promote any PARTIAL fills so stops/settles
+            # protect those contracts immediately
+            if self.client is not None and fills_by_oid is not None:
+                new = max(0, fills_by_oid.get(oid, 0) - seen)
+                if new > 0:
+                    self._promote_fill(oid, o, new)
+                    o["filled_seen"] = seen + new
             try:
                 age_h = (nowdt - datetime.datetime.fromisoformat(o["ots"])).total_seconds() / 3600
             except Exception:
@@ -263,7 +284,8 @@ class DriftLive:
                         self.client.cancel_order(oid)
                     except Exception:
                         continue
-                self.canceled += 1
+                if int(o.get("filled_seen", 0)) == 0:
+                    self.canceled += 1
                 self._log([now(), "CANCEL", self.mode, o["city"], o["strike"],
                            o["hl"], o["side"], round(o["pside"], 3),
                            o["entry"], o["count"], "", "", oid])
