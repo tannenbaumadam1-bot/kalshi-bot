@@ -45,11 +45,61 @@ def test_level_entry_dry_fills(tmp_path, monkeypatch):
     assert b.dry_balance_c < 10000
 
 
-def test_no_nickel_lane_in_live(tmp_path, monkeypatch):
+def test_nickel_lane_places_and_skips_gate(tmp_path, monkeypatch):
     b = _bot(tmp_path, monkeypatch)
-    # side-mid 96 (nickel zone in paper) -> live v1 skips entirely
-    assert b.place(mkts=[_mk(bid=95, ask=97)]) == 0
-    assert not b.bets
+    # side-mid 96, entry 95c bid in 93..96 -> 10-contract nickel, own lane
+    assert b.place(mkts=[_mk(bid=95, ask=97)]) == 1
+    bet = next(iter(b.bets.values()))
+    assert bet["trig"] == "nickel" and bet["count"] == 10 and bet["entry"] == 95
+    # nickel outcomes never count toward the drift gate
+    b.history = [{"outcome": 1, "pnl": 0.05, "pside": 0.95, "trig": "nickel"}
+                 for _ in range(30)]
+    assert b._gate() == ("probe", 0)
+
+
+def test_nickel_entry_band_and_lanes(tmp_path, monkeypatch):
+    b = _bot(tmp_path, monkeypatch)
+    # 97c entry: above NICKEL_MAX_ENTRY -> no payoff left, skip
+    assert b.place(mkts=[_mk(bid=97, ask=99)]) == 0
+    # lane cap: 5 concurrent nickels max
+    ms = [_mk(tk=f"KXHIGHNY-26JUL-N{i}", bid=95, ask=97, city=f"c{i}",
+              strike=i) for i in range(7)]
+    b2 = _bot(tmp_path, monkeypatch)
+    b2.max_open_c = 100000
+    b2.dry_balance_c = 100000
+    b2.place(mkts=ms)
+    assert sum(1 for x in b2.bets.values() if x["trig"] == "nickel") == 5
+
+
+def test_nickel_size_steps_on_proof(tmp_path, monkeypatch):
+    b = _bot(tmp_path, monkeypatch)
+    assert b._nickel_count() == 10
+    b.history = [{"trig": "nickel", "outcome": 1, "pnl": 0.05, "entry": 95}
+                 for _ in range(10)]
+    assert b._nickel_count() == 15
+    b.history *= 2
+    assert b._nickel_count() == 20
+    # 98c grandfathers never count toward proof
+    b.history = [{"trig": "nickel", "outcome": 1, "pnl": 0.02, "entry": 98}
+                 for _ in range(20)]
+    assert b._nickel_count() == 10
+
+
+def test_pyramid_add_on_runner(tmp_path, monkeypatch):
+    b3 = _bot(tmp_path, monkeypatch)
+    b3.place(mkts=[_mk(bid=80, ask=83)])         # level entry at 80
+    tk3 = next(iter(b3.bets))
+    b3.place(mkts=[_mk(bid=90, ask=92)])         # smid 91 >= 80+10 -> add at 90
+    assert b3.bets[tk3]["count"] == 2 and b3.bets[tk3]["adds"] == 1
+    b3.place(mkts=[_mk(bid=90, ask=92)])
+    b3.place(mkts=[_mk(bid=90, ask=92)])
+    assert b3.bets[tk3]["adds"] <= 2             # capped at PYRAMID_MAX
+    # nickels never pyramid
+    b4 = _bot(tmp_path, monkeypatch)
+    b4.place(mkts=[_mk(bid=95, ask=97)])
+    tk4 = next(iter(b4.bets))
+    b4.place(mkts=[_mk(bid=96, ask=98)])
+    assert not b4.bets[tk4].get("adds")
 
 
 def test_climb_needs_confirmation(tmp_path, monkeypatch):

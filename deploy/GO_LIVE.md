@@ -63,9 +63,15 @@ The drift book is the FIRST to pass its calibration gate (53-0 at settlement,
 era drift1). `drift_live.py` runs the same brain with real orders: level
 entries >=80c at maker, vol-confirmed same-day climbs, momentum stop <50c,
 trailing exit 15c, probe stakes until the LIVE book passes its OWN 30-bet
-gate (era dlive1). NOT in live v1: nickel lane, pyramiding (post-gate
-upgrades). Caps come from the same config_live.yaml: $2/bet, $15 open,
-$3 daily-loss halt, $2 reserve. Unfilled maker joins cancel after 2h.
+gate (era dlive1), PLUS the full paper extras per Adam 7/23: the nickel lane
+(>=95c mid, entry 93-96c, 5 lanes, 10ct stepping to 15/20 on <=96c proof,
+excluded from the gate) and pyramiding (+10c runners, max 2 adds).
+
+Caps come from config_live.yaml `risk_drift` (defaults sized to the paper
+book): $2/bet regular, nickels exempt up to their own size (~$9.60), $60
+open, $12 daily-loss halt (one nickel gap loss survives, a second halts the
+day), $2 reserve. Unfilled maker joins cancel after 2h. NOTE: a nickel gap
+loss is ~-$9.50 on a $100 bankroll - known, priced-in design.
 
 It is deployed SAFE by default: runs DRY inside the paper loop (badge on the
 dashboard header, prefix DRIFT) until armed.
@@ -101,8 +107,8 @@ Built-in halts: $3 daily loss -> no new bets until midnight; $2 balance
 reserve; resting orders auto-cancel after 2h unfilled.
 
 ## Judgment period
-Live probe stakes (<= $1.50-2/bet) until era dlive1 passes its own 30-bet
-gate. Compare on the dashboard: live fill rate + expectancy vs the paper
+Live probe stakes (<= $1.50-2/bet; nickels at their own size) until era
+dlive1 passes its own 30-bet gate. Compare on the dashboard: live fill rate + expectancy vs the paper
 book's optimistic instant fills over the same dates. Auto-revert rule: daily
 halt trips twice in a week, or live expectancy clearly negative vs paper ->
 stop the service, back to paper.

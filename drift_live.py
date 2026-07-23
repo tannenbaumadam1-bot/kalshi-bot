@@ -2,14 +2,20 @@
 """Drift momentum LIVE executor - same brain as drift_paper, real orders.
 
 The drift book is the first to pass its calibration gate (53-0 at settlement,
-era drift1) and Adam ordered live prep 2026-07-23. This executor mirrors the
-paper discipline exactly: maker-only entries (join the side bid), level
-trigger >=80c / climb trigger 65-80c (+2c on rising volume, same-day only),
-momentum stop <50c, trailing exit 15c off peak, one bet per city-day event,
+era drift1) and Adam ordered live prep 2026-07-23. Per Adam ("the bot exactly
+as it is paper trading but for real") this executor mirrors the FULL paper
+book: maker-only entries (join the side bid), level trigger >=80c / climb
+trigger 65-80c (+2c on rising volume, same-day only), momentum stop <50c,
+trailing exit 15c off peak, one bet per city-day event, NICKEL lane (>=95c
+mid, entry 93-96c, 5 lanes, own event ledger, size steps 10->15->20 on <=96c
+proof, EXCLUDED from the gate), PYRAMIDING (adds on +10c runners, max 2),
 probe stakes until the LIVE book passes its OWN 30-bet gate (era "dlive1").
 
-Deliberately NOT in live v1 (post-gate upgrades, keep the first real dollars
-simple): nickel lane (gap risk), pyramiding.
+Risk caps come from config_live.yaml `risk_drift` (falling back to defaults
+sized to the paper book, NOT the weather caps - a nickel is ~$9.40/bet):
+  max_position_dollars 2 (regular bets) / nickels exempt up to their own size
+  max_open_dollars 60 / max_daily_loss_dollars 12 (one nickel gap loss
+  survives, a second halts the day) / min_cash_reserve_dollars 2.
 
 MODES (same safety ladder as weather_live):
   DRY   - full pipeline, logs every would-be order, sends NOTHING. Default.
@@ -72,10 +78,10 @@ class DriftLive:
             cfg = yaml.safe_load(open(CONFIG)) or {}
         except Exception:
             pass
-        r = cfg.get("risk", {}) if isinstance(cfg, dict) else {}
+        r = (cfg.get("risk_drift") or {}) if isinstance(cfg, dict) else {}
         self.max_bet_c = int(float(r.get("max_position_dollars", 2.0)) * 100)
-        self.max_open_c = int(float(r.get("max_open_dollars", 15.0)) * 100)
-        self.max_day_loss_c = int(float(r.get("max_daily_loss_dollars", 3.0)) * 100)
+        self.max_open_c = int(float(r.get("max_open_dollars", 60.0)) * 100)
+        self.max_day_loss_c = int(float(r.get("max_daily_loss_dollars", 12.0)) * 100)
         self.reserve_c = int(float(r.get("min_cash_reserve_dollars", 2.0)) * 100)
         self.client = client
         self.mode = mode
@@ -124,6 +130,7 @@ class DriftLive:
              "placed": self.placed, "canceled": self.canceled,
              "day": self.day, "day_pnl_c": self.day_pnl_c,
              "dry_balance_c": self.dry_balance_c,
+             "nickel": self._nickel_stats(),
              "history": self.history[-200:],
              "summary": {
                  "mode": self.mode,
@@ -149,9 +156,11 @@ class DriftLive:
                             "outcome", "pnl_$", "order_id"])
             w.writerow(row)
 
-    # ---- shared gate math (same contract as every book) ----
+    # ---- shared gate math (same contract as the paper book: nickels are
+    # their own experiment and never count toward the drift gate) ----
     def _gate(self):
-        cur = [h for h in self.history if h.get("outcome") in (0, 1)][-60:]
+        cur = [h for h in self.history if h.get("outcome") in (0, 1)
+               and h.get("trig") != "nickel"][-60:]
         n = len(cur)
         if n < GATE_MIN_N:
             return "probe", n
@@ -161,6 +170,30 @@ class DriftLive:
         if expectancy > 0 and (pred - act) <= GATE_MAX_GAP:
             return "scale", n
         return "probe", n
+
+    def _nickel_count(self):
+        """Contracts per nickel: base 10, steps to 15/20 as the <=96c-entry
+        era proves itself on the LIVE ledger (same rule as paper)."""
+        rows = [h for h in self.history
+                if h.get("trig") == "nickel" and h.get("outcome") in (0, 1)
+                and (h.get("entry") or 99) <= dp.NICKEL_MAX_ENTRY]
+        net = sum(h.get("pnl", 0) for h in rows)
+        if len(rows) >= dp.NICKEL_STEP2_N and net > 0:
+            return dp.NICKEL_STEP2_CT
+        if len(rows) >= dp.NICKEL_STEP1_N and net > 0:
+            return dp.NICKEL_STEP1_CT
+        return dp.NICKEL_COUNT
+
+    def _nickel_stats(self):
+        rows = [h for h in self.history if h.get("trig") == "nickel"]
+        settled = [h for h in rows if h.get("outcome") in (0, 1)]
+        nk_open = sum(1 for b in list(self.bets.values())
+                      + list(self.pending.values())
+                      if b.get("trig") == "nickel")
+        return {"open": nk_open, "n": len(settled),
+                "wins": sum(1 for h in settled if h["outcome"] == 1),
+                "net": round(sum(h.get("pnl", 0) for h in rows), 2),
+                "size": self._nickel_count(), "max_open": dp.NICKEL_MAX_OPEN}
 
     def _roll_day(self):
         if today() != self.day:
@@ -204,12 +237,15 @@ class DriftLive:
                 if filled > 0:
                     fee = fee_cents(o["entry"], filled, taker=False)
                     self.fees_c += fee
-                    self.bets[tk] = {**{k: o[k] for k in
-                                        ("side", "entry", "city", "strike",
-                                         "kind", "cap", "hl", "pside", "date",
-                                         "trig", "peak")},
-                                     "count": filled, "fee": fee, "oid": oid,
-                                     "ots": o.get("ots", now()), "era": ERA}
+                    if tk in self.bets and o.get("is_add"):
+                        self._merge_fill(tk, o["entry"], filled, fee)
+                    else:
+                        self.bets[tk] = {**{k: o[k] for k in
+                                            ("side", "entry", "city", "strike",
+                                             "kind", "cap", "hl", "pside", "date",
+                                             "trig", "peak")},
+                                         "count": filled, "fee": fee, "oid": oid,
+                                         "ots": o.get("ots", now()), "era": ERA}
                     self._log([now(), "FILL", self.mode, o["city"], o["strike"],
                                o["hl"], o["side"], round(o["pside"], 3),
                                o["entry"], filled, "", "", oid])
@@ -332,9 +368,10 @@ class DriftLive:
             except Exception:
                 return 0
         gate_mode, _n = self._gate()
-        ev_keys = set()
+        ev_keys, nk_keys = set(), set()
         for b in list(self.bets.values()) + list(self.pending.values()):
-            ev_keys.add((b["city"], b.get("date", ""), b["hl"]))
+            k = (b["city"], b.get("date", ""), b["hl"])
+            (nk_keys if b.get("trig") == "nickel" else ev_keys).add(k)
         new_mid, new_vol, cands = {}, {}, []
         today_iso = today()
         pending_tks = {o["ticker"] for o in self.pending.values()}
@@ -349,12 +386,14 @@ class DriftLive:
             vol = float(mk.get("vol", 0) or 0)
             new_mid[tk] = mid
             new_vol[tk] = vol
-            if tk in self.bets or tk in pending_tks:
+            if tk in self.bets:
+                # runner re-qualified -> maybe rest a pyramid add (paper rule)
+                self._maybe_pyramid_order(tk, mk, mid, gate_mode, balance_c)
+                continue
+            if tk in pending_tks:
                 continue
             ekey = (mk["city"], mk.get("date", ""),
                     "lo" if mk["is_low"] else "hi")
-            if ekey in ev_keys:
-                continue
             if mid >= dp.DRIFT_MIN_C:
                 side, entry, smid = "yes", bid, mid
                 climb_c = (mid - prev) if prev is not None else None
@@ -364,8 +403,16 @@ class DriftLive:
             else:
                 continue
             climbing = climb_c is not None and climb_c >= dp.DRIFT_UP_C
-            # NO nickel lane in live v1 (gap risk not yet priced with real $)
-            if smid >= dp.NICKEL_MIN_C:
+            # NICKEL zone first (paper-identical): >=95c mid, entry 93..96c,
+            # own event ledger, ranked by payoff (cheapest entry first)
+            if dp.NICKEL_ON and smid >= dp.NICKEL_MIN_C:
+                if entry < 93 or entry > dp.NICKEL_MAX_ENTRY:
+                    continue
+                if ekey in nk_keys:
+                    continue
+                cands.append(("nickel", 100.0 - entry, mk, side, entry, smid, ekey))
+                continue
+            if ekey in ev_keys:
                 continue
             if smid >= dp.DRIFT_LEVEL_C:
                 trig, score = "level", smid
@@ -380,26 +427,33 @@ class DriftLive:
             if entry < 50 or entry > dp.DRIFT_MAX_ENTRY:
                 continue
             cands.append((trig, score, mk, side, entry, smid, ekey))
-        cands.sort(key=lambda c: ({"level": 0}.get(c[0], 1), -c[1]))
+        cands.sort(key=lambda c: ({"nickel": 0, "level": 1}.get(c[0], 2), -c[1]))
         placed = 0
         for trig, score, mk, side, entry, smid, ekey in cands:
-            if ekey in ev_keys:
+            if ekey in (nk_keys if trig == "nickel" else ev_keys):
                 continue
             tk = mk["ticker"]
             pside = smid / 100.0
-            if gate_mode == "probe":
-                size = max(1, PROBE_COST_CENTS // entry)
-            else:
-                b_odds = (100 - entry) / entry
-                f_star = max(0.0, pside - (1 - pside) / b_odds) * 0.25
-                bankroll = balance_c + self.open_cost_c()
-                size = int(min(f_star, dp.PER_BET_CAP) * bankroll // entry)
-                if size < 1:
+            if trig == "nickel":
+                if sum(1 for b in list(self.bets.values())
+                       + list(self.pending.values())
+                       if b.get("trig") == "nickel") >= dp.NICKEL_MAX_OPEN:
                     continue
-            while size > 1 and entry * size > self.max_bet_c:
-                size -= 1
-            if entry * size > self.max_bet_c:
-                continue
+                size = self._nickel_count()   # own lane: exempt from max_bet_c
+            else:
+                if gate_mode == "probe":
+                    size = max(1, PROBE_COST_CENTS // entry)
+                else:
+                    b_odds = (100 - entry) / entry
+                    f_star = max(0.0, pside - (1 - pside) / b_odds) * 0.25
+                    bankroll = balance_c + self.open_cost_c()
+                    size = int(min(f_star, dp.PER_BET_CAP) * bankroll // entry)
+                    if size < 1:
+                        continue
+                while size > 1 and entry * size > self.max_bet_c:
+                    size -= 1
+                if entry * size > self.max_bet_c:
+                    continue
             if self.open_cost_c() + entry * size > self.max_open_c:
                 continue
             if balance_c - entry * size < self.reserve_c:
@@ -424,7 +478,7 @@ class DriftLive:
                 "hl": ("lo" if mk["is_low"] else "hi"),
                 "date": mk.get("date", ""), "trig": trig, "peak": smid,
                 "ots": now()}
-            ev_keys.add(ekey)
+            (nk_keys if trig == "nickel" else ev_keys).add(ekey)
             self.placed += 1
             placed += 1
             self._log([now(), "REST", self.mode, mk["city"], mk["strike"],
@@ -440,14 +494,77 @@ class DriftLive:
             for oid, o in list(self.pending.items()):
                 fee = fee_cents(o["entry"], o["count"], taker=False)
                 self.fees_c += fee
-                self.bets[o["ticker"]] = {**{k: o[k] for k in
-                                             ("side", "entry", "count", "city",
-                                              "strike", "kind", "cap", "hl",
-                                              "pside", "date", "trig", "peak")},
-                                          "fee": fee, "oid": oid,
-                                          "ots": o["ots"], "era": ERA}
+                tk0 = o["ticker"]
+                if tk0 in self.bets and o.get("is_add"):
+                    self._merge_fill(tk0, o["entry"], o["count"], fee)
+                else:
+                    self.bets[tk0] = {**{k: o[k] for k in
+                                         ("side", "entry", "count", "city",
+                                          "strike", "kind", "cap", "hl",
+                                          "pside", "date", "trig", "peak")},
+                                      "fee": fee, "oid": oid,
+                                      "ots": o["ots"], "era": ERA}
                 del self.pending[oid]
         return placed
+
+    def _merge_fill(self, tk, price, count, fee):
+        """Fold a pyramid add-on fill into the existing position."""
+        b = self.bets[tk]
+        tot = b["count"] + count
+        b["entry"] = round((b["entry"] * b["count"] + price * count) / tot, 1)
+        b["count"] = tot
+        b["fee"] = b.get("fee", 0) + fee
+        b["adds"] = int(b.get("adds", 0)) + 1
+
+    def _maybe_pyramid_order(self, tk, mk, mid, gate_mode, balance_c):
+        """Rest a probe-size ADD on a runner (paper-identical: +PYRAMID_UP_C
+        past avg entry, never nickels, capped adds, probe-active unless
+        DRIFT_PYRAMID_PROBE=0)."""
+        if gate_mode != "scale" and not dp.PYRAMID_PROBE:
+            return False
+        b = self.bets[tk]
+        if b.get("trig") == "nickel":
+            return False                    # nickels never pyramid
+        if int(b.get("adds", 0)) >= dp.PYRAMID_MAX:
+            return False
+        if any(o["ticker"] == tk for o in self.pending.values()):
+            return False                    # one resting add at a time
+        smid = mid if b["side"] == "yes" else 100 - mid
+        if smid < b["entry"] + dp.PYRAMID_UP_C:
+            return False
+        entry_add = mk["yes_bid"] if b["side"] == "yes" else 100 - mk["yes_ask"]
+        if entry_add <= 0 or entry_add > dp.DRIFT_MAX_ENTRY:
+            return False
+        size = max(1, PROBE_COST_CENTS // entry_add)
+        while size > 1 and entry_add * size > self.max_bet_c:
+            size -= 1
+        if entry_add * size > self.max_bet_c:
+            return False
+        if self.open_cost_c() + entry_add * size > self.max_open_c:
+            return False
+        if balance_c - entry_add * size < self.reserve_c:
+            return False
+        oid = f"dry-add-{self.placed + 1}"
+        if self.client is not None:
+            try:
+                resp = self.client.create_order(tk, action="buy", side=b["side"],
+                                                count=size, price_cents=entry_add)
+                oid = ((resp.get("order") or {}).get("order_id")
+                       or resp.get("order_id") or oid)
+            except Exception:
+                return False
+        if self.client is None:
+            self.dry_balance_c -= entry_add * size
+        self.pending[oid] = {
+            "ticker": tk, "side": b["side"], "entry": entry_add, "count": size,
+            "pside": round(smid / 100.0, 3), "city": b["city"],
+            "strike": b["strike"], "kind": b.get("kind", "ge"),
+            "cap": b.get("cap"), "hl": b["hl"], "date": b.get("date", ""),
+            "trig": b.get("trig"), "peak": smid, "is_add": True, "ots": now()}
+        self.placed += 1
+        self._log([now(), "PYRAMID", self.mode, b["city"], b["strike"], b["hl"],
+                   b["side"], round(smid / 100.0, 3), entry_add, size, "", "", oid])
+        return True
 
     def step(self):
         self._roll_day()
@@ -494,10 +611,11 @@ def main():
         if input("Type LIVE (all caps) to trade REAL money: ") != "LIVE":
             print("Cancelled.")
             return 0
-    print(f"[{now()}] drift executor started in {dl.mode} mode "
-          f"(caps: ${dl.max_bet_c/100:.2f}/bet, ${dl.max_open_c/100:.2f} open, "
-          f"${dl.max_day_loss_c/100:.2f} daily halt; rest<= {REST_MAX_H}h; "
-          f"no nickel, no pyramid in live v1)")
+    print(f"[{now()}] drift executor started in {dl.mode} mode - FULL paper "
+          f"brain incl. nickel x{dl._nickel_count()} + pyramiding "
+          f"(caps: ${dl.max_bet_c/100:.2f}/bet regular, nickels own lane, "
+          f"${dl.max_open_c/100:.2f} open, ${dl.max_day_loss_c/100:.2f} daily "
+          f"halt; rest<= {REST_MAX_H}h)")
     if "--once" in sys.argv:
         dl.step()
         return 0
