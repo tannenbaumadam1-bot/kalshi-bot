@@ -284,21 +284,19 @@ def build_data():
                            "balance_c": lv.get("balance_c")}
         except Exception:
             pass
-    poly_path = os.path.join("logs", "poly_state.json")
-    if os.path.exists(poly_path):
-        try:
-            out["poly"] = json.load(open(poly_path))
-        except Exception:
-            pass
-    drift_path = os.path.join("logs", "drift_state.json")
-    if os.path.exists(drift_path):
-        try:
-            out["drift"] = json.load(open(drift_path))
-        except Exception:
-            pass
-    if out.get("drift"):
-        # live marks on drift positions (same background price cache)
-        dop = out["drift"].get("open") or []
+    # poly reward-farming book RETIRED 7/23 (ledger archived, not deleted)
+    for key, fname in (("drift", "drift_state.json"),
+                       ("driftw", "driftw_state.json")):
+        fpath = os.path.join("logs", fname)
+        if os.path.exists(fpath):
+            try:
+                out[key] = json.load(open(fpath))
+            except Exception:
+                pass
+        if not out.get(key):
+            continue
+        # live marks on this book's positions (same background price cache)
+        dop = out[key].get("open") or []
         _WANT["tickers"] = (_WANT.get("tickers") or []) +             [b.get("ticker") for b in dop if b.get("ticker")]
         dprices = dict(_PRICES["by_ticker"])
         du, dpriced, dval = 0.0, 0, 0.0
@@ -317,7 +315,7 @@ def build_data():
             du += b["upnl"]
             dval += b["value"]
             dpriced += 1
-        dsum = out["drift"].get("summary")
+        dsum = out[key].get("summary")
         if isinstance(dsum, dict):
             if dpriced:
                 dsum["unrealized"] = round(du, 2)
@@ -385,12 +383,12 @@ td.num,th.num{text-align:right}
 .eras table{font-size:12.5px}
 </style></head><body><div class=wrap>
 <div class=hdr>
-  <h1>Leonard the Bot &middot; Paper</h1><span class=tag>4 strategies</span>
+  <h1>Leonard the Bot &middot; Paper</h1><span class=tag>3 books</span>
   <span class=live id=live></span>
   <span class=upd id=upd><span class=dot id=dot></span>loading&hellip;</span>
 </div>
 <div id=combined style="margin:14px 0 2px;"></div>
-<h2>Strategy portfolio <span style="text-transform:none;letter-spacing:0">(4 uncorrelated paper books)</span></h2>
+<h2>Strategy portfolio <span style="text-transform:none;letter-spacing:0">(one thesis, three books: sell the maybe, buy the certainty)</span></h2>
 <div id=strat style="display:grid;grid-template-columns:repeat(auto-fit,minmax(205px,1fr));gap:12px;"></div>
 <h2>Weather book <span style="text-transform:none;letter-spacing:0">(forecast edge &mdash; calibration-gated)</span></h2>
 <div class=hero>
@@ -429,11 +427,6 @@ td.num,th.num{text-align:right}
 <table><thead><tr><th>Market</th><th>Side</th><th>Model</th><th class=num>Our prob</th>
 <th class=num>Entry</th><th class=num>Qty</th><th class=num>Fee</th><th>Result</th><th class=num>P&amp;L</th></tr></thead>
 <tbody id=settled></tbody></table>
-<h2>Polymarket reward farming <span style="text-transform:none;letter-spacing:0">(paper &mdash; modeled, reinvesting)</span></h2>
-<div class=grid id=poly></div>
-<div style="margin-top:10px"><table><thead><tr><th>Date</th><th>Market / activity</th>
-<th class=num>Alloc</th><th class=num>Net</th><th class=num>Bank after</th></tr></thead>
-<tbody id=polytbl></tbody></table></div>
 <h2>Momentum drift <span style="text-transform:none;letter-spacing:0">(paper &mdash; buy the strong side at maker, no model, stop &lt;50&cent;)</span></h2>
 <div class=grid id=drift></div>
 <div style="margin-top:10px"><div class=t style="margin-bottom:6px">Open positions (marked live)</div>
@@ -444,6 +437,16 @@ td.num,th.num{text-align:right}
 <table><thead><tr><th>Closed</th><th>Market</th><th>Side</th><th class=num>Mkt prob</th>
 <th class=num>Entry</th><th class=num>Exit/Settle</th><th class=num>Qty</th><th class=num>Fee</th><th>Result</th><th class=num>P&amp;L</th></tr></thead>
 <tbody id=driftreal></tbody></table></div>
+<h2>Momentum drift &middot; WIDE universe <span style="text-transform:none;letter-spacing:0">(paper &mdash; same certainty rules on every non-weather Kalshi market)</span></h2>
+<div class=grid id=driftw></div>
+<div style="margin-top:10px"><div class=t style="margin-bottom:6px">Open positions (marked live)</div>
+<table><thead><tr><th>Market</th><th>Side</th><th class=num>Mkt prob</th>
+<th class=num>Trigger</th><th class=num>Entry</th><th class=num>Now</th><th class=num>Qty</th><th class=num>Fee</th><th class=num>Value</th><th class=num>uP&amp;L</th></tr></thead>
+<tbody id=driftwtbl></tbody></table></div>
+<div style="margin-top:14px"><div class=t style="margin-bottom:6px">Realized trades (settled &amp; stopped)</div>
+<table><thead><tr><th>Closed</th><th>Market</th><th>Side</th><th class=num>Mkt prob</th>
+<th class=num>Entry</th><th class=num>Exit/Settle</th><th class=num>Qty</th><th class=num>Fee</th><th>Result</th><th class=num>P&amp;L</th></tr></thead>
+<tbody id=driftwreal></tbody></table></div>
 <div class=foot id=foot></div>
 </div>
 <script>
@@ -508,18 +511,6 @@ function drawDaily(el,daily){
       +'<text x="'+(x+bw/2).toFixed(1)+'" y="'+(H-8)+'" fill="#7d90ad" font-size="8.5" text-anchor="middle">'+d[0].slice(5)+'</text>';});
   el.innerHTML=g;
 }
-function actRows(st,legs,unit){
-  if(!st)return '';
-  const rows=[];
-  const day=st.last_date||'today';
-  (legs||[]).forEach(p=>rows.push('<tr><td class=mut>'+day+'</td><td><span class=mkt>'+p.name+'</span> <span class="chip yes">OPEN</span></td>'
-    +'<td class=num>'+F(p.alloc)+'</td><td class=num><span class="'+C(p.net)+'">'+M(p.net)+'</span><span class=mut>/day</span></td><td class=num>&ndash;</td></tr>'));
-  const H=(st.history||[]).slice(-15).reverse();
-  H.forEach(h=>{const n=(h.markets!=null?h.markets:h.assets)||0;
-    rows.push('<tr><td class=mut>'+(h.ts||'').slice(0,10)+'</td><td class=mut>daily accrual &middot; '+n+' '+unit+'</td>'
-    +'<td class=num>&ndash;</td><td class=num><span class="'+C(h.net)+'">'+M(h.net)+'</span></td><td class=num>'+F(h.cash)+'</td></tr>');});
-  return rows.slice(0,15+(legs||[]).length).join('');
-}
 function eraRows(e){
   const rows=[['Settled bets',e.n+(e.open!=null?'  ('+e.open+' open)':'')],
    ['Record',e.n?e.wins+'W / '+e.losses+'L':'&ndash;'],
@@ -543,11 +534,13 @@ async function load(){
     const wStart=Number(s.start||0);
     const wNav=(k.nav!=null?Number(k.nav):(wStart+Number(s.total||0)));
     const wSettled=Number((k.era_current&&k.era_current.n)||0);
-    const P=d.poly||null, DR=d.drift||null;
-    const drSum=DR?(DR.summary||{}):{};
-    const drOpenStake=DR?(DR.open||[]).reduce((a,b)=>a+(b.entry||0)*(b.count||0)/100,0):0;
-    const drBank=DR?(drSum.marked_nav!=null?Number(drSum.marked_nav):(Number(drSum.cash||0)+drOpenStake)):null, drStart=DR?Number(drSum.start||0):0;
-    const pBank=P?Number(P.cash||P.start||0):null, pStart=P?Number(P.start||0):0;
+    const DR=d.drift||null, DW=d.driftw||null;
+    const bookNav=B=>{if(!B)return null;const s=B.summary||{};
+      const stake=(B.open||[]).reduce((a,b)=>a+(b.entry||0)*(b.count||0)/100,0);
+      return s.marked_nav!=null?Number(s.marked_nav):(Number(s.cash||0)+stake);};
+    const drSum=DR?(DR.summary||{}):{}, dwSum=DW?(DW.summary||{}):{};
+    const drBank=bookNav(DR), drStart=DR?Number(drSum.start||0):0;
+    const dwBank=bookNav(DW), dwStart=DW?Number(dwSum.start||0):0;
     const cards=[
       stratCard('Weather edge &middot; v9-core','forecast','era',F(wNav),
         '<span class="'+C((k.era_current||{}).net)+'">'+M((k.era_current||{}).net||0)+'</span>',
@@ -555,19 +548,20 @@ async function load(){
         +((k.era_current||{}).expectancy!=null?' &middot; '+M((k.era_current||{}).expectancy)+'/bet':'')
         +' <span class=mut>(bank incl. legacy '+M((k.era_legacy||{}).net||0)+')</span>',
         wSettled>=30?'v9 gate: n\u226530 met':'v9 probing '+wSettled+'/30','leg'),
-      stratCard('Polymarket rewards','liquidity','yes',
-        P?F(pBank):NA, P?'<span class="'+C(P.earned)+'">'+M(P.earned)+'</span>':NA,
-        P?('&middot; '+(P.days||0)+'d &middot; APY ~'+(P.apy_annualized!=null?P.apy_annualized:'&ndash;')+'%'):'&middot; starting',
-        'reinvesting','era'),
       stratCard('Momentum drift &middot; drift1','momentum','yes',
         DR?F(drBank):NA,
         DR?'<span class="'+C(drBank-drStart)+'">'+M(drBank-drStart)+'</span>':NA,
         DR?('&middot; '+(drSum.wins||0)+'W/'+(drSum.losses||0)+'L &middot; '+(drSum.open||0)+' open &middot; buy strength, no model'):'&middot; starting',
         DR?((drSum.gate==='scale'?'gate: passed':'probing '+(drSum.gate_n||0)+'/30')):'starting','leg'),
+      stratCard('Drift WIDE &middot; driftw1','momentum','yes',
+        DW?F(dwBank):NA,
+        DW?'<span class="'+C(dwBank-dwStart)+'">'+M(dwBank-dwStart)+'</span>':NA,
+        DW?('&middot; '+(dwSum.wins||0)+'W/'+(dwSum.losses||0)+'L &middot; '+(dwSum.open||0)+' open &middot; all non-weather markets'):'&middot; starting',
+        DW?((dwSum.gate==='scale'?'gate: passed':'probing '+(dwSum.gate_n||0)+'/30')):'starting','leg'),
     ];
     $('strat').innerHTML=cards.join('');
     let tStart=wStart, tNav=wNav, nb=1;
-    if(P){tStart+=pStart;tNav+=pBank;nb++;} if(DR){tStart+=drStart;tNav+=drBank;nb++;}
+    if(DR){tStart+=drStart;tNav+=drBank;nb++;} if(DW){tStart+=dwStart;tNav+=dwBank;nb++;}
     $('combined').innerHTML='<div style="display:flex;align-items:baseline;gap:12px;flex-wrap:wrap;">'
       +'<span style="font-size:11px;color:var(--mut);text-transform:uppercase;letter-spacing:.12em;">Combined paper NAV</span>'
       +'<span style="font-size:33px;font-weight:800;letter-spacing:-1px;">'+F(tNav)+'</span>'
@@ -660,17 +654,6 @@ async function load(){
       +'<td class=num><span class="'+C(b.pnl)+'">'+M(b.pnl)+'</span></td></tr>';
     }).join('')||'<tr><td colspan=9 class=empty>No current-model bets settled yet \u2014 the open v6-ens positions settle daily.</td></tr>';
   }
-  if(d.poly){const P=d.poly;const H=P.history||[];const last=H.length?H[H.length-1]:null;
-    $('poly').innerHTML=[
-      tile('Bank (paper)',F(P.cash||P.start||0),'started '+F(P.start||0)),
-      tile('Rewards earned','<span class=pos>'+M(P.earned||0)+'</span>',(P.days||0)+' paper days'),
-      tile('Annualized (modeled)','~'+(P.apy_annualized!=null?P.apy_annualized:'&ndash;')+'%','net, reinvested'),
-      tile('Last-day reward',last?M(last.net):NA,last?(last.markets+' markets')+'':''),
-      tile('Reinvest','ON','rewards &rarr; more liquidity'),
-    ].join('');
-  } else { $('poly').innerHTML='<div class=tile><div class=k>Polymarket</div><div class=v>&ndash;</div><div class=s>paper sim starting&hellip;</div></div>'; }
-  $('polytbl').innerHTML=actRows(d.poly,(d.poly&&d.poly.positions||[]).map(p=>({name:p.q,alloc:p.alloc,net:p.net})),'markets')
-    ||'<tr><td colspan=5 class=empty>No activity yet \u2014 allocations post once per day.</td></tr>';
   if(d.drift){const D=d.drift,dsm=D.summary||{};
     $('drift').innerHTML=[
       tile('Bank (paper)',F(dsm.cash||0),'started '+F(dsm.start||0)),
@@ -708,6 +691,43 @@ async function load(){
   } else { $('drift').innerHTML='<div class=tile><div class=k>Momentum drift</div><div class=v>&ndash;</div><div class=s>starting&hellip;</div></div>';
     $('drifttbl').innerHTML='<tr><td colspan=10 class=empty>No state yet.</td></tr>';
     $('driftreal').innerHTML='<tr><td colspan=10 class=empty>No state yet.</td></tr>'; }
+  if(d.driftw){const D=d.driftw,dsm=D.summary||{};
+    const wmkt=b=>'<td><span class=mkt>'+((b.name||b.ticker||'')+'').replace(/&/g,'&amp;').replace(/</g,'&lt;')+'</span></td>';
+    $('driftw').innerHTML=[
+      tile('Bank (paper)',F(dsm.cash||0),'started '+F(dsm.start||0)),
+      tile('Record',(dsm.wins||0)+'W / '+(dsm.losses||0)+'L',(dsm.open||0)+' open'),
+      tile('Realized P&L',(dsm.realized!=null)?'<span class="'+C(dsm.realized)+'">'+M(dsm.realized)+'</span>':NA,''),
+      tile('Unrealized (marked)',(dsm.unrealized!=null)?'<span class="'+C(dsm.unrealized)+'">'+M(dsm.unrealized)+'</span>':NA,
+        (dsm.marked_nav!=null)?('marked NAV '+F(dsm.marked_nav)):''),
+      tile('Gate',(dsm.gate||'probe')+' '+(dsm.gate_n||0)+'/30','same contract: +EV and calib &le;5pts'),
+      tile('Universe','all Kalshi ex-weather','&le;48h to close &middot; vol&ge;200 &middot; spread&le;6&cent; &middot; no nickel/pyramid yet'),
+      tile('Trigger','≥80¢ level · 65–80¢ climb','vol-confirmed · close&le;24h climbs · stop <50¢ · trail 15¢'),
+    ].join('');
+    const dr=[];
+    (D.open||[]).forEach(b=>dr.push('<tr>'+wmkt(b)+side(b.side)
+      +'<td class=num>'+Math.round((b.pside||0)*100)+'%</td>'
+      +'<td class=num>'+(b.trig==='level'?'<span class=mut>level</span>':'<span class=mut>climb</span>')+'</td>'
+      +'<td class=num>'+b.entry+'&cent;</td>'
+      +'<td class=num>'+(b.now!=null?b.now+'&cent;':'&ndash;')+'</td>'
+      +'<td class=num>'+b.count+'</td>'
+      +'<td class=num>'+feeC(b.fee)+'</td>'
+      +'<td class=num>'+(b.value!=null?F(b.value):'&ndash;')+'</td>'
+      +'<td class=num>'+(b.upnl!=null?('<span class="'+C(b.upnl)+'">'+M(b.upnl)+'</span>'):'&ndash;')+'</td></tr>'));
+    $('driftwtbl').innerHTML=dr.join('')||'<tr><td colspan=10 class=empty>No open positions — first scan pending.</td></tr>';
+    const rl=[];
+    (D.settled||[]).slice(0,20).forEach(b=>{const won=Number(b.outcome)===1;
+      rl.push('<tr><td class=mut>'+((b.ts||'').slice(5,16).replace('T',' '))+'</td>'+wmkt(b)+side(b.side)
+      +'<td class=num>'+Math.round((b.pside||0)*100)+'%</td>'
+      +'<td class=num>'+b.entry+'&cent;</td>'
+      +'<td class=num>'+(b.exit_px!=null?b.exit_px+'&cent;':(won?'100&cent;':'0&cent;'))+'</td>'
+      +'<td class=num>'+b.count+'</td>'
+      +'<td class=num>'+feeC(b.fee)+'</td>'
+      +'<td>'+(b.stopped?'<span class=chip style="background:rgba(232,180,76,.13);color:var(--amb)">STOP</span>':(b.faded?'<span class=chip style="background:rgba(180,120,230,.15);color:#b478e6">FADE</span>':('<span class="'+(won?'won':'lost')+'">'+(won?'WON':'LOST')+'</span>')))+'</td>'
+      +'<td class=num><span class="'+C(b.pnl)+'">'+M(b.pnl)+'</span></td></tr>');});
+    $('driftwreal').innerHTML=rl.join('')||'<tr><td colspan=10 class=empty>No realized trades yet.</td></tr>';
+  } else { $('driftw').innerHTML='<div class=tile><div class=k>Drift wide</div><div class=v>&ndash;</div><div class=s>starting&hellip;</div></div>';
+    $('driftwtbl').innerHTML='<tr><td colspan=10 class=empty>No state yet.</td></tr>';
+    $('driftwreal').innerHTML='<tr><td colspan=10 class=empty>No state yet.</td></tr>'; }
   $('foot').innerHTML='Paper account &mdash; no real money at risk. NAV = cash + open positions at current market bid (marks refresh ~60s). '
     +'Banked P&amp;L = settled bets only; positions are held to settlement. Performance and calibration KPIs computed on the last '
     +(k.window_n||0)+' settled bets; win rate and totals are all-time. Judge the edge on the v7 era only &mdash; legacy bets predate the current model. Auto-refreshes every 20s.';

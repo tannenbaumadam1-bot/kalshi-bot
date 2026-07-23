@@ -68,10 +68,6 @@ def _serve_dashboard():
     threading.Thread(target=_run, daemon=True).start()
     print(f"  dashboard served in-process on {_dash.HOST}:{_dash.PORT}")
 try:
-    import poly_paper
-except Exception:
-    poly_paper = None
-try:
     import weather_live
 except Exception:
     weather_live = None
@@ -79,6 +75,10 @@ try:
     import drift_paper
 except Exception:
     drift_paper = None
+try:
+    import drift_wide
+except Exception:
+    drift_wide = None
 
 from kalshibot.config import load_config
 from kalshibot.fees import fee_cents
@@ -529,12 +529,6 @@ def main():
             wp = weather_paper.WeatherPaper()
         except Exception:
             wp = None
-    pp_bot = None
-    if poly_paper is not None:
-        try:
-            pp_bot = poly_paper.PolyPaper()
-        except Exception:
-            pp_bot = None
     wl_dry = None
     if weather_live is not None:
         try:
@@ -547,6 +541,12 @@ def main():
             drift_bot = drift_paper.DriftPaper()
         except Exception:
             drift_bot = None
+    dw_bot = None
+    if drift_wide is not None:
+        try:
+            dw_bot = drift_wide.DriftWide()
+        except Exception:
+            dw_bot = None
     # retired strategies (funding 7/18, sports/sharp 7/21): purge orphaned books
     for _fs in ("funding_state.json", "sharpev_state.json", "sharpev_sim.json"):
         try:
@@ -556,6 +556,16 @@ def main():
                 print(f"removed orphaned logs/{_fs} (strategy retired)")
         except Exception:
             pass
+    # poly reward-farming retired 7/23 (Adam) - ARCHIVE the ledger, never
+    # delete it (tracker stays cumulative): dashboard stops reading it, the
+    # 18-day history stays on disk for the record.
+    try:
+        _pp = os.path.join("logs", "poly_state.json")
+        if os.path.exists(_pp):
+            os.replace(_pp, os.path.join("logs", "poly_state_archived.json"))
+            print("archived logs/poly_state.json -> poly_state_archived.json (book retired)")
+    except Exception:
+        pass
     _serve_dashboard()
     if sim.load(SIM_PATH):
         print(f"Resumed previous session: ${sim.cash/100:.2f} cash, "
@@ -643,15 +653,16 @@ def main():
                           f"settled {s['wins']}W/{s['losses']}L | placed {s['placed']}")
                 except Exception as e:
                     print(f"  weather step skipped: {e}")
-            if pp_bot is not None and n % 20 == 1:
+            if dw_bot is not None and n % 20 == 7:
                 try:
-                    net, picks = pp_bot.step()
-                    ps = pp_bot.summary()
-                    if picks:
-                        print(f"  POLY(paper): +${net:.3f} today | bank ${ps['cash']:.2f} | "
-                              f"{ps['days']}d | APY~{ps['apy']}% | {len(picks)} mkts")
+                    nw = dw_bot.step()
+                    ws2 = dw_bot.summary()
+                    if nw or ws2["open"]:
+                        print(f"  DRIFTW(paper): {nw} placed | bank ${ws2['cash']:.2f} | "
+                              f"{ws2['wins']}W/{ws2['losses']}L | open {ws2['open']} | "
+                              f"gate {ws2['gate']} {ws2['gate_n']}/30")
                 except Exception as e:
-                    print(f"  poly step skipped: {e}")
+                    print(f"  drift-wide step skipped: {e}")
             if drift_bot is not None and n % 20 == 11:
                 try:
                     nd = drift_bot.step()
