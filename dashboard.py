@@ -278,14 +278,47 @@ def build_data():
     for key, fname in (("live", "weather_live_state.json"),
                        ("dlive", "drift_live_state.json")):
         lpath = os.path.join("logs", fname)
-        if os.path.exists(lpath):
-            try:
-                lv = json.load(open(lpath))
-                out[key] = {"updated": lv.get("updated", ""),
-                            "summary": lv.get("summary", {}) or {},
-                            "balance_c": lv.get("balance_c")}
-            except Exception:
-                pass
+        if not os.path.exists(lpath):
+            continue
+        try:
+            lv = json.load(open(lpath))
+            out[key] = {"updated": lv.get("updated", ""),
+                        "summary": lv.get("summary", {}) or {},
+                        "balance_c": lv.get("balance_c")}
+        except Exception:
+            continue
+        if key != "dlive":
+            continue
+        # REAL-MONEY section detail: positions, resting orders, recent
+        # realized rows, marked to live prices (same background cache)
+        dop = [dict(b, ticker=tk) for tk, b in (lv.get("bets") or {}).items()]
+        rest = [dict(o) for o in (lv.get("pending") or {}).values()]
+        _WANT["tickers"] = (_WANT.get("tickers") or []) +             [b.get("ticker") for b in dop if b.get("ticker")]
+        rp = dict(_PRICES["by_ticker"])
+        du, dval = 0.0, 0.0
+        for b in dop:
+            px = rp.get(b.get("ticker") or "")
+            if not px or not (px["yes_bid"] or px["yes_ask"]):
+                b["now"] = None
+                b["upnl"] = None
+                dval += b.get("entry", 0) * b.get("count", 0) / 100.0
+                continue
+            mark = px["yes_bid"] if b.get("side") == "yes" else (100 - px["yes_ask"])
+            mark = max(0, min(100, mark))
+            b["now"] = mark
+            b["value"] = round(mark * b.get("count", 0) / 100.0, 2)
+            b["upnl"] = round((mark - b.get("entry", 0)) * b.get("count", 0) / 100.0, 2)
+            du += b["upnl"]
+            dval += b["value"]
+        held = sum(o.get("entry", 0) * o.get("count", 0) for o in rest) / 100.0
+        out[key]["open"] = dop
+        out[key]["resting"] = rest
+        out[key]["unrealized"] = round(du, 2)
+        out[key]["history"] = list(reversed((lv.get("history") or [])[-15:]))
+        out[key]["nickel"] = lv.get("nickel")
+        if lv.get("balance_c") is not None:
+            out[key]["marked_nav"] = round(
+                lv["balance_c"] / 100.0 + dval + held, 2)
     # poly reward-farming book RETIRED 7/23 (ledger archived, not deleted)
     for key, fname in (("drift", "drift_state.json"),
                        ("driftw", "driftw_state.json")):
@@ -388,6 +421,18 @@ td.num,th.num{text-align:right}
   <h1>Leonard the Bot &middot; Paper</h1><span class=tag>3 books</span>
   <span class=live id=live></span>
   <span class=upd id=upd><span class=dot id=dot></span>loading&hellip;</span>
+</div>
+<div id=rmwrap style="display:none;border:1.5px solid var(--amb);border-radius:12px;padding:16px 18px;margin:18px 0 4px;background:linear-gradient(180deg,rgba(232,180,76,.05),transparent)">
+<h2 style="margin:0 0 12px">Real money &middot; drift momentum executor <span id=rmmode style="text-transform:none;letter-spacing:0"></span></h2>
+<div class=grid id=rmtiles></div>
+<div style="margin-top:12px"><div class=t style="margin-bottom:6px">Positions &amp; resting orders (marked live)</div>
+<table><thead><tr><th>Market</th><th>Side</th><th>Status</th><th class=num>Mkt prob</th>
+<th class=num>Entry</th><th class=num>Now</th><th class=num>Qty</th><th class=num>Value</th><th class=num>uP&amp;L</th></tr></thead>
+<tbody id=rmopen></tbody></table></div>
+<div style="margin-top:12px"><div class=t style="margin-bottom:6px">Realized (settled &amp; exits)</div>
+<table><thead><tr><th>Closed</th><th>Market</th><th>Side</th><th class=num>Entry</th>
+<th class=num>Exit/Settle</th><th class=num>Qty</th><th>Result</th><th class=num>P&amp;L</th></tr></thead>
+<tbody id=rmreal></tbody></table></div>
 </div>
 <div id=combined style="margin:14px 0 2px;"></div>
 <h2>Strategy portfolio <span style="text-transform:none;letter-spacing:0">(one thesis, three books: sell the maybe, buy the certainty)</span></h2>
@@ -573,6 +618,50 @@ async function load(){
   const ageMin=(Date.now()-new Date(d.updated).getTime())/60000;
   $('upd').innerHTML='<span class="dot'+(ageMin>30?' stale':'')+'"></span>'
     +(ageMin>30?'STALE &middot; ':'')+'updated '+(d.updated?d.updated.replace('T',' ').slice(0,16):'-');
+  if(d.dlive){const L=d.dlive,S=L.summary||{};
+    $('rmwrap').style.display='block';
+    const isLive=(S.mode==='LIVE');
+    $('rmmode').innerHTML='<span class=chip style="background:'+(isLive?'rgba(244,105,95,.15);color:var(--red)':'rgba(125,144,173,.13);color:var(--mut)')+'">'+(S.mode||'?')+'</span>'
+      +(S.halted?' <span class=chip style="background:rgba(244,105,95,.25);color:var(--red)">DAY HALTED</span>':'')
+      +' <span class=mut style="font-size:11px">era dlive1 &middot; full paper brain (nickel + pyramid) &middot; caps $2/bet &middot; $60 open &middot; $12 daily halt</span>';
+    const bal=(L.balance_c!=null)?L.balance_c/100:null;
+    $('rmtiles').innerHTML=[
+      tile('Account balance',bal!=null?F(bal):NA,'live from Kalshi'),
+      tile('Marked NAV',(L.marked_nav!=null)?F(L.marked_nav):NA,'balance + positions + resting'),
+      tile('Realized P&L','<span class="'+C(S.net)+'">'+M(S.net||0)+'</span>','' ),
+      tile('Unrealized',(L.unrealized!=null)?'<span class="'+C(L.unrealized)+'">'+M(L.unrealized)+'</span>':NA,''),
+      tile("Today's P&L",'<span class="'+C(S.day_pnl)+'">'+M(S.day_pnl||0)+'</span>','halts at -$12'),
+      tile('Record',(S.wins||0)+'W / '+(S.losses||0)+'L',(S.open||0)+' filled &middot; '+(S.resting||0)+' resting'),
+      tile('Gate',(S.gate||'probe')+' '+(S.gate_n||0)+'/30','probe sizing until pass'),
+      tile('Fees',F(S.fees||0),(S.placed||0)+' placed &middot; '+(S.canceled||0)+' canceled'),
+      (L.nickel?tile('Nickel lane',(L.nickel.wins||0)+'W / '+((L.nickel.n||0)-(L.nickel.wins||0))+'L &middot; <span class="'+C(L.nickel.net)+'">'+M(L.nickel.net||0)+'</span>',(L.nickel.open||0)+'/'+(L.nickel.max_open||5)+' lanes &middot; size '+(L.nickel.size||10)):'')
+    ].join('');
+    const rows=[];
+    (L.open||[]).forEach(b=>rows.push('<tr>'+mkt(b)+side(b.side)
+      +'<td><span class=chip style="background:rgba(47,208,140,.13);color:var(--grn)">'+((b.trig==='nickel')?'NICKEL':'FILLED')+'</span></td>'
+      +'<td class=num>'+Math.round((b.pside||0)*100)+'%</td>'
+      +'<td class=num>'+b.entry+'&cent;</td>'
+      +'<td class=num>'+(b.now!=null?b.now+'&cent;':'&ndash;')+'</td>'
+      +'<td class=num>'+b.count+(b.adds?' <span class=mut>(+'+b.adds+')</span>':'')+'</td>'
+      +'<td class=num>'+(b.value!=null?F(b.value):'&ndash;')+'</td>'
+      +'<td class=num>'+(b.upnl!=null?('<span class="'+C(b.upnl)+'">'+M(b.upnl)+'</span>'):'&ndash;')+'</td></tr>'));
+    (L.resting||[]).forEach(o=>rows.push('<tr>'+mkt(o)+side(o.side)
+      +'<td><span class=chip style="background:rgba(232,180,76,.13);color:var(--amb)">'+((o.trig==='nickel')?'NICKEL REST':'RESTING')+'</span></td>'
+      +'<td class=num>'+Math.round((o.pside||0)*100)+'%</td>'
+      +'<td class=num>'+o.entry+'&cent;</td><td class=num>&ndash;</td>'
+      +'<td class=num>'+o.count+'</td>'
+      +'<td class=num>'+F(o.entry*o.count/100)+'</td><td class=num>&ndash;</td></tr>'));
+    $('rmopen').innerHTML=rows.join('')||'<tr><td colspan=9 class=empty>No live positions or resting orders yet.</td></tr>';
+    const rl=[];
+    (L.history||[]).forEach(b=>{const won=Number(b.outcome)===1;
+      rl.push('<tr><td class=mut>'+((b.ts||'').slice(5,16).replace('T',' '))+'</td>'+mkt(b)+side(b.side)
+      +'<td class=num>'+b.entry+'&cent;</td>'
+      +'<td class=num>'+(b.exit_px!=null?b.exit_px+'&cent;':(won?'100&cent;':'0&cent;'))+'</td>'
+      +'<td class=num>'+b.count+'</td>'
+      +'<td>'+(b.stopped?'<span class=chip style="background:rgba(232,180,76,.13);color:var(--amb)">STOP</span>':(b.faded?'<span class=chip style="background:rgba(180,120,230,.15);color:#b478e6">FADE</span>':('<span class="'+(won?'won':'lost')+'">'+(won?'WON':'LOST')+'</span>')))+'</td>'
+      +'<td class=num><span class="'+C(b.pnl)+'">'+M(b.pnl)+'</span></td></tr>');});
+    $('rmreal').innerHTML=rl.join('')||'<tr><td colspan=8 class=empty>Nothing realized yet &mdash; first settlements land tomorrow morning.</td></tr>';
+  }
   {const strip=[];
    const fmtL=(tag,LV)=>{const L=LV.summary;return tag+' '+(L.mode||'LIVE')+' '+M(L.net||0)+' ('+(L.wins||0)+'W/'+(L.losses||0)+'L)'
       +(L.resting!=null?' \u00b7 '+L.resting+' resting':'')
