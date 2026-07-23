@@ -1,0 +1,24 @@
+# Drift momentum LIVE executor - REAL MONEY when armed.
+# Install (does NOT start it):
+#   cp /opt/kalshibot/deploy/kalshi-drift-live.service /etc/systemd/system/
+#   systemctl daemon-reload
+# Go-live (the one action, after key + funding are in place):
+#   touch /opt/kalshibot/logs/DRIFT_LIVE_ARMED
+#   systemctl enable --now kalshi-drift-live
+# Kill switch:
+#   systemctl stop kalshi-drift-live && rm /opt/kalshibot/logs/DRIFT_LIVE_ARMED
+[Unit]
+Description=Kalshi drift momentum LIVE executor (armed via logs/DRIFT_LIVE_ARMED)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/kalshibot
+Environment=KALSHI_DRIFT_LIVE=1
+ExecStart=/usr/bin/python3 /opt/kalshibot/drift_live.py --yes-live
+Restart=always
+RestartSec=30
+
+[Install]
+WantedBy=multi-user.target

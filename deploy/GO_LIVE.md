@@ -54,3 +54,55 @@ diverges clearly negative vs paper, stop the service and go back to paper.
 KALSHI_ENV=demo KALSHI_DEMO_KEY_ID=<id> KALSHI_DEMO_KEY_PATH=kalshi-demo.key \
   python3 weather_live.py --once
 ```
+
+---
+
+# Drift momentum go-live runbook (2026-07-23)
+
+The drift book is the FIRST to pass its calibration gate (53-0 at settlement,
+era drift1). `drift_live.py` runs the same brain with real orders: level
+entries >=80c at maker, vol-confirmed same-day climbs, momentum stop <50c,
+trailing exit 15c, probe stakes until the LIVE book passes its OWN 30-bet
+gate (era dlive1). NOT in live v1: nickel lane, pyramiding (post-gate
+upgrades). Caps come from the same config_live.yaml: $2/bet, $15 open,
+$3 daily-loss halt, $2 reserve. Unfilled maker joins cancel after 2h.
+
+It is deployed SAFE by default: runs DRY inside the paper loop (badge on the
+dashboard header, prefix DRIFT) until armed.
+
+## Adam's part (~30 min, same as the weather runbook)
+1. Kalshi account: KYC complete, deposit **$100**.
+2. Create a LIVE API key on kalshi.com -> note the Key ID, download the
+   private key file.
+3. In the DO web console (cloud.digitalocean.com -> droplet -> terminal),
+   never via GitHub:
+   - save the private key as `/opt/kalshibot/kalshi-live.key` (chmod 600)
+   - put the Key ID into `/opt/kalshibot/config_live.yaml` under `api.key_id`
+   (Both executors share this key/config - doing it once arms the door for
+   both, but each service still needs its own ARM file to actually trade.)
+
+## Arming (one action, in the DO console)
+```
+cp /opt/kalshibot/deploy/kalshi-drift-live.service /etc/systemd/system/
+systemctl daemon-reload
+touch /opt/kalshibot/logs/DRIFT_LIVE_ARMED
+systemctl enable --now kalshi-drift-live
+```
+Verify within one cycle (~10 min): dashboard header shows DRIFT LIVE,
+balance ~$100, first maker orders resting. The paper loop's DRY rehearsal
+auto-defers once the ARM file exists.
+
+## Kill switch (either stops all new orders immediately)
+```
+systemctl stop kalshi-drift-live
+rm /opt/kalshibot/logs/DRIFT_LIVE_ARMED
+```
+Built-in halts: $3 daily loss -> no new bets until midnight; $2 balance
+reserve; resting orders auto-cancel after 2h unfilled.
+
+## Judgment period
+Live probe stakes (<= $1.50-2/bet) until era dlive1 passes its own 30-bet
+gate. Compare on the dashboard: live fill rate + expectancy vs the paper
+book's optimistic instant fills over the same dates. Auto-revert rule: daily
+halt trips twice in a week, or live expectancy clearly negative vs paper ->
+stop the service, back to paper.

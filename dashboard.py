@@ -274,16 +274,18 @@ def build_data():
             out["weather_err"] = open(err_path).read()[:1200]
         except Exception:
             pass
-    # live trader state (real money), if present
-    live_path = os.path.join("logs", "weather_live_state.json")
-    if os.path.exists(live_path):
-        try:
-            lv = json.load(open(live_path))
-            out["live"] = {"updated": lv.get("updated", ""),
-                           "summary": lv.get("summary", {}) or {},
-                           "balance_c": lv.get("balance_c")}
-        except Exception:
-            pass
+    # live trader state (real money when armed), if present
+    for key, fname in (("live", "weather_live_state.json"),
+                       ("dlive", "drift_live_state.json")):
+        lpath = os.path.join("logs", fname)
+        if os.path.exists(lpath):
+            try:
+                lv = json.load(open(lpath))
+                out[key] = {"updated": lv.get("updated", ""),
+                            "summary": lv.get("summary", {}) or {},
+                            "balance_c": lv.get("balance_c")}
+            except Exception:
+                pass
     # poly reward-farming book RETIRED 7/23 (ledger archived, not deleted)
     for key, fname in (("drift", "drift_state.json"),
                        ("driftw", "driftw_state.json")):
@@ -571,12 +573,15 @@ async function load(){
   const ageMin=(Date.now()-new Date(d.updated).getTime())/60000;
   $('upd').innerHTML='<span class="dot'+(ageMin>30?' stale':'')+'"></span>'
     +(ageMin>30?'STALE &middot; ':'')+'updated '+(d.updated?d.updated.replace('T',' ').slice(0,16):'-');
-  if(d.live&&d.live.summary){const L=d.live.summary;
-    $('live').textContent=(L.mode||'LIVE')+' '+M(L.net||0)+' ('+(L.wins||0)+'W/'+(L.losses||0)+'L)'
+  {const strip=[];
+   const fmtL=(tag,LV)=>{const L=LV.summary;return tag+' '+(L.mode||'LIVE')+' '+M(L.net||0)+' ('+(L.wins||0)+'W/'+(L.losses||0)+'L)'
       +(L.resting!=null?' \u00b7 '+L.resting+' resting':'')
       +(L.day_pnl!=null?' \u00b7 day '+M(L.day_pnl):'')
       +(L.halted?' \u00b7 HALTED':'')
-      +(d.live.balance_c!=null?' \u00b7 bal $'+(d.live.balance_c/100).toFixed(2):'');}
+      +(LV.balance_c!=null?' \u00b7 bal $'+(LV.balance_c/100).toFixed(2):'');};
+   if(d.live&&d.live.summary)strip.push(fmtL('WX',d.live));
+   if(d.dlive&&d.dlive.summary)strip.push(fmtL('DRIFT',d.dlive));
+   $('live').textContent=strip.join('  \u2503  ');}
   const start=Number(s.start||0),banked=Number(s.total||0);
   const unrl=(s.unrealized==null)?null:Number(s.unrealized);
   const nav=k.nav!=null?k.nav:start+banked;

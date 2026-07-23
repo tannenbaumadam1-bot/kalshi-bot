@@ -79,6 +79,10 @@ try:
     import drift_wide
 except Exception:
     drift_wide = None
+try:
+    import drift_live
+except Exception:
+    drift_live = None
 
 from kalshibot.config import load_config
 from kalshibot.fees import fee_cents
@@ -547,6 +551,12 @@ def main():
             dw_bot = drift_wide.DriftWide()
         except Exception:
             dw_bot = None
+    dl_dry = None
+    if drift_live is not None:
+        try:
+            dl_dry = drift_live.DriftLive(None, mode="DRY")
+        except Exception:
+            dl_dry = None
     # retired strategies (funding 7/18, sports/sharp 7/21): purge orphaned books
     for _fs in ("funding_state.json", "sharpev_state.json", "sharpev_sim.json"):
         try:
@@ -673,6 +683,15 @@ def main():
                               f"gate {ds['gate']} {ds['gate_n']}/30")
                 except Exception as e:
                     print(f"  drift step skipped: {e}")
+            if (dl_dry is not None and n % 20 == 17
+                    and not os.path.exists(drift_live.ARM_FILE)
+                    and os.environ.get("KALSHI_DRIFT_LIVE", "") != "1"):
+                # drift go-live DRY REHEARSAL: same brain, would-be orders
+                # only. Auto-defers the moment the real live service is armed.
+                try:
+                    dl_dry.step()
+                except Exception as e:
+                    print(f"  drift-live dry step skipped: {e}")
             if (wl_dry is not None and n % 20 == 3
                     and not os.path.exists(weather_live.ARM_FILE)
                     and os.environ.get("KALSHI_WEATHER_LIVE", "") != "1"):
