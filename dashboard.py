@@ -437,7 +437,7 @@ td.num,th.num{text-align:right}
 <table><thead><tr><th>Closed</th><th>Market</th><th>Side</th><th class=num>Mkt prob</th>
 <th class=num>Entry</th><th class=num>Exit/Settle</th><th class=num>Qty</th><th class=num>Fee</th><th>Result</th><th class=num>P&amp;L</th></tr></thead>
 <tbody id=driftreal></tbody></table></div>
-<h2>Momentum drift &middot; WIDE universe <span style="text-transform:none;letter-spacing:0">(paper &mdash; same certainty rules on every non-weather Kalshi market)</span></h2>
+<h2>Momentum drift &middot; WIDE <span style="text-transform:none;letter-spacing:0">(paper &mdash; certainty rules on commodities &amp; financial-close markets &middot; era driftw2-fin)</span></h2>
 <div class=grid id=driftw></div>
 <div style="margin-top:10px"><div class=t style="margin-bottom:6px">Open positions (marked live)</div>
 <table><thead><tr><th>Market</th><th>Side</th><th class=num>Mkt prob</th>
@@ -553,10 +553,10 @@ async function load(){
         DR?'<span class="'+C(drBank-drStart)+'">'+M(drBank-drStart)+'</span>':NA,
         DR?('&middot; '+(drSum.wins||0)+'W/'+(drSum.losses||0)+'L &middot; '+(drSum.open||0)+' open &middot; buy strength, no model'):'&middot; starting',
         DR?((drSum.gate==='scale'?'gate: passed':'probing '+(drSum.gate_n||0)+'/30')):'starting','leg'),
-      stratCard('Drift WIDE &middot; driftw1','momentum','yes',
+      stratCard('Drift WIDE &middot; driftw2-fin','momentum','yes',
         DW?F(dwBank):NA,
         DW?'<span class="'+C(dwBank-dwStart)+'">'+M(dwBank-dwStart)+'</span>':NA,
-        DW?('&middot; '+(dwSum.wins||0)+'W/'+(dwSum.losses||0)+'L &middot; '+(dwSum.open||0)+' open &middot; all non-weather markets'):'&middot; starting',
+        DW?('&middot; '+(dwSum.wins||0)+'W/'+(dwSum.losses||0)+'L &middot; '+(dwSum.open||0)+' open &middot; commodities + financials'):'&middot; starting',
         DW?((dwSum.gate==='scale'?'gate: passed':'probing '+(dwSum.gate_n||0)+'/30')):'starting','leg'),
     ];
     $('strat').innerHTML=cards.join('');
@@ -700,7 +700,7 @@ async function load(){
       tile('Unrealized (marked)',(dsm.unrealized!=null)?'<span class="'+C(dsm.unrealized)+'">'+M(dsm.unrealized)+'</span>':NA,
         (dsm.marked_nav!=null)?('marked NAV '+F(dsm.marked_nav)):''),
       tile('Gate',(dsm.gate||'probe')+' '+(dsm.gate_n||0)+'/30','same contract: +EV and calib &le;5pts'),
-      tile('Universe','all Kalshi ex-weather','&le;48h to close &middot; vol&ge;200 &middot; spread&le;6&cent; &middot; no nickel/pyramid yet'),
+      tile('Universe','commodities + financials','&le;48h to close &middot; vol&ge;200 &middot; spread&le;6&cent; &middot; no nickel/pyramid yet'),
       tile('Trigger','≥80¢ level · 65–80¢ climb','vol-confirmed · close&le;24h climbs · stop <50¢ · trail 15¢'),
     ].join('');
     const dr=[];

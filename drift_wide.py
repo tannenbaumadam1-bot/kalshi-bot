@@ -34,7 +34,14 @@ from kalshibot.fees import fee_cents
 
 STATE = os.path.join("logs", "driftw_state.json")
 BETS = os.path.join("logs", "driftw_bets.csv")
-ERA = "driftw1"
+# driftw2-fin (Adam 7/23 evening): ONE category group only - Commodities +
+# Financials (daily closes, index/metal/energy ranges). Adam picked it over
+# the sports recommendation; the gate decides. Era change = fresh $100 and
+# the driftw1 mixed-universe trades erased from the ledger (Adam's explicit
+# call; raw record survives in driftw_bets.csv + archived state file).
+ERA = "driftw2-fin"
+CATEGORIES = {c.strip() for c in os.environ.get(
+    "DRIFTW_CATEGORIES", "Commodities,Financials").split(",") if c.strip()}
 
 MIN_C = int(os.environ.get("DRIFTW_MIN_C", "65"))          # side price floor
 UP_C = float(os.environ.get("DRIFTW_UP_C", "2"))           # min climb / scan
@@ -76,6 +83,8 @@ def find_wide_markets(max_hrs=MAX_H):
             st = ev.get("series_ticker", "") or ""
             if "MVE" in st or st in we.SERIES:
                 continue                    # combos out; weather = drift1's turf
+            if (ev.get("category") or "") not in CATEGORIES:
+                continue                    # one category group only (driftw2)
             ev_tk = ev.get("event_ticker", "") or ""
             ev_title = ev.get("title", "") or ""
             for mk in ev.get("markets", []) or []:
@@ -129,18 +138,29 @@ class DriftWide:
         if os.path.exists(STATE):
             try:
                 d = json.load(open(STATE))
-                for k in ("start", "cash", "bets", "history", "last_mid",
-                          "last_vol", "wins", "losses", "fees", "placed"):
-                    if k in d:
-                        setattr(self, k, d[k])
             except Exception:
-                pass
+                return
+            if d.get("era") != ERA:
+                # era change: fresh $100 book, prior-era trades erased from
+                # the ledger (Adam 7/23). The old state is archived, not
+                # deleted, and driftw_bets.csv keeps the raw record.
+                try:
+                    os.replace(STATE, STATE.replace(
+                        ".json", "_%s_archived.json" % (d.get("era") or "v1")))
+                except Exception:
+                    pass
+                return
+            for k in ("start", "cash", "bets", "history", "last_mid",
+                      "last_vol", "wins", "losses", "fees", "placed"):
+                if k in d:
+                    setattr(self, k, d[k])
 
     def save(self):
         try:
             os.makedirs("logs", exist_ok=True)
             mode, n = self._gate()
-            d = {"updated": now(), "start": self.start, "cash": self.cash,
+            d = {"updated": now(), "era": ERA,
+                 "start": self.start, "cash": self.cash,
                  "bets": self.bets, "history": self.history[-120:],
                  "last_mid": self.last_mid, "last_vol": self.last_vol,
                  "wins": self.wins, "losses": self.losses, "fees": self.fees,
@@ -179,9 +199,10 @@ class DriftWide:
     def _open_value_c(self):
         return sum(b["entry"] * b["count"] for b in self.bets.values())
 
-    # ---- gate: same contract as every other book ----
+    # ---- gate: same contract as every other book (current era only) ----
     def _gate(self):
-        cur = [h for h in self.history if h.get("outcome") in (0, 1)][-60:]
+        cur = [h for h in self.history if h.get("outcome") in (0, 1)
+               and h.get("era") == ERA][-60:]
         n = len(cur)
         if n < GATE_MIN_N:
             return "probe", n

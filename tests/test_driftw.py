@@ -30,7 +30,7 @@ def test_level_entry_first_sight(tmp_path, monkeypatch):
     assert b.place(mkts=[_mk(bid=82, ask=85)]) == 1
     bet = next(iter(b.bets.values()))
     assert bet["side"] == "yes" and bet["entry"] == 82
-    assert bet["era"] == "driftw1" and bet["trig"] == "level"
+    assert bet["era"] == "driftw2-fin" and bet["trig"] == "level"
     assert abs(bet["pside"] - 0.835) < 0.01     # market prob, not a model
 
 
@@ -82,7 +82,7 @@ def test_probe_sizing_and_gate(tmp_path, monkeypatch):
     assert bet["entry"] * bet["count"] <= dw.PROBE_COST_CENTS   # probe cap
     assert b._gate() == ("probe", 0)
     # 30 settled winners at good calibration -> scale
-    b.history = [{"outcome": 1, "pnl": 0.10, "pside": 0.9} for _ in range(30)]
+    b.history = [{"outcome": 1, "pnl": 0.10, "pside": 0.9, "era": dw.ERA} for _ in range(30)]
     mode, n = b._gate()
     assert mode == "scale" and n == 30
 
@@ -91,7 +91,7 @@ def test_stop_and_trail(tmp_path, monkeypatch):
     b = _bot(tmp_path, monkeypatch)
     b.bets = {"T1": {"side": "yes", "entry": 82, "count": 1, "fee": 1,
                      "pside": 0.83, "name": "x", "event": "E1", "ots": "",
-                     "era": "driftw1", "trig": "level", "peak": 83.0}}
+                     "era": "driftw2-fin", "trig": "level", "peak": 83.0}}
     # holds while favorite and near peak
     assert b.stop_check(quotes={"T1": (80, 84)}) == 0
     # trail: peak ran to 95, now back to 79 mid -> >=15c off peak -> exit
@@ -101,7 +101,7 @@ def test_stop_and_trail(tmp_path, monkeypatch):
     # stop: below 50c mid -> thesis dead
     b.bets = {"T2": {"side": "yes", "entry": 82, "count": 1, "fee": 1,
                      "pside": 0.83, "name": "x", "event": "E2", "ots": "",
-                     "era": "driftw1", "trig": "level", "peak": 83.0}}
+                     "era": "driftw2-fin", "trig": "level", "peak": 83.0}}
     assert b.stop_check(quotes={"T2": (44, 48)}) == 1
     assert b.history[-1]["stopped"] is True
 
@@ -110,3 +110,31 @@ def test_weather_series_excluded():
     # the scanner predicate: weather series belong to drift1, never driftw
     import weather_edge as we
     assert "KXHIGHCHI" in we.SERIES        # sanity: the exclusion set exists
+
+
+def test_era_reset_wipes_old_ledger(tmp_path, monkeypatch):
+    import json
+    monkeypatch.setattr(dw, "STATE", str(tmp_path / "s.json"))
+    monkeypatch.setattr(dw, "BETS", str(tmp_path / "b.csv"))
+    # a driftw1-era state on disk -> load() archives it and starts fresh $100
+    json.dump({"era": "driftw1", "cash": 8285.0, "wins": 1, "losses": 1,
+               "bets": {"T": {}}, "history": [{"outcome": 0, "pnl": -0.9}]},
+              open(tmp_path / "s.json", "w"))
+    b = dw.DriftWide()
+    assert b.cash == 10000.0 and not b.bets and not b.history
+    assert b.wins == 0 and b.losses == 0
+    assert (tmp_path / "s_driftw1_archived.json").exists()   # record kept
+
+
+def test_gate_counts_current_era_only(tmp_path, monkeypatch):
+    b = _bot(tmp_path, monkeypatch)
+    # 30 old-era winners must NOT open the gate
+    b.history = [{"outcome": 1, "pnl": 0.10, "pside": 0.9, "era": "driftw1"}
+                 for _ in range(30)]
+    assert b._gate() == ("probe", 0)
+
+
+def test_category_filter():
+    # scanner keeps Commodities/Financials, drops Crypto/Sports events
+    assert "Commodities" in dw.CATEGORIES and "Financials" in dw.CATEGORIES
+    assert "Crypto" not in dw.CATEGORIES and "Sports" not in dw.CATEGORIES
