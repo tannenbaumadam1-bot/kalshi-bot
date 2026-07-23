@@ -310,15 +310,16 @@ def build_data():
             b["upnl"] = round((mark - b.get("entry", 0)) * b.get("count", 0) / 100.0, 2)
             du += b["upnl"]
             dval += b["value"]
-        held = sum(o.get("entry", 0) * o.get("count", 0) for o in rest) / 100.0
         out[key]["open"] = dop
         out[key]["resting"] = rest
         out[key]["unrealized"] = round(du, 2)
         out[key]["history"] = list(reversed((lv.get("history") or [])[-15:]))
         out[key]["nickel"] = lv.get("nickel")
         if lv.get("balance_c") is not None:
-            out[key]["marked_nav"] = round(
-                lv["balance_c"] / 100.0 + dval + held, 2)
+            # Kalshi's balance still includes cash committed to resting buy
+            # orders (verified live 7/23: bal $100.09 with $59.81 resting),
+            # so NAV = balance + FILLED position value only.
+            out[key]["marked_nav"] = round(lv["balance_c"] / 100.0 + dval, 2)
     # poly reward-farming book RETIRED 7/23 (ledger archived, not deleted)
     for key, fname in (("drift", "drift_state.json"),
                        ("driftw", "driftw_state.json")):
@@ -627,7 +628,7 @@ async function load(){
     const bal=(L.balance_c!=null)?L.balance_c/100:null;
     $('rmtiles').innerHTML=[
       tile('Account balance',bal!=null?F(bal):NA,'live from Kalshi'),
-      tile('Marked NAV',(L.marked_nav!=null)?F(L.marked_nav):NA,'balance + positions + resting'),
+      tile('Marked NAV',(L.marked_nav!=null)?F(L.marked_nav):NA,'balance + filled positions'),
       tile('Realized P&L','<span class="'+C(S.net)+'">'+M(S.net||0)+'</span>','' ),
       tile('Unrealized',(L.unrealized!=null)?'<span class="'+C(L.unrealized)+'">'+M(L.unrealized)+'</span>':NA,''),
       tile("Today's P&L",'<span class="'+C(S.day_pnl)+'">'+M(S.day_pnl||0)+'</span>','halts at -$12'),
