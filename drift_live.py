@@ -99,6 +99,7 @@ class DriftLive:
         self.day_pnl_c = 0.0
         self.halted = False
         self.history = []
+        self.settled_tks = []    # tickers already settled by us (anti-double-settle)
         self.dry_balance_c = 10000
         self.load()
 
@@ -112,15 +113,36 @@ class DriftLive:
                 for k in ("bets", "pending", "last_mid", "last_vol",
                           "realized_c", "fees_c", "wins", "losses", "placed",
                           "canceled", "day", "day_pnl_c", "history",
-                          "dry_balance_c"):
+                          "settled_tks", "dry_balance_c"):
                     if k in d:
                         setattr(self, k, d[k])
             except Exception:
                 pass
 
+    def _real_record(self):
+        """The HONEST record (Adam 7/25: 'bets have lost'): every realized
+        outcome counts - a stopped/trailed loser IS a loss even though it
+        never reached settlement. Deduped by ticker+open-time so any
+        double-booked settle rows can't inflate it."""
+        seen, rw, rl = set(), 0, 0
+        for h in self.history:
+            k = (h.get("tk") or (h.get("city"), h.get("strike"),
+                                 h.get("kind"), h.get("cap"), h.get("hl")),
+                 h.get("side"), h.get("ots"))
+            if k in seen:
+                continue
+            seen.add(k)
+            p = h.get("pnl") or 0
+            if p > 0:
+                rw += 1
+            elif p < 0:
+                rl += 1
+        return rw, rl
+
     def save(self, balance_c=None):
         os.makedirs("logs", exist_ok=True)
         mode_gate, gate_n = self._gate()
+        real_w, real_l = self._real_record()
         d = {"updated": now(), "mode": self.mode,
              "balance_c": balance_c,
              "bets": self.bets, "pending": self.pending,
@@ -130,12 +152,14 @@ class DriftLive:
              "placed": self.placed, "canceled": self.canceled,
              "day": self.day, "day_pnl_c": self.day_pnl_c,
              "dry_balance_c": self.dry_balance_c,
+             "settled_tks": self.settled_tks[-300:],
              "nickel": self._nickel_stats(),
              "history": self.history[-200:],
              "summary": {
                  "mode": self.mode,
                  "net": round(self.realized_c / 100, 2),
                  "wins": self.wins, "losses": self.losses,
+                 "real_wins": real_w, "real_losses": real_l,
                  "open": len(self.bets), "resting": len(self.pending),
                  "placed": self.placed, "canceled": self.canceled,
                  "fees": round(self.fees_c / 100, 2),
@@ -365,15 +389,23 @@ class DriftLive:
             if p.get("ticker"):
                 by_tk[p["ticker"]] = p
         changed = 0
+        done = set(self.settled_tks)
         for tk, p in by_tk.items():
             pos = int(round(_num(p, "position_fp", "position")))
             if pos == 0:
                 continue
+            if tk in done:
+                continue    # we already settled this - the positions API can
+                            # lag settlement; re-adopting would double-count
             side = "yes" if pos > 0 else "no"
             cnt = abs(pos)
             b = self.bets.get(tk)
             if b is not None and b.get("side") == side and int(b.get("count", 0)) == cnt:
                 continue
+            if b is None and fetch_result(tk) is not None:
+                continue    # market already settled: the payout is in the
+                            # balance; adopting a stale position row would
+                            # book a phantom settlement
             exposure_c = abs(_num(p, "market_exposure_dollars",
                                   "market_exposure", dollars=True)) * 100.0
             entry = (b or {}).get("entry")
@@ -427,7 +459,9 @@ class DriftLive:
                 self.dry_balance_c += payout * b["count"]
             self.wins += int(won)
             self.losses += int(not won)
-            self.history.append({"city": b["city"], "strike": b["strike"],
+            self.settled_tks.append(tk)
+            self.settled_tks = self.settled_tks[-300:]
+            self.history.append({"tk": tk, "city": b["city"], "strike": b["strike"],
                                  "kind": b.get("kind", "ge"), "cap": b.get("cap"),
                                  "hl": b["hl"], "side": b["side"],
                                  "trig": b.get("trig"),
@@ -478,7 +512,7 @@ class DriftLive:
             self.fees_c += exit_fee
             if self.client is None:
                 self.dry_balance_c += bid * cnt - exit_fee
-            self.history.append({"city": b["city"], "strike": b["strike"],
+            self.history.append({"tk": tk, "city": b["city"], "strike": b["strike"],
                                  "kind": b.get("kind", "ge"), "cap": b.get("cap"),
                                  "hl": b["hl"], "side": b["side"],
                                  "trig": b.get("trig"),

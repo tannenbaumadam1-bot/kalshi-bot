@@ -645,7 +645,8 @@ async function load(){
       tile('Realized P&L','<span class="'+C(S.net)+'">'+M(S.net||0)+'</span>','' ),
       tile('Unrealized',(L.unrealized!=null)?'<span class="'+C(L.unrealized)+'">'+M(L.unrealized)+'</span>':NA,''),
       tile("Today's P&L",'<span class="'+C(S.day_pnl)+'">'+M(S.day_pnl||0)+'</span>','halts at -$12'),
-      tile('Record',(S.wins||0)+'W / '+(S.losses||0)+'L',(S.open||0)+' filled &middot; '+(S.resting||0)+' resting'),
+      tile('Record (all realized)',(S.real_wins!=null)?((S.real_wins||0)+'W / '+(S.real_losses||0)+'L'):((S.wins||0)+'W / '+(S.losses||0)+'L'),
+        'stopped losers count as losses &middot; settled-only: '+(S.wins||0)+'W/'+(S.losses||0)+'L &middot; '+(S.open||0)+' filled &middot; '+(S.resting||0)+' resting'),
       tile('Gate',(S.gate||'probe')+' '+(S.gate_n||0)+'/30','probe sizing until pass'),
       tile('Fees',F(S.fees||0),(S.placed||0)+' placed &middot; '+(S.canceled||0)+' canceled'),
       (L.nickel?tile('Nickel lane',(L.nickel.wins||0)+'W / '+((L.nickel.n||0)-(L.nickel.wins||0))+'L &middot; <span class="'+C(L.nickel.net)+'">'+M(L.nickel.net||0)+'</span>',(L.nickel.open||0)+'/'+(L.nickel.max_open||5)+' lanes &middot; size '+(L.nickel.size||10)):'')
