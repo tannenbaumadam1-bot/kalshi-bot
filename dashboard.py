@@ -326,8 +326,8 @@ def build_data():
             out[key]["baseline"] = baseline
             out[key]["pnl_true"] = round(out[key]["marked_nav"] - baseline, 2)
     # poly reward-farming book RETIRED 7/23 (ledger archived, not deleted)
-    for key, fname in (("drift", "drift_state.json"),
-                       ("driftw", "driftw_state.json")):
+    # drift1 paper book retired 7/25 (live executor replaced it)
+    for key, fname in (("driftw", "driftw_state.json"),):
         fpath = os.path.join("logs", fname)
         if os.path.exists(fpath):
             try:
@@ -424,7 +424,7 @@ td.num,th.num{text-align:right}
 .eras table{font-size:12.5px}
 </style></head><body><div class=wrap>
 <div class=hdr>
-  <h1>Leonard the Bot &middot; Paper</h1><span class=tag>3 books</span>
+  <h1>Leonard the Bot &middot; Paper</h1><span class=tag>LIVE + 2 paper</span>
   <span class=live id=live></span>
   <span class=upd id=upd><span class=dot id=dot></span>loading&hellip;</span>
 </div>
@@ -484,16 +484,6 @@ td.num,th.num{text-align:right}
 <table><thead><tr><th>Market</th><th>Side</th><th>Model</th><th class=num>Our prob</th>
 <th class=num>Entry</th><th class=num>Qty</th><th class=num>Fee</th><th>Result</th><th class=num>P&amp;L</th></tr></thead>
 <tbody id=settled></tbody></table>
-<h2>Momentum drift <span style="text-transform:none;letter-spacing:0">(paper &mdash; buy the strong side at maker, no model, stop &lt;50&cent;)</span></h2>
-<div class=grid id=drift></div>
-<div style="margin-top:10px"><div class=t style="margin-bottom:6px">Open positions (marked live)</div>
-<table><thead><tr><th>Market</th><th>Side</th><th class=num>Mkt prob</th>
-<th class=num>From&rarr;At</th><th class=num>Entry</th><th class=num>Now</th><th class=num>Qty</th><th class=num>Fee</th><th class=num>Value</th><th class=num>uP&amp;L</th></tr></thead>
-<tbody id=drifttbl></tbody></table></div>
-<div style="margin-top:14px"><div class=t style="margin-bottom:6px">Realized trades (settled &amp; stopped)</div>
-<table><thead><tr><th>Closed</th><th>Market</th><th>Side</th><th class=num>Mkt prob</th>
-<th class=num>Entry</th><th class=num>Exit/Settle</th><th class=num>Qty</th><th class=num>Fee</th><th>Result</th><th class=num>P&amp;L</th></tr></thead>
-<tbody id=driftreal></tbody></table></div>
 <h2>Momentum drift &middot; WIDE <span style="text-transform:none;letter-spacing:0">(paper &mdash; certainty rules on commodities &amp; financial-close markets &middot; era driftw2-fin)</span></h2>
 <div class=grid id=driftw></div>
 <div style="margin-top:10px"><div class=t style="margin-bottom:6px">Open positions (marked live)</div>
@@ -591,12 +581,11 @@ async function load(){
     const wStart=Number(s.start||0);
     const wNav=(k.nav!=null?Number(k.nav):(wStart+Number(s.total||0)));
     const wSettled=Number((k.era_current&&k.era_current.n)||0);
-    const DR=d.drift||null, DW=d.driftw||null;
+    const DW=d.driftw||null;
     const bookNav=B=>{if(!B)return null;const s=B.summary||{};
       const stake=(B.open||[]).reduce((a,b)=>a+(b.entry||0)*(b.count||0)/100,0);
       return s.marked_nav!=null?Number(s.marked_nav):(Number(s.cash||0)+stake);};
-    const drSum=DR?(DR.summary||{}):{}, dwSum=DW?(DW.summary||{}):{};
-    const drBank=bookNav(DR), drStart=DR?Number(drSum.start||0):0;
+    const dwSum=DW?(DW.summary||{}):{};
     const dwBank=bookNav(DW), dwStart=DW?Number(dwSum.start||0):0;
     const cards=[
       stratCard('Weather edge &middot; v9-core','forecast','era',F(wNav),
@@ -605,11 +594,6 @@ async function load(){
         +((k.era_current||{}).expectancy!=null?' &middot; '+M((k.era_current||{}).expectancy)+'/bet':'')
         +' <span class=mut>(bank incl. legacy '+M((k.era_legacy||{}).net||0)+')</span>',
         wSettled>=30?'v9 gate: n\u226530 met':'v9 probing '+wSettled+'/30','leg'),
-      stratCard('Momentum drift &middot; drift1','momentum','yes',
-        DR?F(drBank):NA,
-        DR?'<span class="'+C(drBank-drStart)+'">'+M(drBank-drStart)+'</span>':NA,
-        DR?('&middot; '+(drSum.wins||0)+'W/'+(drSum.losses||0)+'L &middot; '+(drSum.open||0)+' open &middot; buy strength, no model'):'&middot; starting',
-        DR?((drSum.gate==='scale'?'gate: passed':'probing '+(drSum.gate_n||0)+'/30')):'starting','leg'),
       stratCard('Drift WIDE &middot; driftw2-fin','momentum','yes',
         DW?F(dwBank):NA,
         DW?'<span class="'+C(dwBank-dwStart)+'">'+M(dwBank-dwStart)+'</span>':NA,
@@ -618,7 +602,7 @@ async function load(){
     ];
     $('strat').innerHTML=cards.join('');
     let tStart=wStart, tNav=wNav, nb=1;
-    if(DR){tStart+=drStart;tNav+=drBank;nb++;} if(DW){tStart+=dwStart;tNav+=dwBank;nb++;}
+    if(DW){tStart+=dwStart;tNav+=dwBank;nb++;}
     $('combined').innerHTML='<div style="display:flex;align-items:baseline;gap:12px;flex-wrap:wrap;">'
       +'<span style="font-size:11px;color:var(--mut);text-transform:uppercase;letter-spacing:.12em;">Combined paper NAV</span>'
       +'<span style="font-size:33px;font-weight:800;letter-spacing:-1px;">'+F(tNav)+'</span>'
@@ -639,17 +623,19 @@ async function load(){
       $('rmpnl').innerHTML='<span class="'+C(L.pnl_true)+'">'+M(L.pnl_true)+'</span>';
       $('rmpnld').innerHTML='<span class=mut>Kalshi NAV '+F(L.marked_nav)+' vs deposits '+F(L.baseline)+' &middot; balance + positions, marked live &middot; internal ledger is bookkeeping, the exchange is proof</span>';
     }
+    // EVERY number below is derived from Kalshi's own records (settlements,
+    // positions, balance). The bot's internal diary is never displayed.
+    const todayTrue=(L.marked_nav!=null&&S.day_nav0!=null)?(L.marked_nav-S.day_nav0):null;
     $('rmtiles').innerHTML=[
       tile('Account balance',bal!=null?F(bal):NA,'live from Kalshi'),
       tile('Marked NAV',(L.marked_nav!=null)?F(L.marked_nav):NA,'balance + filled positions'),
-      tile('Realized P&L','<span class="'+C(S.net)+'">'+M(S.net||0)+'</span>','' ),
-      tile('Unrealized',(L.unrealized!=null)?'<span class="'+C(L.unrealized)+'">'+M(L.unrealized)+'</span>':NA,''),
-      tile("Today's P&L",'<span class="'+C(S.day_pnl)+'">'+M(S.day_pnl||0)+'</span>','halts at -$12'),
-      tile('Record (all realized)',(S.real_wins!=null)?((S.real_wins||0)+'W / '+(S.real_losses||0)+'L'):((S.wins||0)+'W / '+(S.losses||0)+'L'),
-        'stopped losers count as losses &middot; settled-only: '+(S.wins||0)+'W/'+(S.losses||0)+'L &middot; '+(S.open||0)+' filled &middot; '+(S.resting||0)+' resting'),
+      tile('Realized (Kalshi)',(S.k_realized!=null&&S.has_kalshi_truth)?'<span class="'+C(S.k_realized)+'">'+M(S.k_realized)+'</span>':'<span class=mut>syncing&hellip;</span>','settlements '+((S.k_settle_realized!=null)?M(S.k_settle_realized):'&ndash;')+' &middot; exits '+((S.k_exit_realized!=null)?M(S.k_exit_realized):'&ndash;')),
+      tile('Unrealized (marked)',(L.unrealized!=null)?'<span class="'+C(L.unrealized)+'">'+M(L.unrealized)+'</span>':NA,'open positions vs cost'),
+      tile("Today's P&L",(todayTrue!=null)?'<span class="'+C(todayTrue)+'">'+M(todayTrue)+'</span>':'<span class=mut>anchoring&hellip;</span>','NAV vs day-start NAV &middot; halts at -$12'),
+      tile('Record (Kalshi settlements)',(S.has_kalshi_truth&&S.k_wins!=null)?((S.k_wins||0)+'W / '+(S.k_losses||0)+'L'):'<span class=mut>syncing&hellip;</span>','from the exchange&apos;s settlement records &middot; '+(S.open||0)+' filled &middot; '+(S.resting||0)+' resting'),
       tile('Gate',(S.gate||'probe')+' '+(S.gate_n||0)+'/30','probe sizing until pass'),
       tile('Fees',F(S.fees||0),(S.placed||0)+' placed &middot; '+(S.canceled||0)+' canceled'),
-      (L.nickel?tile('Nickel lane',(L.nickel.wins||0)+'W / '+((L.nickel.n||0)-(L.nickel.wins||0))+'L &middot; <span class="'+C(L.nickel.net)+'">'+M(L.nickel.net||0)+'</span>',(L.nickel.open||0)+'/'+(L.nickel.max_open||5)+' lanes &middot; size '+(L.nickel.size||10)):'')
+      (L.nickel?tile('Nickel lane (all realized)',(L.nickel.wins||0)+'W / '+(L.nickel.losses!=null?L.nickel.losses:((L.nickel.n||0)-(L.nickel.wins||0)))+'L &middot; <span class="'+C(L.nickel.net)+'">'+M(L.nickel.net||0)+'</span>',(L.nickel.open||0)+'/'+(L.nickel.max_open||5)+' lanes &middot; trail OFF, settle-or-stop'):'')
     ].join('');
     const rows=[];
     (L.open||[]).forEach(b=>rows.push('<tr>'+mkt(b)+side(b.side)
@@ -763,43 +749,6 @@ async function load(){
       +'<td class=num><span class="'+C(b.pnl)+'">'+M(b.pnl)+'</span></td></tr>';
     }).join('')||'<tr><td colspan=9 class=empty>No current-model bets settled yet \u2014 the open v6-ens positions settle daily.</td></tr>';
   }
-  if(d.drift){const D=d.drift,dsm=D.summary||{};
-    $('drift').innerHTML=[
-      tile('Bank (paper)',F(dsm.cash||0),'started '+F(dsm.start||0)),
-      tile('Record',(dsm.wins||0)+'W / '+(dsm.losses||0)+'L',(dsm.open||0)+' open'),
-      tile('Realized P&L',(dsm.realized!=null)?'<span class="'+C(dsm.realized)+'">'+M(dsm.realized)+'</span>':NA,''),
-      tile('Unrealized (marked)',(dsm.unrealized!=null)?'<span class="'+C(dsm.unrealized)+'">'+M(dsm.unrealized)+'</span>':NA,
-        (dsm.marked_nav!=null)?('marked NAV '+F(dsm.marked_nav)):''),
-      tile('Gate',(dsm.gate||'probe')+' '+(dsm.gate_n||0)+'/30','pside = market prob \u2192 gate measures the drift premium'),
-      tile('Trigger','\u226580\u00a2 level \u00b7 65\u201380\u00a2 climb \u00b7 \u226595\u00a2 nickel\u00d710','vol-confirmed \u00b7 same-day climbs \u00b7 ranked \u00b7 stop <50\u00a2 \u00b7 trail 15\u00a2'),
-      tile('Nickel book (\u226595\u00a2 \u00d7 '+((D.nickel&&D.nickel.size)||10)+')',(D.nickel&&D.nickel.n!=null)?((D.nickel.wins||0)+'W / '+((D.nickel.n||0)-(D.nickel.wins||0))+'L \u00b7 <span class="'+C(D.nickel.net)+'">'+M(D.nickel.net||0)+'</span>'):NA,
-        (D.nickel?((D.nickel.open||0)+'/'+((D.nickel.max_open)||5)+' lanes \u00b7 size steps 10\u219215\u219220 on \u226496\u00a2 proof'):'')),
-    ].join('');
-    const dr=[];
-    (D.open||[]).forEach(b=>dr.push('<tr>'+mkt(b)+side(b.side)
-      +'<td class=num>'+Math.round((b.pside||0)*100)+'%</td>'
-      +'<td class=num>'+(b.trig==='level'?'<span class=mut>level</span>':((b.from_mid!=null?Math.round(b.from_mid):'\u2013')+'\u2192'+(b.at_mid!=null?Math.round(b.at_mid):'\u2013')+'\u00a2'))+'</td>'
-      +'<td class=num>'+b.entry+'&cent;</td>'
-      +'<td class=num>'+(b.now!=null?b.now+'&cent;':'&ndash;')+'</td>'
-      +'<td class=num>'+b.count+(b.adds?' <span class=mut>(+'+b.adds+')</span>':'')+'</td>'
-      +'<td class=num>'+feeC(b.fee)+'</td>'
-      +'<td class=num>'+(b.value!=null?F(b.value):'&ndash;')+'</td>'
-      +'<td class=num>'+(b.upnl!=null?('<span class="'+C(b.upnl)+'">'+M(b.upnl)+'</span>'):'&ndash;')+'</td></tr>'));
-    $('drifttbl').innerHTML=dr.join('')||'<tr><td colspan=10 class=empty>No open positions \u2014 waiting for a qualifying favorite.</td></tr>';
-    const rl=[];
-    (D.settled||[]).slice(0,20).forEach(b=>{const won=Number(b.outcome)===1;
-      rl.push('<tr><td class=mut>'+((b.ts||'').slice(5,16).replace('T',' '))+'</td>'+mkt(b)+side(b.side)
-      +'<td class=num>'+Math.round((b.pside||0)*100)+'%</td>'
-      +'<td class=num>'+b.entry+'&cent;</td>'
-      +'<td class=num>'+(b.exit_px!=null?b.exit_px+'&cent;':(won?'100&cent;':'0&cent;'))+'</td>'
-      +'<td class=num>'+b.count+'</td>'
-      +'<td class=num>'+feeC(b.fee)+'</td>'
-      +'<td>'+(b.stopped?'<span class=chip style="background:rgba(232,180,76,.13);color:var(--amb)">STOP</span>':(b.faded?'<span class=chip style="background:rgba(180,120,230,.15);color:#b478e6">FADE</span>':('<span class="'+(won?'won':'lost')+'">'+(won?'WON':'LOST')+'</span>')))+'</td>'
-      +'<td class=num><span class="'+C(b.pnl)+'">'+M(b.pnl)+'</span></td></tr>');});
-    $('driftreal').innerHTML=rl.join('')||'<tr><td colspan=10 class=empty>No realized trades yet \u2014 weather markets settle the next morning; stops fire intraday if a favorite falls below 50&cent;.</td></tr>';
-  } else { $('drift').innerHTML='<div class=tile><div class=k>Momentum drift</div><div class=v>&ndash;</div><div class=s>starting&hellip;</div></div>';
-    $('drifttbl').innerHTML='<tr><td colspan=10 class=empty>No state yet.</td></tr>';
-    $('driftreal').innerHTML='<tr><td colspan=10 class=empty>No state yet.</td></tr>'; }
   if(d.driftw){const D=d.driftw,dsm=D.summary||{};
     const wmkt=b=>'<td><span class=mkt>'+((b.name||b.ticker||'')+'').replace(/&/g,'&amp;').replace(/</g,'&lt;')+'</span></td>';
     $('driftw').innerHTML=[

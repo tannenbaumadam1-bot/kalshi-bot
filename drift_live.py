@@ -54,6 +54,11 @@ DEMO_BASE = "https://demo-api.kalshi.co/trade-api/v2"
 
 # momentum decays fast: an unfilled maker join is stale in 2h, not 4
 REST_MAX_H = float(os.environ.get("DRIFT_LIVE_REST_MAX_H", "2"))
+# Nickel trail-bleed fix (7/25: trail exits cost -$5+ on a lane that was 3-0
+# at settlement - wobble papercuts exceeded the gap risk they insure against).
+# Live nickels now HOLD TO SETTLEMENT like the original design; the <50c
+# hard stop remains as the disaster brake. Re-enable with =1 if it backfires.
+NICKEL_TRAIL = os.environ.get("DRIFT_LIVE_NICKEL_TRAIL", "0") == "1"
 CYCLE_S = int(os.environ.get("DRIFT_LIVE_CYCLE_S", "600"))
 GATE_MIN_N = dp.GATE_MIN_N
 GATE_MAX_GAP = dp.GATE_MAX_GAP
@@ -100,6 +105,9 @@ class DriftLive:
         self.halted = False
         self.history = []
         self.settled_tks = []    # tickers already settled by us (anti-double-settle)
+        self.k_settlements = []  # Kalshi's OWN settlement records (the proof)
+        self.k_exit_realized_c = 0.0   # Kalshi's realized pnl on open markets
+        self.day_nav0_c = None   # NAV anchor at day start (for true today-P&L)
         self.dry_balance_c = 10000
         self.load()
 
@@ -113,7 +121,8 @@ class DriftLive:
                 for k in ("bets", "pending", "last_mid", "last_vol",
                           "realized_c", "fees_c", "wins", "losses", "placed",
                           "canceled", "day", "day_pnl_c", "history",
-                          "settled_tks", "dry_balance_c"):
+                          "settled_tks", "k_settlements", "k_exit_realized_c",
+                          "day_nav0_c", "dry_balance_c"):
                     if k in d:
                         setattr(self, k, d[k])
             except Exception:
@@ -151,8 +160,11 @@ class DriftLive:
              "wins": self.wins, "losses": self.losses,
              "placed": self.placed, "canceled": self.canceled,
              "day": self.day, "day_pnl_c": self.day_pnl_c,
+             "day_nav0_c": self.day_nav0_c,
              "dry_balance_c": self.dry_balance_c,
              "settled_tks": self.settled_tks[-300:],
+             "k_settlements": self.k_settlements[:300],
+             "k_exit_realized_c": self.k_exit_realized_c,
              "nickel": self._nickel_stats(),
              "history": self.history[-200:],
              "summary": {
@@ -160,6 +172,16 @@ class DriftLive:
                  "net": round(self.realized_c / 100, 2),
                  "wins": self.wins, "losses": self.losses,
                  "real_wins": real_w, "real_losses": real_l,
+                 # Kalshi-derived truth (only shown numbers):
+                 "k_wins": sum(1 for s in self.k_settlements if s["pnl"] > 0),
+                 "k_losses": sum(1 for s in self.k_settlements if s["pnl"] < 0),
+                 "k_settle_realized": round(sum(s["pnl"] for s in self.k_settlements), 2),
+                 "k_exit_realized": round(self.k_exit_realized_c / 100.0, 2),
+                 "k_realized": round(sum(s["pnl"] for s in self.k_settlements)
+                                     + self.k_exit_realized_c / 100.0, 2),
+                 "day_nav0": (round(self.day_nav0_c / 100.0, 2)
+                              if self.day_nav0_c is not None else None),
+                 "has_kalshi_truth": bool(self.k_settlements) or self.k_exit_realized_c != 0,
                  "open": len(self.bets), "resting": len(self.pending),
                  "placed": self.placed, "canceled": self.canceled,
                  "fees": round(self.fees_c / 100, 2),
@@ -209,13 +231,23 @@ class DriftLive:
         return dp.NICKEL_COUNT
 
     def _nickel_stats(self):
-        rows = [h for h in self.history if h.get("trig") == "nickel"]
-        settled = [h for h in rows if h.get("outcome") in (0, 1)]
+        """Honest nickel record: EVERY realized nickel outcome counts by
+        P&L sign (a trail-exited nickel that lost money is a loss), deduped."""
+        rows, seen = [], set()
+        for h in self.history:
+            if h.get("trig") != "nickel":
+                continue
+            k = (h.get("tk") or (h.get("city"), h.get("strike")), h.get("ots"))
+            if k in seen:
+                continue
+            seen.add(k)
+            rows.append(h)
         nk_open = sum(1 for b in list(self.bets.values())
                       + list(self.pending.values())
                       if b.get("trig") == "nickel")
-        return {"open": nk_open, "n": len(settled),
-                "wins": sum(1 for h in settled if h["outcome"] == 1),
+        return {"open": nk_open, "n": len(rows),
+                "wins": sum(1 for h in rows if (h.get("pnl") or 0) > 0),
+                "losses": sum(1 for h in rows if (h.get("pnl") or 0) < 0),
                 "net": round(sum(h.get("pnl", 0) for h in rows), 2),
                 "size": self._nickel_count(), "max_open": dp.NICKEL_MAX_OPEN}
 
@@ -223,7 +255,66 @@ class DriftLive:
         if today() != self.day:
             self.day = today()
             self.day_pnl_c = 0.0
+            self.day_nav0_c = None   # re-anchor today's P&L off Kalshi NAV
             self.halted = False
+
+    # ---- Kalshi truth sync: the exchange's own records are the ONLY
+    # numbers the scoreboard shows (Adam 7/25) ----
+    @staticmethod
+    def _kval(row, base):
+        """Read a Kalshi money/count field across both schemas:
+        '<base>_dollars'/'<base>_fp' string-floats or '<base>' int cents."""
+        v = row.get(base + "_dollars")
+        if v is not None:
+            try:
+                return float(v) * 100.0
+            except (TypeError, ValueError):
+                return None
+        v = row.get(base + "_fp")
+        if v is not None:
+            try:
+                return float(v)
+            except (TypeError, ValueError):
+                return None
+        v = row.get(base)
+        if v is None:
+            return None
+        try:
+            return float(v)
+        except (TypeError, ValueError):
+            return None
+
+    def sync_kalshi_truth(self):
+        """Pull Kalshi's settlements + per-market realized P&L. Every W/L and
+        realized figure shown to Adam comes from here - never from our own
+        bookkeeping (which double-counted and laundered losses into 'exits')."""
+        if self.client is None:
+            return
+        try:
+            rows = []
+            for s in self.client.get_settlements(limit=200):
+                tk = s.get("ticker") or ""
+                rev = self._kval(s, "revenue")
+                cy = self._kval(s, "yes_total_cost") or 0.0
+                cn = self._kval(s, "no_total_cost") or 0.0
+                if rev is None:
+                    continue
+                pnl_c = rev - cy - cn
+                rows.append({"tk": tk, "pnl": round(pnl_c / 100.0, 2),
+                             "ts": s.get("settled_time", "")})
+            if rows:
+                self.k_settlements = rows[:300]
+        except Exception:
+            pass
+        try:
+            tot = 0.0
+            for p in self.client.get_positions():
+                rp = self._kval(p, "realized_pnl")
+                if rp:
+                    tot += rp
+            self.k_exit_realized_c = round(tot, 2)
+        except Exception:
+            pass
 
     def open_cost_c(self):
         oc = sum(b["entry"] * b["count"] + b.get("fee", 0)
@@ -492,7 +583,8 @@ class DriftLive:
             smid = mid if b["side"] == "yes" else 100 - mid
             peak = max(float(b.get("peak", smid)), smid)
             b["peak"] = peak
-            fade = (smid >= dp.DRIFT_STOP_C and peak - smid >= dp.FADE_DROP_C)
+            fade = (smid >= dp.DRIFT_STOP_C and peak - smid >= dp.FADE_DROP_C
+                    and (b.get("trig") != "nickel" or NICKEL_TRAIL))
             if smid >= dp.DRIFT_STOP_C and not fade:
                 continue
             bid = yb if b["side"] == "yes" else 100 - ya
@@ -749,6 +841,7 @@ class DriftLive:
         self._roll_day()
         self.check_orders()
         self.reconcile_positions()   # exchange = source of truth
+        self.sync_kalshi_truth()     # W/L + realized from Kalshi's records
         self.settle()
         self.stop_check()
         self.place()
@@ -756,6 +849,10 @@ class DriftLive:
             bal = self.balance_c()
         except Exception:
             bal = None
+        if bal is not None and self.day_nav0_c is None:
+            # day anchor: balance + cost of open positions at day start
+            self.day_nav0_c = bal + sum(
+                b["entry"] * b["count"] for b in self.bets.values())
         self.save(balance_c=bal)
 
 

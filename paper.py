@@ -539,12 +539,16 @@ def main():
             wl_dry = weather_live.WeatherLive(None, mode="DRY")
         except Exception:
             wl_dry = None
-    drift_bot = None
-    if drift_paper is not None:
-        try:
-            drift_bot = drift_paper.DriftPaper()
-        except Exception:
-            drift_bot = None
+    # drift1 paper book RETIRED 7/25 (Adam: irrelevant now that the live
+    # executor runs the same brain with real money). Ledger archived, never
+    # deleted; drift_paper.py stays as the shared strategy library.
+    try:
+        _dp = os.path.join("logs", "drift_state.json")
+        if os.path.exists(_dp):
+            os.replace(_dp, os.path.join("logs", "drift_state_retired.json"))
+            print("archived logs/drift_state.json (drift1 paper retired - live book replaced it)")
+    except Exception:
+        pass
     dw_bot = None
     if drift_wide is not None:
         try:
@@ -673,16 +677,6 @@ def main():
                               f"gate {ws2['gate']} {ws2['gate_n']}/30")
                 except Exception as e:
                     print(f"  drift-wide step skipped: {e}")
-            if drift_bot is not None and n % 20 == 11:
-                try:
-                    nd = drift_bot.step()
-                    ds = drift_bot.summary()
-                    if nd or ds["open"]:
-                        print(f"  DRIFT(paper): {nd} placed | bank ${ds['cash']:.2f} | "
-                              f"{ds['wins']}W/{ds['losses']}L | open {ds['open']} | "
-                              f"gate {ds['gate']} {ds['gate_n']}/30")
-                except Exception as e:
-                    print(f"  drift step skipped: {e}")
             if (dl_dry is not None and n % 20 == 17
                     and not os.path.exists(drift_live.ARM_FILE)
                     and os.environ.get("KALSHI_DRIFT_LIVE", "") != "1"):

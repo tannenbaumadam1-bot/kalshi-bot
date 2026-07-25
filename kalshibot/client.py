@@ -133,6 +133,11 @@ class KalshiClient:
         data = self._request("GET", "/portfolio/fills", params={"limit": limit})
         return data.get("fills", []) or []
 
+    def get_settlements(self, limit: int = 100) -> List[Dict[str, Any]]:
+        data = self._request("GET", "/portfolio/settlements",
+                             params={"limit": limit})
+        return data.get("settlements", []) or []
+
     # ----- market data ---------------------------------------------
     def get_markets(self, limit: int = 100, status: str = "open",
                     cursor: Optional[str] = None) -> Dict[str, Any]:
