@@ -64,6 +64,20 @@ NICKEL_TRAIL = os.environ.get("DRIFT_LIVE_NICKEL_TRAIL", "0") == "1"
 # Open, Aug-Sep 2025, hundreds of contracts) must never pollute the
 # scoreboard. ISO strings compare lexicographically.
 LIVE_EPOCH = os.environ.get("DRIFT_LIVE_EPOCH", "2026-07-23T19:10:00")
+# --- Execution engine (7/25: ~40% fill rate, fills skewed adverse) ---
+# Requote: an unfilled maker join whose market ran away >= REQUOTE_C gets
+# cancelled and re-joined at the new bid (instead of dying stale at 2h).
+REQUOTE_C = int(os.environ.get("DRIFT_LIVE_REQUOTE_C", "2"))
+REQUOTE_MAX = int(os.environ.get("DRIFT_LIVE_REQUOTE_MAX", "2"))
+# Taker: on high-certainty level/climb signals with a thin spread, pay the
+# 1-2c toll instead of missing the winner entirely.
+TAKER_ON = os.environ.get("DRIFT_LIVE_TAKER", "1") == "1"
+TAKER_MIN_SMID = float(os.environ.get("DRIFT_LIVE_TAKER_SMID", "88"))
+TAKER_MAX_SPREAD = int(os.environ.get("DRIFT_LIVE_TAKER_SPREAD", "2"))
+# --- Bucket routing (7/25): capital flows ONLY to trigger x entry-band
+# cells that aren't proven losers on the live ledger. ---
+BUCKET_GATE_ON = os.environ.get("DRIFT_LIVE_BUCKET_GATE", "1") == "1"
+BUCKET_MIN_N = int(os.environ.get("DRIFT_LIVE_BUCKET_MIN_N", "8"))
 CYCLE_S = int(os.environ.get("DRIFT_LIVE_CYCLE_S", "600"))
 GATE_MIN_N = dp.GATE_MIN_N
 GATE_MAX_GAP = dp.GATE_MAX_GAP
@@ -113,6 +127,8 @@ class DriftLive:
         self.k_settlements = []  # Kalshi's OWN settlement records (the proof)
         self.k_exit_realized_c = 0.0   # Kalshi's realized pnl on open markets
         self.day_nav0_c = None   # NAV anchor at day start (for true today-P&L)
+        self.autopsy = []        # every exit, graded vs eventual settlement
+        self.exec_stats = {}     # maker/taker placed+filled, requotes
         self.dry_balance_c = 10000
         self.load()
 
@@ -127,7 +143,8 @@ class DriftLive:
                           "realized_c", "fees_c", "wins", "losses", "placed",
                           "canceled", "day", "day_pnl_c", "history",
                           "settled_tks", "k_settlements", "k_exit_realized_c",
-                          "day_nav0_c", "dry_balance_c"):
+                          "day_nav0_c", "autopsy", "exec_stats",
+                          "dry_balance_c"):
                     if k in d:
                         setattr(self, k, d[k])
             except Exception:
@@ -153,6 +170,73 @@ class DriftLive:
                 rl += 1
         return rw, rl
 
+    # ---- bucket calibration & capital routing ----
+    @staticmethod
+    def _bucket_key(trig, entry):
+        e = entry or 0
+        if e < 70:
+            band = "<70"
+        elif e < 80:
+            band = "70-79"
+        elif e < 85:
+            band = "80-84"
+        elif e < 90:
+            band = "85-89"
+        elif e < 93:
+            band = "90-92"
+        else:
+            band = "93-96"
+        return f"{trig}:{band}"
+
+    def _bucket_stats(self):
+        """Live evidence per trigger x entry-band (deduped, ALL realized
+        outcomes). A bucket with n >= BUCKET_MIN_N and negative net is
+        BLOCKED - capital only flows where the live edge isn't disproven."""
+        agg, seen = {}, set()
+        for h in self.history:
+            k = (h.get("tk") or (h.get("city"), h.get("strike")), h.get("ots"))
+            if k in seen or h.get("trig") in (None, "adopt"):
+                continue
+            seen.add(k)
+            bk = self._bucket_key(h.get("trig"), h.get("entry"))
+            a = agg.setdefault(bk, {"n": 0, "wins": 0, "net": 0.0})
+            a["n"] += 1
+            p = h.get("pnl") or 0
+            a["wins"] += 1 if p > 0 else 0
+            a["net"] = round(a["net"] + p, 2)
+        for bk, a in agg.items():
+            a["blocked"] = bool(BUCKET_GATE_ON and a["n"] >= BUCKET_MIN_N
+                                and a["net"] < 0)
+        return agg
+
+    def _bucket_blocked(self, bstats, trig, entry):
+        a = bstats.get(self._bucket_key(trig, entry))
+        return bool(a and a.get("blocked"))
+
+    # ---- exit autopsy: grade every exit against eventual settlement ----
+    def autopsy_check(self, max_lookups=10):
+        done = 0
+        for row in self.autopsy:
+            if row.get("res") is not None or done >= max_lookups:
+                continue
+            res = fetch_result(row["tk"])
+            if res is None:
+                continue
+            done += 1
+            won = (res == row["side"])
+            would = ((100 if won else 0) - row["entry"]) * row["count"] - row.get("fee", 0)
+            row["res"] = res
+            row["would_pnl"] = round(would / 100.0, 2)
+            row["saved"] = round(row["exit_pnl"] - row["would_pnl"], 2)
+
+    def _autopsy_summary(self):
+        graded = [r for r in self.autopsy if r.get("res") is not None]
+        return {"autopsy_exits": len(self.autopsy),
+                "autopsy_n_settled": len(graded),
+                "autopsy_saved": round(sum(r.get("saved", 0) for r in graded), 2),
+                "autopsy_would_won": sum(1 for r in graded
+                                         if r.get("would_pnl", 0) > 0)}
+
     def save(self, balance_c=None):
         os.makedirs("logs", exist_ok=True)
         mode_gate, gate_n = self._gate()
@@ -170,6 +254,8 @@ class DriftLive:
              "settled_tks": self.settled_tks[-300:],
              "k_settlements": self.k_settlements[:300],
              "k_exit_realized_c": self.k_exit_realized_c,
+             "autopsy": self.autopsy[-200:],
+             "exec_stats": self.exec_stats,
              "nickel": self._nickel_stats(),
              "history": self.history[-200:],
              "summary": {
@@ -187,6 +273,10 @@ class DriftLive:
                  "day_nav0": (round(self.day_nav0_c / 100.0, 2)
                               if self.day_nav0_c is not None else None),
                  "has_kalshi_truth": bool(self.k_settlements) or self.k_exit_realized_c != 0,
+                 "exec": dict(self.exec_stats),
+                 **self._autopsy_summary(),
+                 "buckets": [dict(v, bucket=k) for k, v in
+                             sorted(self._bucket_stats().items())],
                  "open": len(self.bets), "resting": len(self.pending),
                  "placed": self.placed, "canceled": self.canceled,
                  "fees": round(self.fees_c / 100, 2),
@@ -345,8 +435,11 @@ class DriftLive:
     def _promote_fill(self, oid, o, filled):
         """Fold `filled` contracts of a (possibly partial) fill into the book."""
         tk = o["ticker"]
-        fee = fee_cents(o["entry"], filled, taker=False)
+        is_taker = o.get("exec") == "taker"
+        fee = fee_cents(o["entry"], filled, taker=is_taker)
         self.fees_c += fee
+        ek = "filled_taker" if is_taker else "filled_maker"
+        self.exec_stats[ek] = self.exec_stats.get(ek, 0) + 1
         if tk in self.bets:
             self._merge_fill(tk, o["entry"], filled, fee)
         else:
@@ -632,6 +725,14 @@ class DriftLive:
             self._log([now(), "FADE" if fade else "STOP", self.mode, b["city"],
                        b["strike"], b["hl"], b["side"], round(b["pside"], 3),
                        bid, cnt, "", round(net / 100, 2), b.get("oid", "")])
+            # exit autopsy: grade this exit against eventual settlement
+            self.autopsy.append({"tk": tk, "side": b["side"],
+                                 "entry": b["entry"], "count": cnt,
+                                 "fee": b.get("fee", 0),
+                                 "exit_pnl": round(net / 100, 2),
+                                 "kind": "FADE" if fade else "STOP",
+                                 "trig": b.get("trig"), "ts": now()})
+            self.autopsy = self.autopsy[-200:]
             del self.bets[tk]
             stopped += 1
         return stopped
@@ -651,6 +752,7 @@ class DriftLive:
             except Exception:
                 return 0
         gate_mode, _n = self._gate()
+        bstats = self._bucket_stats()
         ev_keys, nk_keys = set(), set()
         for b in list(self.bets.values()) + list(self.pending.values()):
             k = (b["city"], b.get("date", ""), b["hl"])
@@ -674,6 +776,7 @@ class DriftLive:
                 self._maybe_pyramid_order(tk, mk, mid, gate_mode, balance_c)
                 continue
             if tk in pending_tks:
+                self._maybe_requote(tk, mk)
                 continue
             ekey = (mk["city"], mk.get("date", ""),
                     "lo" if mk["is_low"] else "hi")
@@ -693,7 +796,8 @@ class DriftLive:
                     continue
                 if ekey in nk_keys:
                     continue
-                cands.append(("nickel", 100.0 - entry, mk, side, entry, smid, ekey))
+                cands.append(("nickel", 100.0 - entry, mk, side, entry, smid,
+                              ekey, "maker"))
                 continue
             if ekey in ev_keys:
                 continue
@@ -709,10 +813,23 @@ class DriftLive:
                 continue
             if entry < 50 or entry > dp.DRIFT_MAX_ENTRY:
                 continue
-            cands.append((trig, score, mk, side, entry, smid, ekey))
+            # execution engine: on high-certainty thin-spread signals, cross
+            # the spread as taker (a 1-2c toll beats missing an 88%+ winner)
+            exec_kind = "maker"
+            if (TAKER_ON and trig in ("level", "climb")
+                    and smid >= TAKER_MIN_SMID):
+                ask_side = mk["yes_ask"] if side == "yes" else 100 - mk["yes_bid"]
+                if 0 < ask_side - entry <= TAKER_MAX_SPREAD and ask_side <= dp.DRIFT_MAX_ENTRY:
+                    entry, exec_kind = ask_side, "taker"
+            # capital routing: never re-enter a bucket the live ledger has
+            # already proven negative (n >= BUCKET_MIN_N, net < 0)
+            if trig != "nickel" and self._bucket_blocked(bstats, trig, entry):
+                self.exec_stats["bucket_blocked"] = self.exec_stats.get("bucket_blocked", 0) + 1
+                continue
+            cands.append((trig, score, mk, side, entry, smid, ekey, exec_kind))
         cands.sort(key=lambda c: ({"nickel": 0, "level": 1}.get(c[0], 2), -c[1]))
         placed = 0
-        for trig, score, mk, side, entry, smid, ekey in cands:
+        for trig, score, mk, side, entry, smid, ekey, exec_kind in cands:
             if ekey in (nk_keys if trig == "nickel" else ev_keys):
                 continue
             tk = mk["ticker"]
@@ -761,7 +878,9 @@ class DriftLive:
                 "kind": mk.get("kind", "ge"), "cap": mk.get("cap"),
                 "hl": ("lo" if mk["is_low"] else "hi"),
                 "date": mk.get("date", ""), "trig": trig, "peak": smid,
-                "ots": now()}
+                "exec": exec_kind, "ots": now()}
+            pk = "placed_" + exec_kind
+            self.exec_stats[pk] = self.exec_stats.get(pk, 0) + 1
             (nk_keys if trig == "nickel" else ev_keys).add(ekey)
             self.placed += 1
             placed += 1
@@ -769,15 +888,18 @@ class DriftLive:
                        ("lo" if mk["is_low"] else "hi"), side, round(pside, 3),
                        entry, size, "", "", oid])
             print(f"  {self.mode} DRIFT ORDER {tk}: {side.upper()} {size}x @ "
-                  f"{entry}c maker ({trig}, p={pside:.2f})")
+                  f"{entry}c {exec_kind} ({trig}, p={pside:.2f})")
         self.last_mid = new_mid             # momentum memory = last scan only
         self.last_vol = new_vol
         # DRY mode: resting orders "fill" instantly at maker price (upper
         # bound, same optimistic assumption the paper book makes)
         if self.client is None:
             for oid, o in list(self.pending.items()):
-                fee = fee_cents(o["entry"], o["count"], taker=False)
+                is_taker = o.get("exec") == "taker"
+                fee = fee_cents(o["entry"], o["count"], taker=is_taker)
                 self.fees_c += fee
+                ek = "filled_taker" if is_taker else "filled_maker"
+                self.exec_stats[ek] = self.exec_stats.get(ek, 0) + 1
                 tk0 = o["ticker"]
                 if tk0 in self.bets and o.get("is_add"):
                     self._merge_fill(tk0, o["entry"], o["count"], fee)
@@ -790,6 +912,48 @@ class DriftLive:
                                       "ots": o["ots"], "era": ERA}
                 del self.pending[oid]
         return placed
+
+    def _maybe_requote(self, tk, mk):
+        """Execution engine: if the market ran away from an unfilled maker
+        join by >= REQUOTE_C, chase it - cancel and re-join at the new bid
+        (capped at REQUOTE_MAX chases and the trigger's max entry)."""
+        oid = next((k for k, o in self.pending.items()
+                    if o["ticker"] == tk and not o.get("is_add")), None)
+        if oid is None:
+            return False
+        o = self.pending[oid]
+        if int(o.get("requotes", 0)) >= REQUOTE_MAX or o.get("exec") == "taker":
+            return False
+        join = mk["yes_bid"] if o["side"] == "yes" else 100 - mk["yes_ask"]
+        max_e = dp.NICKEL_MAX_ENTRY if o.get("trig") == "nickel" else dp.DRIFT_MAX_ENTRY
+        if join - o["entry"] < REQUOTE_C or join > max_e or join <= 0:
+            return False
+        new_oid = f"rq-{self.placed + 1}"
+        if self.client is not None:
+            try:
+                self.client.cancel_order(oid)
+            except Exception:
+                return False
+            try:
+                resp = self.client.create_order(tk, action="buy", side=o["side"],
+                                                count=o["count"], price_cents=join)
+                ro = resp.get("order") or {}
+                new_oid = (ro.get("order_id") or ro.get("id")
+                           or resp.get("order_id") or resp.get("id") or new_oid)
+            except Exception:
+                del self.pending[oid]       # canceled but not replaced
+                return False
+        if self.client is None:
+            self.dry_balance_c -= (join - o["entry"]) * o["count"]
+        o = self.pending.pop(oid)
+        o.update({"entry": join, "requotes": int(o.get("requotes", 0)) + 1,
+                  "filled_seen": 0, "ots": now()})
+        self.pending[new_oid] = o
+        self.exec_stats["requotes"] = self.exec_stats.get("requotes", 0) + 1
+        self._log([now(), "REQUOTE", self.mode, o["city"], o["strike"],
+                   o["hl"], o["side"], round(o["pside"], 3), join,
+                   o["count"], "", "", new_oid])
+        return True
 
     def _merge_fill(self, tk, price, count, fee):
         """Fold a pyramid add-on fill into the existing position."""
@@ -857,6 +1021,7 @@ class DriftLive:
         self.reconcile_positions()   # exchange = source of truth
         self.sync_kalshi_truth()     # W/L + realized from Kalshi's records
         self.settle()
+        self.autopsy_check()         # grade past exits vs settlement
         self.stop_check()
         self.place()
         try:
