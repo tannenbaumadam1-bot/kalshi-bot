@@ -59,6 +59,11 @@ REST_MAX_H = float(os.environ.get("DRIFT_LIVE_REST_MAX_H", "2"))
 # Live nickels now HOLD TO SETTLEMENT like the original design; the <50c
 # hard stop remains as the disaster brake. Re-enable with =1 if it backfires.
 NICKEL_TRAIL = os.environ.get("DRIFT_LIVE_NICKEL_TRAIL", "0") == "1"
+# Leonard's era began at arming (7/23 19:10 UTC). The settlements endpoint
+# returns the ACCOUNT'S LIFETIME history - Adam's pre-bot trades (NCAA/US
+# Open, Aug-Sep 2025, hundreds of contracts) must never pollute the
+# scoreboard. ISO strings compare lexicographically.
+LIVE_EPOCH = os.environ.get("DRIFT_LIVE_EPOCH", "2026-07-23T19:10:00")
 CYCLE_S = int(os.environ.get("DRIFT_LIVE_CYCLE_S", "600"))
 GATE_MIN_N = dp.GATE_MIN_N
 GATE_MAX_GAP = dp.GATE_MAX_GAP
@@ -293,17 +298,26 @@ class DriftLive:
         try:
             rows = []
             for s in self.client.get_settlements(limit=200):
+                ts = s.get("settled_time", "") or ""
+                if ts and ts < LIVE_EPOCH:
+                    continue        # pre-Leonard account history: not ours
                 tk = s.get("ticker") or ""
-                rev = self._kval(s, "revenue")
+                # payout comes split: 'revenue' (NO-side wins) + 'value'
+                # (YES-side wins), both int cents; costs are dollar-strings
+                rev = self._kval(s, "revenue") or 0.0
+                val = self._kval(s, "value") or 0.0
                 cy = self._kval(s, "yes_total_cost") or 0.0
                 cn = self._kval(s, "no_total_cost") or 0.0
-                if rev is None:
-                    continue
-                pnl_c = rev - cy - cn
+                # fee_cost is a dollars-STRING without the _dollars suffix
+                fraw = s.get("fee_cost_dollars", s.get("fee_cost"))
+                try:
+                    fee = float(fraw) * 100.0 if isinstance(fraw, str) else float(fraw or 0)
+                except (TypeError, ValueError):
+                    fee = 0.0
+                pnl_c = rev + val - cy - cn - fee
                 rows.append({"tk": tk, "pnl": round(pnl_c / 100.0, 2),
-                             "ts": s.get("settled_time", "")})
-            if rows:
-                self.k_settlements = rows[:300]
+                             "ts": ts})
+            self.k_settlements = rows[:300]
         except Exception:
             pass
         try:
