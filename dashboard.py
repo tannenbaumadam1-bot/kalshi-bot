@@ -320,6 +320,11 @@ def build_data():
             # orders (verified live 7/23: bal $100.09 with $59.81 resting),
             # so NAV = balance + FILLED position value only.
             out[key]["marked_nav"] = round(lv["balance_c"] / 100.0 + dval, 2)
+            # THE scoreboard (Adam 7/23: "kalshi should always be our source
+            # of proof"): true P&L = Kalshi-derived NAV minus net deposits.
+            baseline = float(os.environ.get("DRIFT_LIVE_BASELINE_D", "100.09"))
+            out[key]["baseline"] = baseline
+            out[key]["pnl_true"] = round(out[key]["marked_nav"] - baseline, 2)
     # poly reward-farming book RETIRED 7/23 (ledger archived, not deleted)
     for key, fname in (("drift", "drift_state.json"),
                        ("driftw", "driftw_state.json")):
@@ -424,7 +429,11 @@ td.num,th.num{text-align:right}
   <span class=upd id=upd><span class=dot id=dot></span>loading&hellip;</span>
 </div>
 <div id=rmwrap style="display:none;border:1.5px solid var(--amb);border-radius:12px;padding:16px 18px;margin:18px 0 4px;background:linear-gradient(180deg,rgba(232,180,76,.05),transparent)">
-<h2 style="margin:0 0 12px">Real money &middot; drift momentum executor <span id=rmmode style="text-transform:none;letter-spacing:0"></span></h2>
+<h2 style="margin:0 0 12px">Real money &middot; THE scoreboard <span id=rmmode style="text-transform:none;letter-spacing:0"></span></h2>
+<div class=hero style="margin:4px 0 12px">
+  <div class=nav><div class=k>P&amp;L &middot; Kalshi is the source of truth</div><div class=v id=rmpnl>&ndash;</div>
+    <div class=d id=rmpnld></div></div>
+</div>
 <div class=grid id=rmtiles></div>
 <div style="margin-top:12px"><div class=t style="margin-bottom:6px">Positions &amp; resting orders (marked live)</div>
 <table><thead><tr><th>Market</th><th>Side</th><th>Status</th><th class=num>Mkt prob</th>
@@ -436,7 +445,7 @@ td.num,th.num{text-align:right}
 <tbody id=rmreal></tbody></table></div>
 </div>
 <div id=combined style="margin:14px 0 2px;"></div>
-<h2>Strategy portfolio <span style="text-transform:none;letter-spacing:0">(one thesis, three books: sell the maybe, buy the certainty)</span></h2>
+<h2>Paper R&amp;D books <span style="text-transform:none;letter-spacing:0">(simulations &mdash; the proving ground for future live books, NOT the scoreboard &middot; paper fills are optimistic: instant at our price, no adverse selection)</span></h2>
 <div id=strat style="display:grid;grid-template-columns:repeat(auto-fit,minmax(205px,1fr));gap:12px;"></div>
 <h2>Weather book <span style="text-transform:none;letter-spacing:0">(forecast edge &mdash; calibration-gated)</span></h2>
 <div class=hero>
@@ -626,6 +635,10 @@ async function load(){
       +(S.halted?' <span class=chip style="background:rgba(244,105,95,.25);color:var(--red)">DAY HALTED</span>':'')
       +' <span class=mut style="font-size:11px">era dlive1 &middot; full paper brain (nickel + pyramid) &middot; caps $2/bet &middot; $60 open &middot; $12 daily halt</span>';
     const bal=(L.balance_c!=null)?L.balance_c/100:null;
+    if(L.pnl_true!=null){
+      $('rmpnl').innerHTML='<span class="'+C(L.pnl_true)+'">'+M(L.pnl_true)+'</span>';
+      $('rmpnld').innerHTML='<span class=mut>Kalshi NAV '+F(L.marked_nav)+' vs deposits '+F(L.baseline)+' &middot; balance + positions, marked live &middot; internal ledger is bookkeeping, the exchange is proof</span>';
+    }
     $('rmtiles').innerHTML=[
       tile('Account balance',bal!=null?F(bal):NA,'live from Kalshi'),
       tile('Marked NAV',(L.marked_nav!=null)?F(L.marked_nav):NA,'balance + filled positions'),
