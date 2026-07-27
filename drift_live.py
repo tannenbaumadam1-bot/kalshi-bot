@@ -164,6 +164,7 @@ class DriftLive:
         self.k_exit_realized_c = 0.0   # Kalshi's realized pnl on open markets
         self.day_nav0_c = None   # NAV anchor at day start (for true today-P&L)
         self.autopsy = []        # every exit, graded vs eventual settlement
+        self.miss = []           # every unfilled cancel, graded vs settlement
         self.exec_stats = {}     # maker/taker placed+filled, requotes
         self.k_positions = []    # Kalshi's positions, verbatim (the display)
         self.k_resting = []      # Kalshi's resting orders, verbatim
@@ -181,7 +182,7 @@ class DriftLive:
                           "realized_c", "fees_c", "wins", "losses", "placed",
                           "canceled", "day", "day_pnl_c", "history",
                           "settled_tks", "k_settlements", "k_exit_realized_c",
-                          "day_nav0_c", "autopsy", "exec_stats",
+                          "day_nav0_c", "autopsy", "miss", "exec_stats",
                           "k_positions", "k_resting", "dry_balance_c"):
                     if k in d:
                         setattr(self, k, d[k])
@@ -275,6 +276,45 @@ class DriftLive:
                 "autopsy_would_won": sum(1 for r in graded
                                          if r.get("would_pnl", 0) > 0)}
 
+    # ---- miss-autopsy (7/27): grade the road NOT taken. Every canceled
+    # unfilled buy is scored against eventual settlement so "should we
+    # cross the spread more?" is answered by the ledger, not opinion. ----
+    def _log_miss(self, o, unfilled):
+        if unfilled <= 0:
+            return
+        self.miss.append({"tk": o["ticker"], "side": o["side"],
+                          "entry": o["entry"], "count": int(unfilled),
+                          "trig": o.get("trig"),
+                          "pside": round(o.get("pside", 0), 3),
+                          "ots": o.get("ots", ""), "cts": now(), "res": None})
+        self.miss = self.miss[-200:]
+
+    def miss_check(self, max_lookups=10):
+        done = 0
+        for row in self.miss:
+            if row.get("res") is not None or done >= max_lookups:
+                continue
+            res = fetch_result(row["tk"])
+            if res is None:
+                continue
+            done += 1
+            won = (res == row["side"])
+            mfee = fee_cents(row["entry"], row["count"], taker=False)
+            would = ((100 if won else 0) - row["entry"]) * row["count"] - mfee
+            row["res"] = res
+            row["would_pnl"] = round(would / 100.0, 2)
+
+    def _miss_summary(self):
+        graded = [r for r in self.miss if r.get("res") is not None]
+        return {"miss_n": len(self.miss),
+                "miss_settled": len(graded),
+                "miss_would_won": sum(1 for r in graded
+                                      if r.get("would_pnl", 0) > 0),
+                # positive = money left on the table by not filling;
+                # negative = patience dodged losers and saved money
+                "miss_cost": round(sum(r.get("would_pnl", 0)
+                                       for r in graded), 2)}
+
     def _sync_diffs(self):
         """How far our internal book diverges from Kalshi's positions.
         0 = perfect mirror; anything else is displayed loudly, never hidden."""
@@ -304,6 +344,7 @@ class DriftLive:
              "k_settlements": self.k_settlements[:300],
              "k_exit_realized_c": self.k_exit_realized_c,
              "autopsy": self.autopsy[-200:],
+             "miss": self.miss[-200:],
              "exec_stats": self.exec_stats,
              "k_positions": self.k_positions,
              "k_resting": self.k_resting,
@@ -331,7 +372,14 @@ class DriftLive:
                  "k_fees": round(sum(s.get("fee", 0) for s in self.k_settlements)
                                  + sum(p.get("fee", 0) for p in self.k_positions) / 100.0, 2),
                  "sync_diffs": self._sync_diffs(),
+                 # live risk caps as currently applied (proof the dynamic
+                 # NAV-% compounding is active, straight from the trader)
+                 "caps": {"bet": round(self.max_bet_c / 100.0, 2),
+                          "open": round(self.max_open_c / 100.0, 2),
+                          "halt": round(self.max_day_loss_c / 100.0, 2),
+                          "dyn": DYN_CAPS},
                  **self._autopsy_summary(),
+                 **self._miss_summary(),
                  "buckets": [dict(v, bucket=k) for k, v in
                              sorted(self._bucket_stats().items())],
                  "open": len(self.bets), "resting": len(self.pending),
@@ -612,6 +660,7 @@ class DriftLive:
                     self._promote_fill(oid, o, filled)
                 if filled == 0 and seen == 0:
                     self.canceled += 1
+                self._log_miss(o, o["count"] - seen - filled)
                 del self.pending[oid]
                 continue
             # still resting: promote any PARTIAL fills so stops/settles
@@ -633,6 +682,7 @@ class DriftLive:
                         continue
                 if int(o.get("filled_seen", 0)) == 0:
                     self.canceled += 1
+                self._log_miss(o, o["count"] - int(o.get("filled_seen", 0)))
                 self._log([now(), "CANCEL", self.mode, o["city"], o["strike"],
                            o["hl"], o["side"], round(o["pside"], 3),
                            o["entry"], o["count"], "", "", oid])
@@ -1061,6 +1111,7 @@ class DriftLive:
                 new_oid = (ro.get("order_id") or ro.get("id")
                            or resp.get("order_id") or resp.get("id") or new_oid)
             except Exception:
+                self._log_miss(o, o["count"] - int(o.get("filled_seen", 0)))
                 del self.pending[oid]       # canceled but not replaced
                 return False
         if self.client is None:
@@ -1142,6 +1193,7 @@ class DriftLive:
         self.sync_kalshi_truth()     # W/L + realized from Kalshi's records
         self.settle()
         self.autopsy_check()         # grade past exits vs settlement
+        self.miss_check()            # grade unfilled cancels vs settlement
         self.stop_check()
         self.place()
         try:

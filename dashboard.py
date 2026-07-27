@@ -640,6 +640,7 @@ async function load(){
       tile("Today's P&L",(todayTrue!=null)?'<span class="'+C(todayTrue)+'">'+M(todayTrue)+'</span>':'<span class=mut>anchoring&hellip;</span>','NAV vs day-start NAV &middot; halts at -$12'),
       tile('Record (Kalshi settlements)',(S.has_kalshi_truth&&S.k_wins!=null)?((S.k_wins||0)+'W / '+(S.k_losses||0)+'L'):'<span class=mut>syncing&hellip;</span>','held-to-settlement markets, per the exchange &middot; early exits live in Realized &middot; '+((S.k_open!=null?S.k_open:S.open)||0)+' positions &middot; '+((S.k_resting_n!=null?S.k_resting_n:S.resting)||0)+' resting (per Kalshi)'),
       tile('Gate',(S.gate||'probe')+' '+(S.gate_n||0)+'/30','probe sizing until pass'),
+      (S.caps?tile('Risk caps'+(S.caps.dyn?' (compounding)':''),F(S.caps.bet)+'/bet','open '+F(S.caps.open)+' &middot; day-halt '+F(S.caps.halt)+(S.caps.dyn?' &middot; 3% / 60% / 10% of NAV, refreshed every cycle':' &middot; fixed')):''),
       tile('Fees (Kalshi)',(S.k_fees!=null)?F(S.k_fees):F(S.fees||0),(S.placed||0)+' placed &middot; '+(S.canceled||0)+' canceled'),
       tile('Mirror sync',(S.sync_diffs==null)?NA:(S.sync_diffs===0?'<span class=pos>1:1 WITH KALSHI</span>':'<span class=neg>'+S.sync_diffs+' DIFFS</span>'),'bot book vs exchange positions, checked every cycle'),
       (L.nickel?tile('Nickel lane (all realized)',(L.nickel.wins||0)+'W / '+(L.nickel.losses!=null?L.nickel.losses:((L.nickel.n||0)-(L.nickel.wins||0)))+'L &middot; <span class="'+C(L.nickel.net)+'">'+M(L.nickel.net||0)+'</span>',(L.nickel.open||0)+'/'+(L.nickel.max_open||5)+' lanes &middot; trail OFF, settle-or-stop'):''),
@@ -647,7 +648,9 @@ async function load(){
         return tile('Execution',pm?Math.round(100*fm/pm)+'% maker fill':'&ndash;',
           'takers '+(E.filled_taker||0)+'/'+(E.placed_taker||0)+' &middot; requotes '+(E.requotes||0)+' &middot; bucket-blocked '+(E.bucket_blocked||0));})(),
       tile('Exit autopsy',(S.autopsy_n_settled?('exits '+((S.autopsy_saved||0)>=0?'saved ':'cost ')+'<span class="'+C(S.autopsy_saved)+'">'+M(S.autopsy_saved||0)+'</span>'):'<span class=mut>grading&hellip;</span>'),
-        (S.autopsy_would_won||0)+' of '+(S.autopsy_n_settled||0)+' graded exits would have WON &middot; '+(S.autopsy_exits||0)+' total exits')
+        (S.autopsy_would_won||0)+' of '+(S.autopsy_n_settled||0)+' graded exits would have WON &middot; '+(S.autopsy_exits||0)+' total exits'),
+      tile('Missed fills',(S.miss_settled?('patience '+((S.miss_cost||0)>0?'cost ':'saved ')+'<span class="'+C(-(S.miss_cost||0))+'">'+M(Math.abs(S.miss_cost||0))+'</span>'):'<span class=mut>grading&hellip;</span>'),
+        (S.miss_would_won||0)+' of '+(S.miss_settled||0)+' graded unfilled cancels would have WON &middot; '+(S.miss_n||0)+' logged &middot; the case for/against crossing the spread')
     ].join('');
     $('rmbuckets').innerHTML=((S.buckets||[]).map(b=>'<tr><td>'+b.bucket+'</td>'
       +'<td class=num>'+b.n+'</td><td class=num>'+b.wins+'W/'+(b.n-b.wins)+'L</td>'

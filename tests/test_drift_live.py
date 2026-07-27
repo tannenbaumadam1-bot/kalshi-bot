@@ -194,6 +194,82 @@ def test_gate_probe_until_30(tmp_path, monkeypatch):
     assert b._gate() == ("scale", 30)
 
 
+class _FakeMissClient:
+    """Resting order that goes stale -> cancel path logs a miss."""
+    def __init__(self, oid, tk):
+        self._oid, self._tk = oid, tk
+        self.canceled = []
+
+    def get_resting_orders(self):
+        return [{"order_id": self._oid, "ticker": self._tk}]
+
+    def get_fills(self, limit=100):
+        return []
+
+    def cancel_order(self, oid):
+        self.canceled.append(oid)
+        return {}
+
+
+def test_miss_logged_on_stale_cancel(tmp_path, monkeypatch):
+    b = _bot(tmp_path, monkeypatch)
+    old = (_dt.datetime.now() - _dt.timedelta(hours=3)).isoformat()
+    b.client = _FakeMissClient("o1", "KXHIGHNY-26JUL-T86")
+    b.pending = {"o1": {"ticker": "KXHIGHNY-26JUL-T86", "side": "yes",
+                        "entry": 85, "count": 2, "pside": 0.86, "fee": 0,
+                        "trig": "level", "city": "new york", "strike": 86,
+                        "kind": "ge", "cap": None, "hl": "hi",
+                        "date": TODAY, "ots": old, "era": "dlive1"}}
+    b.check_orders()
+    assert not b.pending and b.client.canceled == ["o1"]
+    assert len(b.miss) == 1
+    m = b.miss[0]
+    assert m["tk"] == "KXHIGHNY-26JUL-T86" and m["count"] == 2
+    assert m["res"] is None
+    # partial fill before cancel -> only the UNFILLED remainder is a miss
+    b.client = _FakeMissClient("o2", "KXHIGHNY-26JUL-T87")
+    b.pending = {"o2": {"ticker": "KXHIGHNY-26JUL-T87", "side": "yes",
+                        "entry": 85, "count": 3, "pside": 0.86, "fee": 0,
+                        "trig": "level", "city": "new york", "strike": 87,
+                        "kind": "ge", "cap": None, "hl": "hi", "date": TODAY,
+                        "ots": old, "era": "dlive1", "filled_seen": 1}}
+    b.check_orders()
+    assert b.miss[-1]["count"] == 2
+
+
+def test_miss_check_grades_vs_settlement(tmp_path, monkeypatch):
+    b = _bot(tmp_path, monkeypatch)
+    b.miss = [{"tk": "W", "side": "yes", "entry": 85, "count": 2,
+               "trig": "level", "pside": 0.86, "ots": "", "cts": "",
+               "res": None},
+              {"tk": "L", "side": "yes", "entry": 90, "count": 1,
+               "trig": "level", "pside": 0.9, "ots": "", "cts": "",
+               "res": None}]
+    monkeypatch.setattr(dl, "fetch_result",
+                        lambda tk: {"W": "yes", "L": "no"}.get(tk))
+    b.miss_check()
+    wfee = dl.fee_cents(85, 2, taker=False)
+    assert b.miss[0]["would_pnl"] == round((15 * 2 - wfee) / 100, 2)  # won
+    lfee = dl.fee_cents(90, 1, taker=False)
+    assert b.miss[1]["would_pnl"] == round((-90 - lfee) / 100, 2)     # lost
+    s = b._miss_summary()
+    assert s["miss_settled"] == 2 and s["miss_would_won"] == 1
+    assert s["miss_cost"] == round(b.miss[0]["would_pnl"]
+                                   + b.miss[1]["would_pnl"], 2)
+
+
+def test_miss_persists_and_caps_in_summary(tmp_path, monkeypatch):
+    b = _bot(tmp_path, monkeypatch)
+    b._log_miss({"ticker": "T", "side": "yes", "entry": 85, "count": 1,
+                 "trig": "level", "pside": 0.86, "ots": ""}, 1)
+    b.save(balance_c=b.balance_c())
+    b2 = dl.DriftLive(None, mode="DRY")
+    assert len(b2.miss) == 1 and b2.miss[0]["tk"] == "T"
+    st = __import__("json").load(open(dl.STATE))
+    assert "miss_n" in st["summary"] and "caps" in st["summary"]
+    assert st["summary"]["caps"]["dyn"] == dl.DYN_CAPS
+
+
 def test_build_is_dry_without_key(tmp_path, monkeypatch):
     monkeypatch.setattr(dl, "STATE", str(tmp_path / "s.json"))
     monkeypatch.setattr(dl, "CONFIG", str(tmp_path / "nope.yaml"))
