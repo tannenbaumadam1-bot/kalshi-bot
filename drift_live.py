@@ -59,6 +59,23 @@ REST_MAX_H = float(os.environ.get("DRIFT_LIVE_REST_MAX_H", "2"))
 # Live nickels now HOLD TO SETTLEMENT like the original design; the <50c
 # hard stop remains as the disaster brake. Re-enable with =1 if it backfires.
 NICKEL_TRAIL = os.environ.get("DRIFT_LIVE_NICKEL_TRAIL", "0") == "1"
+# Trail-exit removal, ALL lanes (7/27, Adam-approved): exit autopsy graded
+# every live exit against eventual settlement - 4 of 5 would have WON, and
+# exiting cost -$1.56. Same wobble-tax the nickels paid. Level/climb now
+# also hold to settlement; the <50c momentum stop stays as the disaster
+# brake. Re-enable trailing with =1 if the autopsy verdict flips.
+TRAIL_ON = os.environ.get("DRIFT_LIVE_TRAIL", "0") == "1"
+# --- Compounding caps (7/27, Adam-approved; gate passed at 60 settled) ---
+# Fixed go-live caps ($2/bet) strangled quarter-Kelly the moment the book
+# earned scale mode. Caps are now % of NAV (balance + filled-position cost),
+# refreshed every place() cycle: they GROW as Leonard compounds and SHRINK
+# in drawdown. Floors keep probes viable. Set DYN_CAPS=0 to freeze.
+DYN_CAPS = os.environ.get("DRIFT_LIVE_DYN_CAPS", "1") == "1"
+BET_PCT = float(os.environ.get("DRIFT_LIVE_BET_PCT", "0.03"))    # per bet
+OPEN_PCT = float(os.environ.get("DRIFT_LIVE_OPEN_PCT", "0.60"))  # exposure
+HALT_PCT = float(os.environ.get("DRIFT_LIVE_HALT_PCT", "0.10"))  # day loss
+BET_FLOOR_C = 200    # a probe must always be placeable
+HALT_FLOOR_C = 200
 # Leonard's era began at arming (7/23 19:10 UTC). The settlements endpoint
 # returns the ACCOUNT'S LIFETIME history - Adam's pre-bot trades (NCAA/US
 # Open, Aug-Sep 2025, hundreds of contracts) must never pollute the
@@ -774,8 +791,9 @@ class DriftLive:
             smid = mid if b["side"] == "yes" else 100 - mid
             peak = max(float(b.get("peak", smid)), smid)
             b["peak"] = peak
+            trail_ok = NICKEL_TRAIL if b.get("trig") == "nickel" else TRAIL_ON
             fade = (smid >= dp.DRIFT_STOP_C and peak - smid >= dp.FADE_DROP_C
-                    and (b.get("trig") != "nickel" or NICKEL_TRAIL))
+                    and trail_ok)
             if smid >= dp.DRIFT_STOP_C and not fade:
                 continue
             bid = yb if b["side"] == "yes" else 100 - ya
@@ -822,6 +840,23 @@ class DriftLive:
         return stopped
 
     # ---- placement (maker resting orders, paper-identical triggers) ----
+    def _refresh_caps(self, balance_c):
+        """Compounding: risk caps track NAV instead of go-live dollars.
+
+        NAV basis = balance + cost of FILLED positions (Kalshi's balance
+        already includes cash held for resting orders). Percentages mean
+        winning grows the bets and drawdowns shrink them - risk stays
+        proportional without manual raises."""
+        if not DYN_CAPS:
+            return
+        nav_c = balance_c + sum(b["entry"] * b["count"]
+                                for b in self.bets.values())
+        if nav_c <= 0:
+            return
+        self.max_bet_c = max(BET_FLOOR_C, int(nav_c * BET_PCT))
+        self.max_open_c = int(nav_c * OPEN_PCT)
+        self.max_day_loss_c = max(HALT_FLOOR_C, int(nav_c * HALT_PCT))
+
     def place(self, mkts=None):
         if self.day_pnl_c <= -self.max_day_loss_c:
             self.halted = True
@@ -830,6 +865,7 @@ class DriftLive:
             balance_c = self.balance_c()
         except Exception:
             return 0
+        self._refresh_caps(balance_c)
         if mkts is None:
             try:
                 mkts = we.find_temp_markets(max_days=1)
@@ -1153,9 +1189,11 @@ def main():
             return 0
     print(f"[{now()}] drift executor started in {dl.mode} mode - FULL paper "
           f"brain incl. nickel x{dl._nickel_count()} + pyramiding "
-          f"(caps: ${dl.max_bet_c/100:.2f}/bet regular, nickels own lane, "
+          f"(caps: {'DYNAMIC %-of-NAV ' if DYN_CAPS else ''}"
+          f"${dl.max_bet_c/100:.2f}/bet regular, nickels own lane, "
           f"${dl.max_open_c/100:.2f} open, ${dl.max_day_loss_c/100:.2f} daily "
-          f"halt; rest<= {REST_MAX_H}h)")
+          f"halt; trail={'on' if TRAIL_ON else 'OFF - hold to settlement'}; "
+          f"rest<= {REST_MAX_H}h)")
     if "--once" in sys.argv:
         dl.step()
         return 0

@@ -112,6 +112,7 @@ def test_climb_needs_confirmation(tmp_path, monkeypatch):
 
 
 def test_open_cap_blocks(tmp_path, monkeypatch):
+    monkeypatch.setattr(dl, "DYN_CAPS", False)   # pin the tiny manual cap
     b = _bot(tmp_path, monkeypatch)
     b.max_open_c = 200          # tiny cap: one probe bet only
     ms = [_mk(tk=f"KXHIGHNY-26JUL-T{i}", bid=82, ask=85,
@@ -127,22 +128,63 @@ def test_daily_halt(tmp_path, monkeypatch):
     assert b.halted
 
 
-def test_stop_and_trail_dry(tmp_path, monkeypatch):
+def _lvl_bet(peak=83.0):
+    return {"side": "yes", "entry": 82, "count": 1, "fee": 1,
+            "pside": 0.83, "city": "x", "strike": 1, "kind": "ge",
+            "cap": None, "hl": "hi", "date": TODAY, "ots": "",
+            "era": "dlive1", "trig": "level", "peak": peak}
+
+
+def test_trail_off_by_default_holds_to_settlement(tmp_path, monkeypatch):
+    # 7/27 autopsy verdict: 4/5 exits would have won; trailing cost $1.56.
     b = _bot(tmp_path, monkeypatch)
-    b.bets = {"T1": {"side": "yes", "entry": 82, "count": 1, "fee": 1,
-                     "pside": 0.83, "city": "x", "strike": 1, "kind": "ge",
-                     "cap": None, "hl": "hi", "date": TODAY, "ots": "",
-                     "era": "dlive1", "trig": "level", "peak": 83.0}}
+    b.bets = {"T1": _lvl_bet(peak=95.0)}
+    assert b.stop_check(quotes={"T1": (77, 81)}) == 0     # wobble: HOLD
+    assert "T1" in b.bets
+    assert b.stop_check(quotes={"T1": (44, 48)}) == 1     # disaster stop stays
+    assert b.history[-1]["stopped"] is True
+
+
+def test_stop_and_trail_when_reenabled(tmp_path, monkeypatch):
+    monkeypatch.setattr(dl, "TRAIL_ON", True)
+    b = _bot(tmp_path, monkeypatch)
+    b.bets = {"T1": _lvl_bet()}
     assert b.stop_check(quotes={"T1": (80, 84)}) == 0     # healthy: hold
     b.bets["T1"]["peak"] = 95.0
     assert b.stop_check(quotes={"T1": (77, 81)}) == 1     # trail exit
     assert b.history[-1]["faded"] is True
-    b.bets = {"T2": {"side": "yes", "entry": 82, "count": 1, "fee": 1,
-                     "pside": 0.83, "city": "x", "strike": 1, "kind": "ge",
-                     "cap": None, "hl": "hi", "date": TODAY, "ots": "",
-                     "era": "dlive1", "trig": "level", "peak": 83.0}}
+    b.bets = {"T2": _lvl_bet()}
     assert b.stop_check(quotes={"T2": (44, 48)}) == 1     # momentum stop
     assert b.history[-1]["stopped"] is True
+
+
+def test_dynamic_caps_track_nav(tmp_path, monkeypatch):
+    b = _bot(tmp_path, monkeypatch)
+    b.dry_balance_c = 20000                     # NAV $200, nothing filled
+    b._refresh_caps(b.balance_c())
+    assert b.max_bet_c == 600                   # 3% of NAV
+    assert b.max_open_c == 12000                # 60%
+    assert b.max_day_loss_c == 2000             # 10%
+    # filled positions count toward NAV at cost
+    b.bets = {"T1": dict(_lvl_bet(), count=10)}     # +$8.20 basis
+    b._refresh_caps(b.balance_c())
+    assert b.max_open_c == int(20820 * 0.60)
+    # drawdown shrinks caps; floors keep probes viable
+    b.bets = {}
+    b.dry_balance_c = 3000
+    b._refresh_caps(b.balance_c())
+    assert b.max_bet_c == 200 and b.max_day_loss_c == 300
+    b.dry_balance_c = 1000
+    b._refresh_caps(b.balance_c())
+    assert b.max_bet_c == 200 and b.max_day_loss_c == 200   # floors
+
+
+def test_dynamic_caps_frozen_when_disabled(tmp_path, monkeypatch):
+    monkeypatch.setattr(dl, "DYN_CAPS", False)
+    b = _bot(tmp_path, monkeypatch)
+    before = (b.max_bet_c, b.max_open_c, b.max_day_loss_c)
+    b._refresh_caps(999999)
+    assert (b.max_bet_c, b.max_open_c, b.max_day_loss_c) == before
 
 
 def test_gate_probe_until_30(tmp_path, monkeypatch):
