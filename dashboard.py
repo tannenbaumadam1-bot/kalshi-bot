@@ -289,10 +289,13 @@ def build_data():
             continue
         if key != "dlive":
             continue
-        # REAL-MONEY section detail: positions, resting orders, recent
-        # realized rows, marked to live prices (same background cache)
-        dop = [dict(b, ticker=tk) for tk, b in (lv.get("bets") or {}).items()]
-        rest = [dict(o) for o in (lv.get("pending") or {}).values()]
+        # REAL-MONEY section detail: THE MIRROR - Kalshi's own positions and
+        # resting orders (written verbatim by the executor each cycle) are
+        # what renders; the bot's internal book is only a fallback.
+        dop = ([dict(b) for b in (lv.get("k_positions") or [])]
+               or [dict(b, ticker=tk) for tk, b in (lv.get("bets") or {}).items()])
+        rest = ([dict(o) for o in (lv.get("k_resting") or [])]
+                or [dict(o) for o in (lv.get("pending") or {}).values()])
         _WANT["tickers"] = (_WANT.get("tickers") or []) +             [b.get("ticker") for b in dop if b.get("ticker")]
         rp = dict(_PRICES["by_ticker"])
         du, dval = 0.0, 0.0
@@ -635,9 +638,10 @@ async function load(){
       tile('Realized (Kalshi)',(L.pnl_true!=null&&L.unrealized!=null)?'<span class="'+C(L.pnl_true-L.unrealized)+'">'+M(L.pnl_true-L.unrealized)+'</span>':'<span class=mut>syncing&hellip;</span>','NAV identity: total P&L &minus; unrealized &middot; exact by construction'),
       tile('Unrealized (marked)',(L.unrealized!=null)?'<span class="'+C(L.unrealized)+'">'+M(L.unrealized)+'</span>':NA,'open positions vs cost'),
       tile("Today's P&L",(todayTrue!=null)?'<span class="'+C(todayTrue)+'">'+M(todayTrue)+'</span>':'<span class=mut>anchoring&hellip;</span>','NAV vs day-start NAV &middot; halts at -$12'),
-      tile('Record (Kalshi settlements)',(S.has_kalshi_truth&&S.k_wins!=null)?((S.k_wins||0)+'W / '+(S.k_losses||0)+'L'):'<span class=mut>syncing&hellip;</span>','held-to-settlement markets, per the exchange &middot; early exits live in Realized &middot; '+(S.open||0)+' filled &middot; '+(S.resting||0)+' resting'),
+      tile('Record (Kalshi settlements)',(S.has_kalshi_truth&&S.k_wins!=null)?((S.k_wins||0)+'W / '+(S.k_losses||0)+'L'):'<span class=mut>syncing&hellip;</span>','held-to-settlement markets, per the exchange &middot; early exits live in Realized &middot; '+((S.k_open!=null?S.k_open:S.open)||0)+' positions &middot; '+((S.k_resting_n!=null?S.k_resting_n:S.resting)||0)+' resting (per Kalshi)'),
       tile('Gate',(S.gate||'probe')+' '+(S.gate_n||0)+'/30','probe sizing until pass'),
-      tile('Fees',F(S.fees||0),(S.placed||0)+' placed &middot; '+(S.canceled||0)+' canceled'),
+      tile('Fees (Kalshi)',(S.k_fees!=null)?F(S.k_fees):F(S.fees||0),(S.placed||0)+' placed &middot; '+(S.canceled||0)+' canceled'),
+      tile('Mirror sync',(S.sync_diffs==null)?NA:(S.sync_diffs===0?'<span class=pos>1:1 WITH KALSHI</span>':'<span class=neg>'+S.sync_diffs+' DIFFS</span>'),'bot book vs exchange positions, checked every cycle'),
       (L.nickel?tile('Nickel lane (all realized)',(L.nickel.wins||0)+'W / '+(L.nickel.losses!=null?L.nickel.losses:((L.nickel.n||0)-(L.nickel.wins||0)))+'L &middot; <span class="'+C(L.nickel.net)+'">'+M(L.nickel.net||0)+'</span>',(L.nickel.open||0)+'/'+(L.nickel.max_open||5)+' lanes &middot; trail OFF, settle-or-stop'):''),
       (function(){const E=S.exec||{};const pm=E.placed_maker||0,fm=E.filled_maker||0;
         return tile('Execution',pm?Math.round(100*fm/pm)+'% maker fill':'&ndash;',

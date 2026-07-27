@@ -85,6 +85,25 @@ PROBE_COST_CENTS = dp.PROBE_COST_CENTS
 ERA = "dlive1"
 
 
+# Self-restart on deploy (7/25: kalshi-update.timer never restarted this
+# service, so every drift_live.py fix needed a manual DO-console restart -
+# and the console kept eating commands/expiring). Now: when the source files
+# change on disk (git pull), the loop exits cleanly and systemd
+# Restart=always brings it back on the new build within 30s.
+_SRC_FILES = [os.path.abspath(__file__), os.path.abspath(dp.__file__)]
+_SRC_MTIMES = {f: os.path.getmtime(f) for f in _SRC_FILES if os.path.exists(f)}
+
+
+def _code_changed():
+    for f, m in _SRC_MTIMES.items():
+        try:
+            if os.path.getmtime(f) != m:
+                return True
+        except OSError:
+            pass
+    return False
+
+
 def now():
     return datetime.datetime.now().isoformat(timespec="seconds")
 
@@ -129,6 +148,8 @@ class DriftLive:
         self.day_nav0_c = None   # NAV anchor at day start (for true today-P&L)
         self.autopsy = []        # every exit, graded vs eventual settlement
         self.exec_stats = {}     # maker/taker placed+filled, requotes
+        self.k_positions = []    # Kalshi's positions, verbatim (the display)
+        self.k_resting = []      # Kalshi's resting orders, verbatim
         self.dry_balance_c = 10000
         self.load()
 
@@ -144,7 +165,7 @@ class DriftLive:
                           "canceled", "day", "day_pnl_c", "history",
                           "settled_tks", "k_settlements", "k_exit_realized_c",
                           "day_nav0_c", "autopsy", "exec_stats",
-                          "dry_balance_c"):
+                          "k_positions", "k_resting", "dry_balance_c"):
                     if k in d:
                         setattr(self, k, d[k])
             except Exception:
@@ -237,6 +258,17 @@ class DriftLive:
                 "autopsy_would_won": sum(1 for r in graded
                                          if r.get("would_pnl", 0) > 0)}
 
+    def _sync_diffs(self):
+        """How far our internal book diverges from Kalshi's positions.
+        0 = perfect mirror; anything else is displayed loudly, never hidden."""
+        if self.client is None:
+            return None
+        kp = {r["ticker"]: (r["side"], r["count"]) for r in self.k_positions}
+        diffs = sum(1 for tk, b in self.bets.items()
+                    if kp.get(tk) != (b.get("side"), int(b.get("count", 0))))
+        diffs += sum(1 for tk in kp if tk not in self.bets)
+        return diffs
+
     def save(self, balance_c=None):
         os.makedirs("logs", exist_ok=True)
         mode_gate, gate_n = self._gate()
@@ -256,6 +288,8 @@ class DriftLive:
              "k_exit_realized_c": self.k_exit_realized_c,
              "autopsy": self.autopsy[-200:],
              "exec_stats": self.exec_stats,
+             "k_positions": self.k_positions,
+             "k_resting": self.k_resting,
              "nickel": self._nickel_stats(),
              "history": self.history[-200:],
              "summary": {
@@ -274,6 +308,12 @@ class DriftLive:
                               if self.day_nav0_c is not None else None),
                  "has_kalshi_truth": bool(self.k_settlements) or self.k_exit_realized_c != 0,
                  "exec": dict(self.exec_stats),
+                 # mirror counts + fees straight from Kalshi's records
+                 "k_open": (len(self.k_positions) if self.client is not None else None),
+                 "k_resting_n": (len(self.k_resting) if self.client is not None else None),
+                 "k_fees": round(sum(s.get("fee", 0) for s in self.k_settlements)
+                                 + sum(p.get("fee", 0) for p in self.k_positions) / 100.0, 2),
+                 "sync_diffs": self._sync_diffs(),
                  **self._autopsy_summary(),
                  "buckets": [dict(v, bucket=k) for k, v in
                              sorted(self._bucket_stats().items())],
@@ -406,8 +446,52 @@ class DriftLive:
                     fee = 0.0
                 pnl_c = rev + val - cy - cn - fee
                 rows.append({"tk": tk, "pnl": round(pnl_c / 100.0, 2),
-                             "ts": ts})
+                             "fee": round(fee / 100.0, 2), "ts": ts})
             self.k_settlements = rows[:300]
+        except Exception:
+            pass
+        # THE MIRROR (Adam 7/25: "the tracker should perfectly reflect
+        # kalshi"): positions and resting orders are stored VERBATIM from the
+        # exchange each cycle - the dashboard renders these, never our book.
+        try:
+            kp = []
+            for p in self.client.get_positions():
+                pos = int(round(self._kval(p, "position") or 0))
+                if pos == 0:
+                    continue
+                tk = p.get("ticker") or ""
+                cnt = abs(pos)
+                exp = abs(self._kval(p, "market_exposure") or 0)
+                b = self.bets.get(tk) or {}
+                kp.append({"ticker": tk, "side": "yes" if pos > 0 else "no",
+                           "count": cnt,
+                           "entry": (int(round(exp / cnt)) if exp and cnt
+                                     else b.get("entry")),
+                           "fee": int(round(self._kval(p, "fees_paid") or 0)),
+                           "realized": round((self._kval(p, "realized_pnl") or 0) / 100.0, 2),
+                           "trig": b.get("trig"), "pside": b.get("pside"),
+                           **self._tk_meta(tk)})
+            self.k_positions = kp
+        except Exception:
+            pass
+        try:
+            kr = []
+            for o in self.client.get_resting_orders():
+                tk = o.get("ticker") or ""
+                side = o.get("side") or "?"
+                cnt = int(round(self._kval(o, "remaining_count")
+                                or self._kval(o, "count") or 0))
+                px = self._kval(o, "yes_price" if side == "yes" else "no_price")
+                if px is None:
+                    px = self._kval(o, "price")
+                ob = next((x for x in self.pending.values()
+                           if x.get("ticker") == tk), {})
+                kr.append({"ticker": tk, "side": side, "count": cnt,
+                           "entry": (int(round(px)) if px else ob.get("entry")),
+                           "action": o.get("action", "buy"),
+                           "trig": ob.get("trig"), "pside": ob.get("pside"),
+                           **self._tk_meta(tk)})
+            self.k_resting = kr
         except Exception:
             pass
         try:
@@ -1083,6 +1167,9 @@ def main():
             return 0
         except Exception as e:
             print(f"[{now()}] cycle error: {e}")
+        if _code_changed():
+            print(f"[{now()}] new build on disk - restarting (systemd revives)")
+            return 0
         time.sleep(CYCLE_S)
 
 
