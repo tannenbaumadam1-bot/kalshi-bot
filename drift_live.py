@@ -102,6 +102,15 @@ STOP_C = float(os.environ.get("DRIFT_LIVE_STOP_C", "35"))
 # cells that aren't proven losers on the live ledger. ---
 BUCKET_GATE_ON = os.environ.get("DRIFT_LIVE_BUCKET_GATE", "1") == "1"
 BUCKET_MIN_N = int(os.environ.get("DRIFT_LIVE_BUCKET_MIN_N", "8"))
+# Evidence-weighted Kelly (7/28, Adam: 'increase positions as we
+# accumulate gains'): a bucket that has PROVEN itself on the live ledger
+# (n >= KELLY_PROVEN_N settled, net > 0) earns half-Kelly sizing; every
+# unproven lane stays at quarter-Kelly. Aggression is earned, never
+# assumed - and a proven bucket that turns negative falls back (or gets
+# bucket-blocked outright). NAV %-caps still bound everything.
+KELLY_BASE = float(os.environ.get("DRIFT_LIVE_KELLY_BASE", "0.25"))
+KELLY_PROVEN_MULT = float(os.environ.get("DRIFT_LIVE_KELLY_PROVEN", "0.5"))
+KELLY_PROVEN_N = int(os.environ.get("DRIFT_LIVE_KELLY_PROVEN_N", "10"))
 CYCLE_S = int(os.environ.get("DRIFT_LIVE_CYCLE_S", "600"))
 GATE_MIN_N = dp.GATE_MIN_N
 GATE_MAX_GAP = dp.GATE_MAX_GAP
@@ -259,6 +268,13 @@ class DriftLive:
         a = bstats.get(self._bucket_key(trig, entry))
         return bool(a and a.get("blocked"))
 
+    def _kelly_frac(self, bstats, trig, entry):
+        """Evidence-weighted Kelly: proven buckets earn half-Kelly."""
+        a = bstats.get(self._bucket_key(trig, entry))
+        if a and a.get("n", 0) >= KELLY_PROVEN_N and a.get("net", 0) > 0:
+            return KELLY_PROVEN_MULT
+        return KELLY_BASE
+
     # ---- exit autopsy: grade every exit against eventual settlement ----
     def autopsy_check(self, max_lookups=10):
         done = 0
@@ -387,7 +403,11 @@ class DriftLive:
                           "dyn": DYN_CAPS},
                  **self._autopsy_summary(),
                  **self._miss_summary(),
-                 "buckets": [dict(v, bucket=k) for k, v in
+                 "buckets": [dict(v, bucket=k,
+                                  proven=bool(not v["blocked"]
+                                              and v["n"] >= KELLY_PROVEN_N
+                                              and v["net"] > 0))
+                             for k, v in
                              sorted(self._bucket_stats().items())],
                  "open": len(self.bets), "resting": len(self.pending),
                  "placed": self.placed, "canceled": self.canceled,
@@ -974,7 +994,7 @@ class DriftLive:
                 if ekey in nk_keys:
                     continue
                 cands.append(("nickel", 100.0 - entry, mk, side, entry, smid,
-                              ekey, "maker"))
+                              ekey, "maker", entry))
                 continue
             if ekey in ev_keys:
                 continue
@@ -992,7 +1012,7 @@ class DriftLive:
                 continue
             # execution engine: on high-certainty thin-spread signals, cross
             # the spread as taker (a 1-2c toll beats missing an 88%+ winner)
-            exec_kind = "maker"
+            exec_kind, bid_entry = "maker", entry
             if (TAKER_ON and trig in ("level", "climb")
                     and smid >= TAKER_MIN_SMID):
                 ask_side = mk["yes_ask"] if side == "yes" else 100 - mk["yes_bid"]
@@ -1003,10 +1023,12 @@ class DriftLive:
             if trig != "nickel" and self._bucket_blocked(bstats, trig, entry):
                 self.exec_stats["bucket_blocked"] = self.exec_stats.get("bucket_blocked", 0) + 1
                 continue
-            cands.append((trig, score, mk, side, entry, smid, ekey, exec_kind))
+            cands.append((trig, score, mk, side, entry, smid, ekey, exec_kind,
+                          bid_entry))
         cands.sort(key=lambda c: ({"nickel": 0, "level": 1}.get(c[0], 2), -c[1]))
         placed = 0
-        for trig, score, mk, side, entry, smid, ekey, exec_kind in cands:
+        for (trig, score, mk, side, entry, smid, ekey, exec_kind,
+             bid_entry) in cands:
             if ekey in (nk_keys if trig == "nickel" else ev_keys):
                 continue
             tk = mk["ticker"]
@@ -1021,10 +1043,21 @@ class DriftLive:
                 if gate_mode == "probe":
                     size = max(1, PROBE_COST_CENTS // entry)
                 else:
-                    b_odds = (100 - entry) / entry
-                    f_star = max(0.0, pside - (1 - pside) / b_odds) * 0.25
+                    # Kelly edge is measured at the BID (the drift signal);
+                    # the cost basis is whatever we actually pay (ask for
+                    # takers). Sizing takers at the ask made f*=0 always -
+                    # scale mode silently dropped every taker candidate
+                    # (and its maker join with it) until 7/28.
+                    b_odds = (100 - bid_entry) / bid_entry
+                    f_star = (max(0.0, pside - (1 - pside) / b_odds)
+                              * self._kelly_frac(bstats, trig, bid_entry))
                     bankroll = balance_c + self.open_cost_c()
                     size = int(min(f_star, dp.PER_BET_CAP) * bankroll // entry)
+                    if size < 1 and exec_kind == "taker":
+                        # edge too thin to pay the toll: rest a maker join
+                        entry, exec_kind = bid_entry, "maker"
+                        size = int(min(f_star, dp.PER_BET_CAP)
+                                   * bankroll // entry)
                     if size < 1:
                         continue
                 while size > 1 and entry * size > self.max_bet_c:

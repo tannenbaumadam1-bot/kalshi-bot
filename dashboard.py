@@ -655,7 +655,7 @@ async function load(){
     $('rmbuckets').innerHTML=((S.buckets||[]).map(b=>'<tr><td>'+b.bucket+'</td>'
       +'<td class=num>'+b.n+'</td><td class=num>'+b.wins+'W/'+(b.n-b.wins)+'L</td>'
       +'<td class=num><span class="'+C(b.net)+'">'+M(b.net)+'</span></td>'
-      +'<td>'+(b.blocked?'<span class=chip style="background:rgba(244,105,95,.15);color:var(--red)">BLOCKED</span>':'<span class=chip style="background:rgba(47,208,140,.13);color:var(--grn)">OPEN</span>')+'</td></tr>').join(''))
+      +'<td>'+(b.blocked?'<span class=chip style="background:rgba(244,105,95,.15);color:var(--red)">BLOCKED</span>':(b.proven?'<span class=chip style="background:rgba(47,208,140,.25);color:var(--grn)">&frac12; KELLY</span>':'<span class=chip style="background:rgba(47,208,140,.13);color:var(--grn)">OPEN</span>'))+'</td></tr>').join(''))
       ||'<tr><td colspan=5 class=empty>Accumulating live evidence per bucket&hellip;</td></tr>';
     const rows=[];
     (L.open||[]).forEach(b=>rows.push('<tr>'+mkt(b)+side(b.side)

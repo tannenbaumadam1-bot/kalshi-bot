@@ -162,6 +162,52 @@ def test_stop_and_trail_when_reenabled(tmp_path, monkeypatch):
     assert b.history[-1]["stopped"] is True
 
 
+def _proven_hist(n=30, entry=87):
+    return [{"outcome": 1, "pnl": 0.10, "pside": 0.9, "trig": "level",
+             "entry": entry, "tk": f"T{i}", "ots": str(i)} for i in range(n)]
+
+
+def test_evidence_weighted_kelly_fraction(tmp_path, monkeypatch):
+    b = _bot(tmp_path, monkeypatch)
+    b.history = _proven_hist()
+    bs = b._bucket_stats()
+    assert b._kelly_frac(bs, "level", 87) == dl.KELLY_PROVEN_MULT  # proven
+    assert b._kelly_frac(bs, "level", 82) == dl.KELLY_BASE     # other band
+    assert b._kelly_frac(bs, "climb", 87) == dl.KELLY_BASE     # other trig
+    # a proven bucket that goes net-negative loses the boost
+    b.history = b.history[:10] + [{"outcome": 0, "pnl": -2.0, "pside": 0.9,
+                                   "trig": "level", "entry": 87,
+                                   "tk": "TL", "ots": "x"}]
+    assert b._kelly_frac(b._bucket_stats(), "level", 87) == dl.KELLY_BASE
+
+
+def test_proven_bucket_sizes_up(tmp_path, monkeypatch):
+    b = _bot(tmp_path, monkeypatch)
+    b.history = _proven_hist()                 # gate=scale + proven 85-89
+    assert b._gate()[0] == "scale"
+    assert b.place(mkts=[_mk(bid=87, ask=89)]) == 1
+    assert next(iter(b.bets.values()))["count"] == 3   # half-Kelly
+    monkeypatch.setattr(dl, "KELLY_PROVEN_N", 999)     # same lane, unproven
+    b2 = _bot(tmp_path, monkeypatch)
+    b2.history = _proven_hist()
+    assert b2.place(mkts=[_mk(bid=87, ask=89)]) == 1
+    assert next(iter(b2.bets.values()))["count"] == 2  # quarter-Kelly
+
+
+def test_taker_falls_back_to_maker_when_toll_too_big(tmp_path, monkeypatch):
+    # regression (7/28): scale mode used to Kelly-size takers AT THE ASK,
+    # where f*=0 by construction -> every high-mid tight-spread candidate
+    # was dropped entirely (no maker join either). Now: edge measured at
+    # the bid; if a taker lot doesn't fit, rest a maker join instead.
+    monkeypatch.setattr(dl, "KELLY_PROVEN_N", 999)
+    b = _bot(tmp_path, monkeypatch)
+    b.history = _proven_hist()
+    b.dry_balance_c = 4600            # taker lot at 89c doesn't fit Kelly
+    assert b.place(mkts=[_mk(bid=87, ask=89)]) == 1
+    bet = next(iter(b.bets.values()))
+    assert bet["entry"] == 87 and bet["count"] == 1    # maker join at bid
+
+
 def test_execution_defaults_widened():
     # 7/28 (miss-autopsy 9/9 would-won): taker gate widened, stop deepened
     assert dl.TAKER_MIN_SMID == 84 and dl.TAKER_MAX_SPREAD == 3
