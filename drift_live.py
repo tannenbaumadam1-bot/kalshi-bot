@@ -89,8 +89,15 @@ REQUOTE_MAX = int(os.environ.get("DRIFT_LIVE_REQUOTE_MAX", "2"))
 # Taker: on high-certainty level/climb signals with a thin spread, pay the
 # 1-2c toll instead of missing the winner entirely.
 TAKER_ON = os.environ.get("DRIFT_LIVE_TAKER", "1") == "1"
-TAKER_MIN_SMID = float(os.environ.get("DRIFT_LIVE_TAKER_SMID", "88"))
-TAKER_MAX_SPREAD = int(os.environ.get("DRIFT_LIVE_TAKER_SPREAD", "2"))
+TAKER_MIN_SMID = float(os.environ.get("DRIFT_LIVE_TAKER_SMID", "84"))
+TAKER_MAX_SPREAD = int(os.environ.get("DRIFT_LIVE_TAKER_SPREAD", "3"))
+# 7/28 widening (Adam-approved): miss-autopsy day one - 9/9 canceled
+# unfilled orders would have WON, $3.44 forfeited to patience. Was 88/2.
+# Live disaster stop (7/28, Adam-approved): exit autopsy says 5/6 stops
+# would have WON (+ today's 4 stops were all intraday nowcast wobbles that
+# recovered) - weather favorites routinely dip through 50c and settle
+# green. Only a true collapse (<35c) gets cut now. Paper brain keeps 50.
+STOP_C = float(os.environ.get("DRIFT_LIVE_STOP_C", "35"))
 # --- Bucket routing (7/25): capital flows ONLY to trigger x entry-band
 # cells that aren't proven losers on the live ledger. ---
 BUCKET_GATE_ON = os.environ.get("DRIFT_LIVE_BUCKET_GATE", "1") == "1"
@@ -842,9 +849,9 @@ class DriftLive:
             peak = max(float(b.get("peak", smid)), smid)
             b["peak"] = peak
             trail_ok = NICKEL_TRAIL if b.get("trig") == "nickel" else TRAIL_ON
-            fade = (smid >= dp.DRIFT_STOP_C and peak - smid >= dp.FADE_DROP_C
+            fade = (smid >= STOP_C and peak - smid >= dp.FADE_DROP_C
                     and trail_ok)
-            if smid >= dp.DRIFT_STOP_C and not fade:
+            if smid >= STOP_C and not fade:
                 continue
             bid = yb if b["side"] == "yes" else 100 - ya
             if bid <= 0:

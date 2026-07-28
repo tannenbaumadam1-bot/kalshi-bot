@@ -141,7 +141,11 @@ def test_trail_off_by_default_holds_to_settlement(tmp_path, monkeypatch):
     b.bets = {"T1": _lvl_bet(peak=95.0)}
     assert b.stop_check(quotes={"T1": (77, 81)}) == 0     # wobble: HOLD
     assert "T1" in b.bets
-    assert b.stop_check(quotes={"T1": (44, 48)}) == 1     # disaster stop stays
+    # 7/28: sub-50c dips are nowcast noise (5/6 stops would have won) -
+    # 46c now HOLDS; only a true collapse below STOP_C=35 gets cut
+    assert b.stop_check(quotes={"T1": (44, 48)}) == 0
+    assert "T1" in b.bets
+    assert b.stop_check(quotes={"T1": (30, 34)}) == 1     # disaster stop
     assert b.history[-1]["stopped"] is True
 
 
@@ -154,8 +158,14 @@ def test_stop_and_trail_when_reenabled(tmp_path, monkeypatch):
     assert b.stop_check(quotes={"T1": (77, 81)}) == 1     # trail exit
     assert b.history[-1]["faded"] is True
     b.bets = {"T2": _lvl_bet()}
-    assert b.stop_check(quotes={"T2": (44, 48)}) == 1     # momentum stop
+    assert b.stop_check(quotes={"T2": (30, 34)}) == 1     # momentum stop
     assert b.history[-1]["stopped"] is True
+
+
+def test_execution_defaults_widened():
+    # 7/28 (miss-autopsy 9/9 would-won): taker gate widened, stop deepened
+    assert dl.TAKER_MIN_SMID == 84 and dl.TAKER_MAX_SPREAD == 3
+    assert dl.STOP_C == 35
 
 
 def test_dynamic_caps_track_nav(tmp_path, monkeypatch):
