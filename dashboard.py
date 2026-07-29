@@ -643,7 +643,7 @@ async function load(){
       (S.caps?tile('Risk caps'+(S.caps.dyn?' (compounding)':''),F(S.caps.bet)+'/bet','open '+F(S.caps.open)+' &middot; day-halt '+F(S.caps.halt)+(S.caps.dyn?' &middot; 3% / 60% / 10% of NAV, refreshed every cycle':' &middot; fixed')):''),
       tile('Fees (Kalshi)',(S.k_fees!=null)?F(S.k_fees):F(S.fees||0),(S.placed||0)+' placed &middot; '+(S.canceled||0)+' canceled'),
       tile('Mirror sync',(S.sync_diffs==null)?NA:(S.sync_diffs===0?'<span class=pos>1:1 WITH KALSHI</span>':'<span class=neg>'+S.sync_diffs+' DIFFS</span>'),'bot book vs exchange positions, checked every cycle'),
-      (L.nickel?tile('Nickel lane (all realized)',(L.nickel.wins||0)+'W / '+(L.nickel.losses!=null?L.nickel.losses:((L.nickel.n||0)-(L.nickel.wins||0)))+'L &middot; <span class="'+C(L.nickel.net)+'">'+M(L.nickel.net||0)+'</span>',(L.nickel.open||0)+'/'+(L.nickel.max_open||5)+' lanes &middot; trail OFF, settle-or-stop'):''),
+      (L.nickel?tile('Nickel lane (all realized)',(L.nickel.wins||0)+'W / '+(L.nickel.losses!=null?L.nickel.losses:((L.nickel.n||0)-(L.nickel.wins||0)))+'L &middot; <span class="'+C(L.nickel.net)+'">'+M(L.nickel.net||0)+'</span>',(L.nickel.open||0)+'/'+(L.nickel.max_open||5)+' lanes &middot; trail OFF, settle-or-stop'+(L.nickel.pos_cap?' &middot; NAV caps '+F(L.nickel.pos_cap)+'/pos &middot; '+F(L.nickel.lane_cap)+' lane':'')):''),
       (function(){const E=S.exec||{};const pm=E.placed_maker||0,fm=E.filled_maker||0;
         return tile('Execution',pm?Math.round(100*fm/pm)+'% maker fill':'&ndash;',
           'takers '+(E.filled_taker||0)+'/'+(E.placed_taker||0)+' &middot; requotes '+(E.requotes||0)+' &middot; bucket-blocked '+(E.bucket_blocked||0));})(),

@@ -111,6 +111,14 @@ BUCKET_MIN_N = int(os.environ.get("DRIFT_LIVE_BUCKET_MIN_N", "8"))
 KELLY_BASE = float(os.environ.get("DRIFT_LIVE_KELLY_BASE", "0.25"))
 KELLY_PROVEN_MULT = float(os.environ.get("DRIFT_LIVE_KELLY_PROVEN", "0.5"))
 KELLY_PROVEN_N = int(os.environ.get("DRIFT_LIVE_KELLY_PROVEN_N", "10"))
+# Nickel NAV guardrails (7/29, Adam-approved): the lane's payoff is
+# ~1-to-6 against (a loss eats ~6 wins) and the contract ladder was
+# escalating in raw lots while every regular bet scaled with NAV. Now no
+# single nickel may cost more than NICKEL_POS_PCT of NAV and the whole
+# lane (filled + resting) stays under NICKEL_LANE_PCT - same trades,
+# sized to survive the bad week. Ladder (10->15->20) unchanged.
+NICKEL_POS_PCT = float(os.environ.get("DRIFT_LIVE_NICKEL_POS_PCT", "0.10"))
+NICKEL_LANE_PCT = float(os.environ.get("DRIFT_LIVE_NICKEL_LANE_PCT", "0.30"))
 CYCLE_S = int(os.environ.get("DRIFT_LIVE_CYCLE_S", "600"))
 GATE_MIN_N = dp.GATE_MIN_N
 GATE_MAX_GAP = dp.GATE_MAX_GAP
@@ -472,11 +480,16 @@ class DriftLive:
         nk_open = sum(1 for b in list(self.bets.values())
                       + list(self.pending.values())
                       if b.get("trig") == "nickel")
-        return {"open": nk_open, "n": len(rows),
-                "wins": sum(1 for h in rows if (h.get("pnl") or 0) > 0),
-                "losses": sum(1 for h in rows if (h.get("pnl") or 0) < 0),
-                "net": round(sum(h.get("pnl", 0) for h in rows), 2),
-                "size": self._nickel_count(), "max_open": dp.NICKEL_MAX_OPEN}
+        out = {"open": nk_open, "n": len(rows),
+               "wins": sum(1 for h in rows if (h.get("pnl") or 0) > 0),
+               "losses": sum(1 for h in rows if (h.get("pnl") or 0) < 0),
+               "net": round(sum(h.get("pnl", 0) for h in rows), 2),
+               "size": self._nickel_count(), "max_open": dp.NICKEL_MAX_OPEN}
+        nav_c = getattr(self, "last_nav_c", 0)
+        if nav_c:
+            out["pos_cap"] = round(nav_c * NICKEL_POS_PCT / 100.0, 2)
+            out["lane_cap"] = round(nav_c * NICKEL_LANE_PCT / 100.0, 2)
+        return out
 
     def _roll_day(self):
         if today() != self.day:
@@ -924,10 +937,12 @@ class DriftLive:
         already includes cash held for resting orders). Percentages mean
         winning grows the bets and drawdowns shrink them - risk stays
         proportional without manual raises."""
-        if not DYN_CAPS:
-            return
         nav_c = balance_c + sum(b["entry"] * b["count"]
                                 for b in self.bets.values())
+        if nav_c > 0:
+            self.last_nav_c = nav_c    # nickel guardrails read this too
+        if not DYN_CAPS:
+            return
         if nav_c <= 0:
             return
         self.max_bet_c = max(BET_FLOOR_C, int(nav_c * BET_PCT))
@@ -1039,6 +1054,20 @@ class DriftLive:
                        if b.get("trig") == "nickel") >= dp.NICKEL_MAX_OPEN:
                     continue
                 size = self._nickel_count()   # own lane: exempt from max_bet_c
+                # NAV guardrails: single nickel <= 10% NAV, lane <= 30%
+                nav_c = getattr(self, "last_nav_c", 0) or (
+                    balance_c + sum(b["entry"] * b["count"]
+                                    for b in self.bets.values()))
+                pos_cap_c = int(nav_c * NICKEL_POS_PCT)
+                lane_cost = sum(b["entry"] * b["count"]
+                                for b in list(self.bets.values())
+                                + list(self.pending.values())
+                                if b.get("trig") == "nickel")
+                while size > 1 and entry * size > pos_cap_c:
+                    size -= 1
+                if (entry * size > pos_cap_c
+                        or lane_cost + entry * size > int(nav_c * NICKEL_LANE_PCT)):
+                    continue
             else:
                 if gate_mode == "probe":
                     size = max(1, PROBE_COST_CENTS // entry)

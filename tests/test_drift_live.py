@@ -208,6 +208,28 @@ def test_taker_falls_back_to_maker_when_toll_too_big(tmp_path, monkeypatch):
     assert bet["entry"] == 87 and bet["count"] == 1    # maker join at bid
 
 
+def test_nickel_pos_cap_trims_to_nav(tmp_path, monkeypatch):
+    # 7/29: no single nickel may cost more than 10% of NAV
+    b = _bot(tmp_path, monkeypatch)
+    b.dry_balance_c = 3000                    # NAV $30 -> pos cap $3.00
+    assert b.place(mkts=[_mk(bid=95, ask=97)]) == 1
+    bet = next(iter(b.bets.values()))
+    assert bet["trig"] == "nickel" and bet["count"] == 3   # 10 -> 3
+    assert bet["entry"] * bet["count"] <= 300
+
+
+def test_nickel_lane_cap_blocks_fourth(tmp_path, monkeypatch):
+    # lane (filled + resting) capped at 30% of NAV
+    b = _bot(tmp_path, monkeypatch)
+    b.dry_balance_c = 10000                   # lane cap $30 -> three 10-lots
+    ms = [_mk(tk=f"KXHIGHNY-26JUL-N{i}", bid=95, ask=97, city=f"c{i}",
+              strike=i) for i in range(7)]
+    b.place(mkts=ms)
+    nk = [x for x in b.bets.values() if x["trig"] == "nickel"]
+    assert len(nk) == 3                       # 3 x $9.50 fits, 4th would break
+    assert sum(x["entry"] * x["count"] for x in nk) <= 3000
+
+
 def test_execution_defaults_widened():
     # 7/28 (miss-autopsy 9/9 would-won): taker gate widened, stop deepened
     assert dl.TAKER_MIN_SMID == 84 and dl.TAKER_MAX_SPREAD == 3
