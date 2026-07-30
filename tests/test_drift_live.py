@@ -230,6 +230,42 @@ def test_nickel_lane_cap_blocks_fourth(tmp_path, monkeypatch):
     assert sum(x["entry"] * x["count"] for x in nk) <= 3000
 
 
+def _stale_order(tk="T1", entry=80, count=2, trig="level"):
+    return {"ticker": tk, "side": "yes", "entry": entry, "count": count,
+            "pside": 0.82, "trig": trig, "city": "x", "strike": 1,
+            "hl": "hi", "kind": "ge", "cap": None, "date": TODAY,
+            "ots": "", "era": "dlive1", "peak": float(entry)}
+
+
+def test_cross_expiring_takes_the_ask(tmp_path, monkeypatch):
+    # 7/30: 20/20 expired joins would have won ($10.90) -> cross instead
+    b = _bot(tmp_path, monkeypatch)
+    assert b._cross_expiring(_stale_order(), 2, q=(82, 84)) is True
+    assert "T1" in b.bets and b.bets["T1"]["count"] == 2
+    assert b.bets["T1"]["entry"] == 84                 # paid the ask
+    assert b.exec_stats.get("placed_taker") == 1
+    assert b.exec_stats.get("filled_taker") == 1       # DRY: instant fill
+    assert b.exec_stats.get("cross_expiry") == 1
+
+
+def test_cross_expiring_refuses_bad_setups(tmp_path, monkeypatch):
+    b = _bot(tmp_path, monkeypatch)
+    # market ran away past the 5c chase cap: 90 - 80 > 5
+    assert b._cross_expiring(_stale_order(tk="T2"), 2, q=(88, 90)) is False
+    # signal faded below our entry: smid 76 < 80
+    assert b._cross_expiring(_stale_order(tk="T3"), 2, q=(74, 78)) is False
+    # nothing unfilled
+    assert b._cross_expiring(_stale_order(tk="T4"), 0, q=(82, 84)) is False
+    assert not b.bets and not b.pending
+
+
+def test_cross_expiring_respects_caps(tmp_path, monkeypatch):
+    b = _bot(tmp_path, monkeypatch)
+    b.max_bet_c = 170                                   # 84c x 2 = 168 fits
+    assert b._cross_expiring(_stale_order(count=3), 3, q=(82, 84)) is True
+    assert b.bets["T1"]["count"] == 2                   # trimmed 3 -> 2
+
+
 def test_execution_defaults_widened():
     # 7/28 (miss-autopsy 9/9 would-won): taker gate widened, stop deepened
     assert dl.TAKER_MIN_SMID == 84 and dl.TAKER_MAX_SPREAD == 3
@@ -290,6 +326,7 @@ class _FakeMissClient:
 
 
 def test_miss_logged_on_stale_cancel(tmp_path, monkeypatch):
+    monkeypatch.setattr(dl, "CROSS_EXPIRY", False)   # isolate miss logging
     b = _bot(tmp_path, monkeypatch)
     old = (_dt.datetime.now() - _dt.timedelta(hours=3)).isoformat()
     b.client = _FakeMissClient("o1", "KXHIGHNY-26JUL-T86")

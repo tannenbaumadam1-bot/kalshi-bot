@@ -119,6 +119,14 @@ KELLY_PROVEN_N = int(os.environ.get("DRIFT_LIVE_KELLY_PROVEN_N", "10"))
 # sized to survive the bad week. Ladder (10->15->20) unchanged.
 NICKEL_POS_PCT = float(os.environ.get("DRIFT_LIVE_NICKEL_POS_PCT", "0.10"))
 NICKEL_LANE_PCT = float(os.environ.get("DRIFT_LIVE_NICKEL_LANE_PCT", "0.30"))
+# Cross-on-expiry (7/30, Adam-approved): miss-autopsy hit 20/20 - EVERY
+# unfilled cancel went on to WIN, $10.90 forfeited vs +$3.09 era profit.
+# When a maker join goes stale (2h) and the signal still holds (side-mid
+# >= our entry, ask within the trigger's band and <= CROSS_CHASE cents
+# above it), pay the ask instead of dying on the vine. All caps, bucket
+# blocks and the NAV nickel guardrails still apply to the cross.
+CROSS_EXPIRY = os.environ.get("DRIFT_LIVE_CROSS_EXPIRY", "1") == "1"
+CROSS_MAX_CHASE = int(os.environ.get("DRIFT_LIVE_CROSS_CHASE", "5"))
 CYCLE_S = int(os.environ.get("DRIFT_LIVE_CYCLE_S", "600"))
 GATE_MIN_N = dp.GATE_MIN_N
 GATE_MAX_GAP = dp.GATE_MAX_GAP
@@ -319,6 +327,84 @@ class DriftLive:
                           "pside": round(o.get("pside", 0), 3),
                           "ots": o.get("ots", ""), "cts": now(), "res": None})
         self.miss = self.miss[-200:]
+
+    def _cross_expiring(self, o, count, q=None):
+        """A stale unfilled join whose signal still holds crosses the
+        spread as a taker instead of being forfeited. Returns True if a
+        replacement taker order was placed for `count` (possibly trimmed
+        to caps) contracts."""
+        if count <= 0:
+            return False
+        tk = o["ticker"]
+        if q is None:
+            try:
+                q = dp.DriftPaper._quotes(self, [tk]).get(tk)
+            except Exception:
+                q = None
+        if not q or not q[0] or not q[1]:
+            return False
+        yb, ya = q
+        bid_s = yb if o["side"] == "yes" else 100 - ya
+        ask_s = ya if o["side"] == "yes" else 100 - yb
+        smid = (bid_s + ask_s) / 2.0
+        max_e = (dp.NICKEL_MAX_ENTRY if o.get("trig") == "nickel"
+                 else dp.DRIFT_MAX_ENTRY)
+        if (ask_s <= 0 or ask_s > max_e or smid < o["entry"]
+                or ask_s - o["entry"] > CROSS_MAX_CHASE):
+            return False
+        if (o.get("trig") != "nickel"
+                and self._bucket_blocked(self._bucket_stats(),
+                                         o.get("trig"), ask_s)):
+            return False
+        size = int(count)
+        if o.get("trig") == "nickel":
+            nav_c = getattr(self, "last_nav_c", 0)
+            if nav_c:
+                cap = int(nav_c * NICKEL_POS_PCT)
+                while size > 1 and ask_s * size > cap:
+                    size -= 1
+                if ask_s * size > cap:
+                    return False
+        else:
+            while size > 1 and ask_s * size > self.max_bet_c:
+                size -= 1
+            if ask_s * size > self.max_bet_c:
+                return False
+        try:
+            bal = self.balance_c()
+        except Exception:
+            return False
+        if bal - ask_s * size < self.reserve_c:
+            return False
+        if self.open_cost_c() + ask_s * size > self.max_open_c:
+            return False
+        new_oid = f"xc-{self.placed + 1}"
+        if self.client is not None:
+            try:
+                resp = self.client.create_order(tk, action="buy",
+                                                side=o["side"], count=size,
+                                                price_cents=ask_s)
+                ro = resp.get("order") or {}
+                new_oid = (ro.get("order_id") or ro.get("id")
+                           or resp.get("order_id") or resp.get("id")
+                           or new_oid)
+            except Exception:
+                return False
+        no = dict(o)
+        no.update({"entry": ask_s, "count": size, "exec": "taker",
+                   "filled_seen": 0, "requotes": 0, "ots": now()})
+        self.pending[new_oid] = no
+        self.placed += 1
+        self.exec_stats["placed_taker"] = self.exec_stats.get("placed_taker", 0) + 1
+        self.exec_stats["cross_expiry"] = self.exec_stats.get("cross_expiry", 0) + 1
+        if self.client is None:
+            self.dry_balance_c -= ask_s * size
+            self._promote_fill(new_oid, no, size)
+            del self.pending[new_oid]
+        self._log([now(), "XCROSS", self.mode, o["city"], o["strike"],
+                   o["hl"], o["side"], round(o["pside"], 3), ask_s, size,
+                   "", "", new_oid])
+        return True
 
     def miss_check(self, max_lookups=10):
         done = 0
@@ -720,9 +806,12 @@ class DriftLive:
                         self.client.cancel_order(oid)
                     except Exception:
                         continue
-                if int(o.get("filled_seen", 0)) == 0:
-                    self.canceled += 1
-                self._log_miss(o, o["count"] - int(o.get("filled_seen", 0)))
+                unfilled = o["count"] - int(o.get("filled_seen", 0))
+                crossed = CROSS_EXPIRY and self._cross_expiring(o, unfilled)
+                if not crossed:
+                    self._log_miss(o, unfilled)
+                    if int(o.get("filled_seen", 0)) == 0:
+                        self.canceled += 1
                 self._log([now(), "CANCEL", self.mode, o["city"], o["strike"],
                            o["hl"], o["side"], round(o["pside"], 3),
                            o["entry"], o["count"], "", "", oid])
