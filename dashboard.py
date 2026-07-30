@@ -276,8 +276,9 @@ def build_data():
         except Exception:
             pass
     # live trader state (real money when armed), if present
-    for key, fname in (("live", "weather_live_state.json"),
-                       ("dlive", "drift_live_state.json")):
+    # weather-live DRY rehearsal retired 7/30 with the paper books - its
+    # stale state must not feed the header strip anymore
+    for key, fname in (("dlive", "drift_live_state.json"),):
         lpath = os.path.join("logs", fname)
         if not os.path.exists(lpath):
             continue
@@ -438,7 +439,7 @@ td.num,th.num{text-align:right}
 .eras table{font-size:12.5px}
 </style></head><body><div class=wrap>
 <div class=hdr>
-  <h1>Leonard the Bot &middot; Paper</h1><span class=tag>LIVE + 2 paper</span>
+  <h1>Leonard the Bot</h1><span class=tag>LIVE</span>
   <span class=live id=live></span>
   <span class=upd id=upd><span class=dot id=dot></span>loading&hellip;</span>
 </div>
@@ -461,6 +462,11 @@ td.num,th.num{text-align:right}
 <th class=num>Exit/Settle</th><th class=num>Qty</th><th>Result</th><th class=num>P&amp;L</th></tr></thead>
 <tbody id=rmreal></tbody></table></div>
 </div>
+<!-- PAPER SECTIONS RETIRED 7/30 (Adam: 'get rid of the other two paper
+     strategies for now') - hidden, not deleted; ledgers archived on the
+     server as *_retired.json. Set display:block + revive the books in
+     paper.py (PAPER_WX_RETIRED=0 / PAPER_DRIFTW_RETIRED=0) to bring back. -->
+<div id=paperwrap style="display:none">
 <div id=combined style="margin:14px 0 2px;"></div>
 <h2>Paper R&amp;D books <span style="text-transform:none;letter-spacing:0">(simulations &mdash; the proving ground for future live books, NOT the scoreboard &middot; paper fills are optimistic: instant at our price, no adverse selection)</span></h2>
 <div id=strat style="display:grid;grid-template-columns:repeat(auto-fit,minmax(205px,1fr));gap:12px;"></div>
@@ -512,6 +518,7 @@ td.num,th.num{text-align:right}
 <th class=num>Entry</th><th class=num>Exit/Settle</th><th class=num>Qty</th><th class=num>Fee</th><th>Result</th><th class=num>P&amp;L</th></tr></thead>
 <tbody id=driftwreal></tbody></table></div>
 <div class=foot id=foot></div>
+</div><!-- /paperwrap -->
 </div>
 <script>
 const $=id=>document.getElementById(id);

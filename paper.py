@@ -527,14 +527,28 @@ def main():
     spread_on = bool(cfg.raw.get("spread_capture", True))
     strat = build_strategy("smart", cfg.strategy_params)
     sim = Sim(int(start_dollars * 100))
+    # Weather paper book (v9-core) + weather-live DRY rehearsal RETIRED
+    # 7/30 (Adam: 'get rid of the other two paper strategies for now').
+    # Ledgers archived, never deleted (tracker stays cumulative) - flip
+    # PAPER_WX_RETIRED=0 to revive both exactly where they left off.
+    _wx_retired = os.environ.get("PAPER_WX_RETIRED", "1") == "1"
     wp = None
-    if weather_paper is not None:
+    if weather_paper is not None and not _wx_retired:
         try:
             wp = weather_paper.WeatherPaper()
         except Exception:
             wp = None
+    if _wx_retired:
+        try:
+            _wpth = os.path.join("logs", "weather_state.json")
+            if os.path.exists(_wpth):
+                os.replace(_wpth, os.path.join("logs",
+                                               "weather_state_retired.json"))
+                print("archived logs/weather_state.json (weather paper retired 7/30)")
+        except Exception:
+            pass
     wl_dry = None
-    if weather_live is not None:
+    if weather_live is not None and not _wx_retired:
         try:
             wl_dry = weather_live.WeatherLive(None, mode="DRY")
         except Exception:
@@ -549,12 +563,25 @@ def main():
             print("archived logs/drift_state.json (drift1 paper retired - live book replaced it)")
     except Exception:
         pass
+    # driftw2-fin paper book RETIRED 7/30 (Adam) - 92W/2L but net-negative
+    # after fees over its whole run; ledger archived, never deleted. Flip
+    # PAPER_DRIFTW_RETIRED=0 to revive it exactly where it left off.
+    _dw_retired = os.environ.get("PAPER_DRIFTW_RETIRED", "1") == "1"
     dw_bot = None
-    if drift_wide is not None:
+    if drift_wide is not None and not _dw_retired:
         try:
             dw_bot = drift_wide.DriftWide()
         except Exception:
             dw_bot = None
+    if _dw_retired:
+        try:
+            _dwp = os.path.join("logs", "driftw_state.json")
+            if os.path.exists(_dwp):
+                os.replace(_dwp, os.path.join("logs",
+                                              "driftw_state_retired.json"))
+                print("archived logs/driftw_state.json (driftw paper retired 7/30)")
+        except Exception:
+            pass
     dl_dry = None
     if drift_live is not None:
         try:
