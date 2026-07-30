@@ -340,6 +340,12 @@ def build_data():
             baseline = float(os.environ.get("DRIFT_LIVE_BASELINE_D", "100.09"))
             out[key]["baseline"] = baseline
             out[key]["pnl_true"] = round(out[key]["marked_nav"] - baseline, 2)
+    # 7/30: the paper books are retired, so the LIVE book owns the page
+    # heartbeat now - never gate the REAL MONEY panel on a retired ledger
+    if out.get("dlive"):
+        out["running"] = True
+        if not out.get("updated"):
+            out["updated"] = out["dlive"].get("updated", "")
     # poly reward-farming book RETIRED 7/23 (ledger archived, not deleted)
     # drift1 paper book retired 7/25 (live executor replaced it)
     for key, fname in (("driftw", "driftw_state.json"),):
