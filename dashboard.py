@@ -623,7 +623,9 @@ async function load(){
     const isLive=(S.mode==='LIVE');
     $('rmmode').innerHTML='<span class=chip style="background:'+(isLive?'rgba(244,105,95,.15);color:var(--red)':'rgba(125,144,173,.13);color:var(--mut)')+'">'+(S.mode||'?')+'</span>'
       +(S.halted?' <span class=chip style="background:rgba(244,105,95,.25);color:var(--red)">DAY HALTED</span>':'')
-      +' <span class=mut style="font-size:11px">era dlive1 &middot; full paper brain (nickel + pyramid) &middot; caps $2/bet &middot; $60 open &middot; $12 daily halt</span>';
+      +' <span class=mut style="font-size:11px">era dlive1 &middot; full paper brain (nickel + pyramid)'
+      +(S.caps?' &middot; caps '+F(S.caps.bet)+'/bet &middot; '+F(S.caps.open)+' open &middot; '+F(S.caps.halt)+' daily halt'+(S.caps.dyn?' (% of NAV, live)':''):'')
+      +'</span>';
     const bal=(L.balance_c!=null)?L.balance_c/100:null;
     if(L.pnl_true!=null){
       $('rmpnl').innerHTML='<span class="'+C(L.pnl_true)+'">'+M(L.pnl_true)+'</span>';
@@ -637,9 +639,9 @@ async function load(){
       tile('Marked NAV',(L.marked_nav!=null)?F(L.marked_nav):NA,'balance + filled positions'),
       tile('Realized (Kalshi)',(L.pnl_true!=null&&L.unrealized!=null)?'<span class="'+C(L.pnl_true-L.unrealized)+'">'+M(L.pnl_true-L.unrealized)+'</span>':'<span class=mut>syncing&hellip;</span>','NAV identity: total P&L &minus; unrealized &middot; exact by construction'),
       tile('Unrealized (marked)',(L.unrealized!=null)?'<span class="'+C(L.unrealized)+'">'+M(L.unrealized)+'</span>':NA,'open positions vs cost'),
-      tile("Today's P&L",(todayTrue!=null)?'<span class="'+C(todayTrue)+'">'+M(todayTrue)+'</span>':'<span class=mut>anchoring&hellip;</span>','NAV vs day-start NAV &middot; halts at -$12'),
+      tile("Today's P&L",(todayTrue!=null)?'<span class="'+C(todayTrue)+'">'+M(todayTrue)+'</span>':'<span class=mut>anchoring&hellip;</span>','NAV vs day-start NAV &middot; halts at -'+(S.caps?F(S.caps.halt):'$12')),
       tile('Record (Kalshi settlements)',(S.has_kalshi_truth&&S.k_wins!=null)?((S.k_wins||0)+'W / '+(S.k_losses||0)+'L'):'<span class=mut>syncing&hellip;</span>','held-to-settlement markets, per the exchange &middot; early exits live in Realized &middot; '+((S.k_open!=null?S.k_open:S.open)||0)+' positions &middot; '+((S.k_resting_n!=null?S.k_resting_n:S.resting)||0)+' resting (per Kalshi)'),
-      tile('Gate',(S.gate||'probe')+' '+(S.gate_n||0)+'/30','probe sizing until pass'),
+      tile('Gate',(S.gate==='scale')?('SCALE &middot; '+(S.gate_n||0)+' settled'):((S.gate||'probe')+' '+(S.gate_n||0)+'/30'),(S.gate==='scale')?'passed &middot; Kelly sizing live &middot; rolling 60-settlement window':'probe sizing until 30 settled pass'),
       (S.caps?tile('Risk caps'+(S.caps.dyn?' (compounding)':''),F(S.caps.bet)+'/bet','open '+F(S.caps.open)+' &middot; day-halt '+F(S.caps.halt)+(S.caps.dyn?' &middot; 3% / 60% / 10% of NAV, refreshed every cycle':' &middot; fixed')):''),
       tile('Fees (Kalshi)',(S.k_fees!=null)?F(S.k_fees):F(S.fees||0),(S.placed||0)+' placed &middot; '+(S.canceled||0)+' canceled'),
       tile('Mirror sync',(S.sync_diffs==null)?NA:(S.sync_diffs===0?'<span class=pos>1:1 WITH KALSHI</span>':'<span class=neg>'+S.sync_diffs+' DIFFS</span>'),'bot book vs exchange positions, checked every cycle'),
@@ -690,7 +692,17 @@ async function load(){
       +(L.halted?' \u00b7 HALTED':'')
       +(LV.balance_c!=null?' \u00b7 bal $'+(LV.balance_c/100).toFixed(2):'');};
    if(d.live&&d.live.summary)strip.push(fmtL('WX',d.live));
-   if(d.dlive&&d.dlive.summary)strip.push(fmtL('DRIFT',d.dlive));
+   // DRIFT strip: KALSHI TRUTH ONLY (Adam 7/30: the internal diary's
+   // net/wins/losses leaked into the header and contradicted the
+   // scoreboard - e.g. '+$8.32 (102W/1L)' vs Kalshi's '+$3.17 82W/34L')
+   if(d.dlive&&d.dlive.summary){const LV=d.dlive,L=LV.summary;
+     const day=(LV.marked_nav!=null&&L.day_nav0!=null)?(LV.marked_nav-L.day_nav0):null;
+     strip.push('DRIFT '+(L.mode||'LIVE')+' '+(LV.pnl_true!=null?M(LV.pnl_true):'–')
+      +' ('+(L.k_wins!=null?L.k_wins:'–')+'W/'+(L.k_losses!=null?L.k_losses:'–')+'L)'
+      +(L.k_resting_n!=null?' · '+L.k_resting_n+' resting':'')
+      +(day!=null?' · day '+M(day):'')
+      +(L.halted?' · HALTED':'')
+      +(LV.balance_c!=null?' · bal $'+(LV.balance_c/100).toFixed(2):''));}
    $('live').textContent=strip.join('  \u2503  ');}
   const start=Number(s.start||0),banked=Number(s.total||0);
   const unrl=(s.unrealized==null)?null:Number(s.unrealized);
