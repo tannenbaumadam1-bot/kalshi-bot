@@ -107,7 +107,8 @@ def fetch_prices(tickers):
                 for mk in d.get("markets", []) or []:
                     out[mk.get("ticker", "")] = {
                         "yes_bid": _cents(mk, "yes_bid"),
-                        "yes_ask": _cents(mk, "yes_ask")}
+                        "yes_ask": _cents(mk, "yes_ask"),
+                        "last": _cents(mk, "last_price")}
             _PRICES["ts"] = time.time()
             _PRICES["by_ticker"] = out
         except Exception:
@@ -301,13 +302,23 @@ def build_data():
         du, dval = 0.0, 0.0
         for b in dop:
             px = rp.get(b.get("ticker") or "")
-            if not px or not (px["yes_bid"] or px["yes_ask"]):
+            if not px or not (px["yes_bid"] or px["yes_ask"] or px.get("last")):
                 b["now"] = None
                 b["upnl"] = None
                 dval += b.get("entry", 0) * b.get("count", 0) / 100.0
                 continue
-            mark = px["yes_bid"] if b.get("side") == "yes" else (100 - px["yes_ask"])
-            mark = max(0, min(100, mark))
+            # Kalshi-app parity (Adam 7/30: dashboard NAV $103.22 vs the
+            # app's Portfolio $104.86, cash identical to the penny): the
+            # app values positions at LAST TRADED price; we marked at the
+            # liquidation bid, undershooting by ~the spread on every
+            # position. Mark at last (fallback mid, then bid) so the
+            # tracker shows the app's number.
+            last = px.get("last") or 0
+            yb_, ya_ = px["yes_bid"], px["yes_ask"]
+            ym = last if last > 0 else (
+                (yb_ + ya_) / 2.0 if (yb_ and ya_) else (yb_ or ya_))
+            mark = ym if b.get("side") == "yes" else (100 - ym)
+            mark = int(round(max(0, min(100, mark))))
             b["now"] = mark
             b["value"] = round(mark * b.get("count", 0) / 100.0, 2)
             b["upnl"] = round((mark - b.get("entry", 0)) * b.get("count", 0) / 100.0, 2)
@@ -636,7 +647,7 @@ async function load(){
     const todayTrue=(L.marked_nav!=null&&S.day_nav0!=null)?(L.marked_nav-S.day_nav0):null;
     $('rmtiles').innerHTML=[
       tile('Account balance',bal!=null?F(bal):NA,'live from Kalshi'),
-      tile('Marked NAV',(L.marked_nav!=null)?F(L.marked_nav):NA,'balance + filled positions'),
+      tile('Marked NAV',(L.marked_nav!=null)?F(L.marked_nav):NA,'balance + positions at last trade &middot; matches the Kalshi app&rsquo;s Portfolio number'),
       tile('Realized (Kalshi)',(L.pnl_true!=null&&L.unrealized!=null)?'<span class="'+C(L.pnl_true-L.unrealized)+'">'+M(L.pnl_true-L.unrealized)+'</span>':'<span class=mut>syncing&hellip;</span>','NAV identity: total P&L &minus; unrealized &middot; exact by construction'),
       tile('Unrealized (marked)',(L.unrealized!=null)?'<span class="'+C(L.unrealized)+'">'+M(L.unrealized)+'</span>':NA,'open positions vs cost'),
       tile("Today's P&L",(todayTrue!=null)?'<span class="'+C(todayTrue)+'">'+M(todayTrue)+'</span>':'<span class=mut>anchoring&hellip;</span>','NAV vs day-start NAV &middot; halts at -'+(S.caps?F(S.caps.halt):'$12')),
