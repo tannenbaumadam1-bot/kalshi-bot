@@ -347,8 +347,9 @@ def build_data():
         if not out.get("updated"):
             out["updated"] = out["dlive"].get("updated", "")
     # poly reward-farming book RETIRED 7/23 (ledger archived, not deleted)
-    # drift1 paper book retired 7/25 (live executor replaced it)
-    for key, fname in (("driftw", "driftw_state.json"),):
+    # drift1 paper book retired 7/25; driftw2-fin retired 7/30
+    # driftc = LANE 2 AUDITION (7/31): crypto drift paper book, gate 100
+    for key, fname in (("driftc", "driftc_state.json"),):
         fpath = os.path.join("logs", fname)
         if os.path.exists(fpath):
             try:
@@ -467,6 +468,10 @@ td.num,th.num{text-align:right}
 <table><thead><tr><th>Closed</th><th>Market</th><th>Side</th><th class=num>Entry</th>
 <th class=num>Exit/Settle</th><th class=num>Qty</th><th>Result</th><th class=num>P&amp;L</th></tr></thead>
 <tbody id=rmreal></tbody></table></div>
+</div>
+<div id=lane2 style="display:none;border:1px solid rgba(125,144,173,.35);border-radius:12px;padding:14px 18px;margin:14px 0 4px;">
+<h2 style="margin:0 0 10px">Lane 2 audition &middot; crypto drift <span style="text-transform:none;letter-spacing:0">(PAPER &mdash; live-book rules on Kalshi crypto hourlies &middot; real money only if the gate passes)</span></h2>
+<div class=grid id=lane2tiles></div>
 </div>
 <!-- PAPER SECTIONS RETIRED 7/30 (Adam: 'get rid of the other two paper
      strategies for now') - hidden, not deleted; ledgers archived on the
@@ -709,6 +714,18 @@ async function load(){
       +'<td class=num><span class="'+C(b.pnl)+'">'+M(b.pnl)+'</span></td></tr>');});
     $('rmreal').innerHTML=rl.join('')||'<tr><td colspan=8 class=empty>Nothing realized yet &mdash; first settlements land tomorrow morning.</td></tr>';
   }
+  if(d.driftc&&d.driftc.summary){const A=d.driftc,S2=A.summary||{};
+    document.getElementById('lane2').style.display='block';
+    const stake=(A.open||[]).reduce((a,b)=>a+(b.entry||0)*(b.count||0)/100,0);
+    const bank=(S2.cash||0)+stake;
+    const settled=(S2.wins||0)+(S2.losses||0);
+    $('lane2tiles').innerHTML=[
+      tile('Paper bank',F(bank),'started $'+(S2.start||100).toFixed(0)+' &middot; '+F(stake)+' at stake'),
+      tile('Net (after fees)',(S2.net!=null)?('<span class="'+C(S2.net)+'">'+M(S2.net)+'</span>'):'&ndash;','fees '+F(S2.fees||0)+' &middot; fee-inclusive, the driftw lesson'),
+      tile('Record',(S2.wins||0)+'W / '+(S2.losses||0)+'L',(S2.open||0)+' open &middot; '+(S2.placed||0)+' placed &middot; era driftc1'),
+      tile('Audition gate',settled+' / 100 settled','pass = net &gt; 0 after fees at 100 &middot; fail = killed at $0 cost'),
+      tile('Rules',(S2.gate==='scale'?'scale':'probe')+' sizing','80&cent; floor &middot; 35&cent; stop &middot; trail OFF &middot; spread &le;3&cent; &middot; vol &ge;500')
+    ].join('');}
   {const strip=[];
    const fmtL=(tag,LV)=>{const L=LV.summary;return tag+' '+(L.mode||'LIVE')+' '+M(L.net||0)+' ('+(L.wins||0)+'W/'+(L.losses||0)+'L)'
       +(L.resting!=null?' \u00b7 '+L.resting+' resting':'')

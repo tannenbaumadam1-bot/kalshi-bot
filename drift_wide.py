@@ -44,6 +44,7 @@ CATEGORIES = {c.strip() for c in os.environ.get(
     "DRIFTW_CATEGORIES", "Commodities,Financials").split(",") if c.strip()}
 
 MIN_C = int(os.environ.get("DRIFTW_MIN_C", "65"))          # side price floor
+ENTRY_MIN_C = int(os.environ.get("DRIFTW_ENTRY_MIN", "50"))  # hard entry floor
 UP_C = float(os.environ.get("DRIFTW_UP_C", "2"))           # min climb / scan
 MAX_ENTRY = int(os.environ.get("DRIFTW_MAX_ENTRY", "90"))  # no near-certainties
 LEVEL_C = int(os.environ.get("DRIFTW_LEVEL_C", "80"))      # level-alone trigger
@@ -64,7 +65,9 @@ def now():
     return datetime.datetime.now().isoformat(timespec="seconds")
 
 
-def find_wide_markets(max_hrs=MAX_H):
+def find_wide_markets(max_hrs=None):
+    if max_hrs is None:
+        max_hrs = MAX_H                    # read at CALL time (driftc overrides)
     """All open non-weather, non-MVE Kalshi markets closing within max_hrs,
     with a real two-sided quote. One paged /events sweep (same endpoint the
     spread book uses - no key, no auth)."""
@@ -358,7 +361,7 @@ class DriftWide:
                 trig, score = "climb", climb_c
             else:
                 continue
-            if entry < 50 or entry > MAX_ENTRY:
+            if entry < ENTRY_MIN_C or entry > MAX_ENTRY:
                 continue                    # favorite at a real price only
             cands.append((trig, score, mk, side, entry, smid))
         cands.sort(key=lambda c: ({"level": 0}.get(c[0], 1), -c[1]))

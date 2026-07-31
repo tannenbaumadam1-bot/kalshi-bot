@@ -588,6 +588,15 @@ def main():
             dl_dry = drift_live.DriftLive(None, mode="DRY")
         except Exception:
             dl_dry = None
+    # LANE 2 AUDITION (Adam 7/31): drift brain on Kalshi CRYPTO, paper,
+    # live-book config (80c floor, 35c stop, trail off, fee-inclusive).
+    # Gate: 100+ settled net-positive after fees -> live; else killed.
+    dc_bot = None
+    try:
+        import drift_crypto
+        dc_bot = drift_crypto.DriftCrypto()
+    except Exception:
+        dc_bot = None
     # retired strategies (funding 7/18, sports/sharp 7/21): purge orphaned books
     for _fs in ("funding_state.json", "sharpev_state.json", "sharpev_sim.json"):
         try:
@@ -704,6 +713,17 @@ def main():
                               f"gate {ws2['gate']} {ws2['gate_n']}/30")
                 except Exception as e:
                     print(f"  drift-wide step skipped: {e}")
+            if dc_bot is not None and n % 10 == 7:
+                # crypto cycles are hourly: scan every ~10 cycles, 24/7
+                try:
+                    nc = dc_bot.step()
+                    cs = dc_bot.summary()
+                    if nc or cs["open"]:
+                        print(f"  DRIFTC(audition): {nc} placed | bank ${cs['cash']:.2f} | "
+                              f"{cs['wins']}W/{cs['losses']}L | open {cs['open']} | "
+                              f"settled {(cs['wins'] + cs['losses'])}/100 gate")
+                except Exception as e:
+                    print(f"  drift-crypto step skipped: {e}")
             if (dl_dry is not None and n % 20 == 17
                     and not os.path.exists(drift_live.ARM_FILE)
                     and os.environ.get("KALSHI_DRIFT_LIVE", "") != "1"):
