@@ -103,6 +103,9 @@ def test_pyramid_add_on_runner(tmp_path, monkeypatch):
 
 
 def test_climb_needs_confirmation(tmp_path, monkeypatch):
+    # exercises the climb trigger machinery below the 7/31 production
+    # floor (80c) - lower the floor for this test only
+    monkeypatch.setattr(dl, "ENTRY_FLOOR", 50)
     b = _bot(tmp_path, monkeypatch)
     b.place(mkts=[_mk(bid=66, ask=70, vol=300.0)])       # memory only
     assert not b.bets
@@ -270,6 +273,33 @@ def test_execution_defaults_widened():
     # 7/28 (miss-autopsy 9/9 would-won): taker gate widened, stop deepened
     assert dl.TAKER_MIN_SMID == 84 and dl.TAKER_MAX_SPREAD == 3
     assert dl.STOP_C == 35
+    assert dl.ENTRY_FLOOR == 80          # 7/31: sub-80c entries killed
+
+
+def test_entry_floor_blocks_sub_80(tmp_path, monkeypatch):
+    # 7/31 concentration: every sub-80c band lost money live (-$8.10/36)
+    b = _bot(tmp_path, monkeypatch)
+    assert b.place(mkts=[_mk(bid=78, ask=81)]) == 0     # bid below floor
+    b.place(mkts=[_mk(bid=70, ask=74, vol=300.0)])      # climb memory
+    assert b.place(mkts=[_mk(bid=73, ask=77, vol=400.0)]) == 0  # climb dead
+    assert not b.bets and not b.pending
+    assert b.place(mkts=[_mk(bid=80, ask=83)]) == 1     # at the floor: fine
+
+
+def test_taker_first_on_proven_lane(tmp_path, monkeypatch):
+    # proven half-Kelly lane + tight spread -> pay the ask immediately
+    b = _bot(tmp_path, monkeypatch)
+    b.history = _proven_hist(entry=82)          # level:80-84 proven, gate scale
+    assert b.place(mkts=[_mk(bid=82, ask=84)]) == 1     # smid 83 < 84 gate
+    bet = next(iter(b.bets.values()))
+    assert bet["entry"] == 84                   # crossed, didn't queue
+    assert b.exec_stats.get("filled_taker") == 1
+    # same setup, unproven lane, smid below gate -> still a maker join
+    monkeypatch.setattr(dl, "KELLY_PROVEN_N", 999)
+    b2 = _bot(tmp_path, monkeypatch)
+    b2.history = _proven_hist(entry=82)
+    assert b2.place(mkts=[_mk(bid=82, ask=84)]) == 1
+    assert next(iter(b2.bets.values()))["entry"] == 82  # joined the bid
 
 
 def test_dynamic_caps_track_nav(tmp_path, monkeypatch):

@@ -127,6 +127,16 @@ NICKEL_LANE_PCT = float(os.environ.get("DRIFT_LIVE_NICKEL_LANE_PCT", "0.30"))
 # blocks and the NAV nickel guardrails still apply to the cross.
 CROSS_EXPIRY = os.environ.get("DRIFT_LIVE_CROSS_EXPIRY", "1") == "1"
 CROSS_MAX_CHASE = int(os.environ.get("DRIFT_LIVE_CROSS_CHASE", "5"))
+# THE CONCENTRATION PACKAGE (7/31, Adam-approved). Bucket attribution
+# after 8 days live: ALL profit (+$7.60) came from entries at 80-96c
+# (level:80-84 +3.54, nickel +4.06); EVERY band below 80c lost money on
+# BOTH triggers (-$8.10 over 36 settled, no exceptions ever). 1) Hard
+# entry floor at 80c - no more ~$2 'tuition' per band while the bucket
+# router accumulates its n>=8 evidence; the climb trigger (65-80c mids)
+# is retired by construction. 2) Taker-FIRST in proven buckets: 28/28
+# expired joins would have WON ($14.59 forfeited) - on a half-Kelly
+# lane with a tight spread, pay the ask immediately instead of queueing.
+ENTRY_FLOOR = int(os.environ.get("DRIFT_LIVE_ENTRY_FLOOR", "80"))
 CYCLE_S = int(os.environ.get("DRIFT_LIVE_CYCLE_S", "600"))
 GATE_MIN_N = dp.GATE_MIN_N
 GATE_MAX_GAP = dp.GATE_MAX_GAP
@@ -494,7 +504,7 @@ class DriftLive:
                  "caps": {"bet": round(self.max_bet_c / 100.0, 2),
                           "open": round(self.max_open_c / 100.0, 2),
                           "halt": round(self.max_day_loss_c / 100.0, 2),
-                          "dyn": DYN_CAPS},
+                          "dyn": DYN_CAPS, "floor": ENTRY_FLOOR},
                  **self._autopsy_summary(),
                  **self._miss_summary(),
                  "buckets": [dict(v, bucket=k,
@@ -1112,16 +1122,22 @@ class DriftLive:
                 trig, score = "climb", climb_c
             else:
                 continue
-            if entry < 50 or entry > dp.DRIFT_MAX_ENTRY:
+            if entry < ENTRY_FLOOR or entry > dp.DRIFT_MAX_ENTRY:
                 continue
             # execution engine: on high-certainty thin-spread signals, cross
             # the spread as taker (a 1-2c toll beats missing an 88%+ winner)
             exec_kind, bid_entry = "maker", entry
-            if (TAKER_ON and trig in ("level", "climb")
-                    and smid >= TAKER_MIN_SMID):
-                ask_side = mk["yes_ask"] if side == "yes" else 100 - mk["yes_bid"]
-                if 0 < ask_side - entry <= TAKER_MAX_SPREAD and ask_side <= dp.DRIFT_MAX_ENTRY:
-                    entry, exec_kind = ask_side, "taker"
+            if TAKER_ON and trig in ("level", "climb"):
+                # taker-FIRST on proven (half-Kelly) lanes; high-certainty
+                # mids keep the original gate
+                proven_lane = (self._kelly_frac(bstats, trig, entry)
+                               > KELLY_BASE)
+                if smid >= TAKER_MIN_SMID or proven_lane:
+                    ask_side = (mk["yes_ask"] if side == "yes"
+                                else 100 - mk["yes_bid"])
+                    if (0 < ask_side - entry <= TAKER_MAX_SPREAD
+                            and ask_side <= dp.DRIFT_MAX_ENTRY):
+                        entry, exec_kind = ask_side, "taker"
             # capital routing: never re-enter a bucket the live ledger has
             # already proven negative (n >= BUCKET_MIN_N, net < 0)
             if trig != "nickel" and self._bucket_blocked(bstats, trig, entry):
