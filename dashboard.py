@@ -472,6 +472,14 @@ td.num,th.num{text-align:right}
 <div id=lane2 style="display:none;border:1px solid rgba(125,144,173,.35);border-radius:12px;padding:14px 18px;margin:14px 0 4px;">
 <h2 style="margin:0 0 10px">Lane 2 audition &middot; crypto drift <span style="text-transform:none;letter-spacing:0">(PAPER &mdash; live-book rules on Kalshi crypto hourlies &middot; real money only if the gate passes)</span></h2>
 <div class=grid id=lane2tiles></div>
+<div style="margin-top:12px"><div class=t style="margin-bottom:6px">Audition positions (paper, marked live)</div>
+<table><thead><tr><th>Market</th><th>Side</th><th class=num>Mkt prob</th><th>Trigger</th>
+<th class=num>Entry</th><th class=num>Now</th><th class=num>Qty</th><th class=num>Value</th><th class=num>uP&amp;L</th></tr></thead>
+<tbody id=lane2tbl></tbody></table></div>
+<div id=lane2realwrap style="margin-top:12px;display:none"><div class=t style="margin-bottom:6px">Audition results (latest)</div>
+<table><thead><tr><th>Closed</th><th>Market</th><th>Side</th><th class=num>Entry</th>
+<th class=num>Exit/Settle</th><th class=num>Qty</th><th>Result</th><th class=num>P&amp;L</th></tr></thead>
+<tbody id=lane2real></tbody></table></div>
 </div>
 <!-- PAPER SECTIONS RETIRED 7/30 (Adam: 'get rid of the other two paper
      strategies for now') - hidden, not deleted; ledgers archived on the
@@ -725,7 +733,27 @@ async function load(){
       tile('Record',(S2.wins||0)+'W / '+(S2.losses||0)+'L',(S2.open||0)+' open &middot; '+(S2.placed||0)+' placed &middot; era driftc1'),
       tile('Audition gate',settled+' / 100 settled','pass = net &gt; 0 after fees at 100 &middot; fail = killed at $0 cost'),
       tile('Rules',(S2.gate==='scale'?'scale':'probe')+' sizing','80&cent; floor &middot; 35&cent; stop &middot; trail OFF &middot; spread &le;3&cent; &middot; vol &ge;500')
-    ].join('');}
+    ].join('');
+    $('lane2tbl').innerHTML=((A.open||[]).map(b=>'<tr><td>'+(b.name||b.ticker||'')+'</td>'
+      +'<td><span class=chip style="background:'+(b.side==='yes'?'rgba(47,208,140,.13);color:var(--grn)':'rgba(244,105,95,.13);color:var(--red)')+'">'+String(b.side||'').toUpperCase()+'</span></td>'
+      +'<td class=num>'+Math.round((b.pside||0)*100)+'%</td>'
+      +'<td>'+(b.trig||'')+'</td>'
+      +'<td class=num>'+b.entry+'&cent;</td>'
+      +'<td class=num>'+(b.now!=null?b.now+'&cent;':'&ndash;')+'</td>'
+      +'<td class=num>'+b.count+'</td>'
+      +'<td class=num>'+(b.value!=null?F(b.value):F((b.entry||0)*(b.count||0)/100))+'</td>'
+      +'<td class=num>'+(b.upnl!=null?('<span class="'+C(b.upnl)+'">'+M(b.upnl)+'</span>'):'&ndash;')+'</td></tr>').join(''))
+      ||'<tr><td colspan=9 class=empty>Scanning crypto hourlies&hellip; first entries land within minutes of a qualifying signal.</td></tr>';
+    const rl2=(A.settled||[]).slice(0,10);
+    if(rl2.length){document.getElementById('lane2realwrap').style.display='block';
+      $('lane2real').innerHTML=rl2.map(h=>'<tr><td>'+String(h.ts||'').slice(5,16).replace('T',' ')+'</td>'
+        +'<td>'+(h.name||'')+'</td>'
+        +'<td>'+String(h.side||'').toUpperCase()+'</td>'
+        +'<td class=num>'+h.entry+'&cent;</td>'
+        +'<td class=num>'+(h.exit_px!=null?h.exit_px+'&cent;':(h.outcome===1?'100&cent;':'0&cent;'))+'</td>'
+        +'<td class=num>'+h.count+'</td>'
+        +'<td>'+(h.outcome===1?'<span class=pos>WON</span>':(h.outcome===0?'<span class=neg>LOST</span>':(h.stopped?'STOP':'FADE')))+'</td>'
+        +'<td class=num><span class="'+C(h.pnl)+'">'+M(h.pnl)+'</span></td></tr>').join('');}}
   {const strip=[];
    const fmtL=(tag,LV)=>{const L=LV.summary;return tag+' '+(L.mode||'LIVE')+' '+M(L.net||0)+' ('+(L.wins||0)+'W/'+(L.losses||0)+'L)'
       +(L.resting!=null?' \u00b7 '+L.resting+' resting':'')
