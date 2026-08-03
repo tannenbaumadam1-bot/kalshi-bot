@@ -349,8 +349,8 @@ def build_data():
     # poly reward-farming book RETIRED 7/23 (ledger archived, not deleted)
     # drift1 paper book retired 7/25; driftw2-fin retired 7/30
     # driftc = LANE 2 AUDITION (7/31): crypto drift paper book, gate 100
-    for key, fname in (("driftc", "driftc_state.json"),
-                       ("clive", "crypto_live_state.json"),):
+    # driftc paper audition retired 8/3 (gate passed -> live book)
+    for key, fname in (("clive", "crypto_live_state.json"),):
         fpath = os.path.join("logs", fname)
         if os.path.exists(fpath):
             try:
@@ -399,6 +399,14 @@ def build_data():
                          + _val(cv.get("open")), 2)
             dv["marked_nav"] = acct
             dv["pnl_true"] = round(acct - float(dv.get("baseline") or 100.09), 2)
+            # 8/3 P&L ATTRIBUTION (Adam: total AND by strategy): crypto
+            # book P&L = its realized + marked unrealized; weather = the
+            # remainder of the account total (exact by construction, the
+            # two always sum to the hero number)
+            c_pnl = float((cv.get("summary") or {}).get("realized") or 0)
+            c_pnl += sum((b.get("upnl") or 0) for b in (cv.get("open") or []))
+            dv["pnl_crypto"] = round(c_pnl, 2)
+            dv["pnl_weather"] = round(dv["pnl_true"] - c_pnl, 2)
     except Exception:
         pass
     return out
@@ -498,18 +506,6 @@ td.num,th.num{text-align:right}
 <table><thead><tr><th>Closed</th><th>Market</th><th>Side</th><th class=num>Entry</th>
 <th class=num>Exit/Settle</th><th class=num>Qty</th><th>Result</th><th class=num>P&amp;L</th></tr></thead>
 <tbody id=clreal></tbody></table></div>
-</div>
-<div id=lane2 style="display:none;border:1px solid rgba(125,144,173,.35);border-radius:12px;padding:14px 18px;margin:14px 0 4px;">
-<h2 style="margin:0 0 10px">Lane 2 audition &middot; crypto drift <span style="text-transform:none;letter-spacing:0">(PAPER &mdash; live-book rules on Kalshi crypto hourlies &middot; real money only if the gate passes)</span></h2>
-<div class=grid id=lane2tiles></div>
-<div style="margin-top:12px"><div class=t style="margin-bottom:6px">Audition positions (paper, marked live)</div>
-<table><thead><tr><th>Market</th><th>Side</th><th class=num>Mkt prob</th><th>Trigger</th>
-<th class=num>Entry</th><th class=num>Now</th><th class=num>Qty</th><th class=num>Value</th><th class=num>uP&amp;L</th></tr></thead>
-<tbody id=lane2tbl></tbody></table></div>
-<div id=lane2realwrap style="margin-top:12px;display:none"><div class=t style="margin-bottom:6px">Audition results (latest)</div>
-<table><thead><tr><th>Closed</th><th>Market</th><th>Side</th><th class=num>Entry</th>
-<th class=num>Exit/Settle</th><th class=num>Qty</th><th>Result</th><th class=num>P&amp;L</th></tr></thead>
-<tbody id=lane2real></tbody></table></div>
 </div>
 <!-- PAPER SECTIONS RETIRED 7/30 (Adam: 'get rid of the other two paper
      strategies for now') - hidden, not deleted; ledgers archived on the
@@ -696,12 +692,16 @@ async function load(){
     const bal=(L.balance_c!=null)?L.balance_c/100:null;
     if(L.pnl_true!=null){
       $('rmpnl').innerHTML='<span class="'+C(L.pnl_true)+'">'+M(L.pnl_true)+'</span>';
-      $('rmpnld').innerHTML='<span class=mut>Kalshi NAV '+F(L.marked_nav)+' vs deposits '+F(L.baseline)+' &middot; balance + positions, marked live &middot; internal ledger is bookkeeping, the exchange is proof</span>';
+      $('rmpnld').innerHTML='<span class=mut>TOTAL &middot; both books &middot; Kalshi NAV '+F(L.marked_nav)+' vs deposits '+F(L.baseline)
+        +((L.pnl_weather!=null&&L.pnl_crypto!=null)?(' &middot; weather <span class="'+C(L.pnl_weather)+'">'+M(L.pnl_weather)+'</span> + crypto <span class="'+C(L.pnl_crypto)+'">'+M(L.pnl_crypto)+'</span>'):'')
+        +' &middot; the exchange is proof</span>';
     }
     // EVERY number below is derived from Kalshi's own records (settlements,
     // positions, balance). The bot's internal diary is never displayed.
     const todayTrue=(L.marked_nav!=null&&S.day_nav0!=null)?(L.marked_nav-S.day_nav0):null;
     $('rmtiles').innerHTML=[
+      tile('Weather book P&L',(L.pnl_weather!=null)?('<span class="'+C(L.pnl_weather)+'">'+M(L.pnl_weather)+'</span>'):NA,'era dlive1 &middot; total minus crypto &middot; sums to the hero exactly'),
+      tile('Crypto book P&L',(L.pnl_crypto!=null)?('<span class="'+C(L.pnl_crypto)+'">'+M(L.pnl_crypto)+'</span>'):NA,'era clive1 &middot; realized + marked open positions'),
       tile('Account balance',bal!=null?F(bal):NA,'live from Kalshi'),
       tile('Marked NAV',(L.marked_nav!=null)?F(L.marked_nav):NA,'ACCOUNT: balance + BOTH books&rsquo; positions at last trade &middot; matches the Kalshi app'),
       tile('Realized (Kalshi)',(L.pnl_true!=null&&L.unrealized!=null)?'<span class="'+C(L.pnl_true-L.unrealized)+'">'+M(L.pnl_true-L.unrealized)+'</span>':'<span class=mut>syncing&hellip;</span>','NAV identity: total P&L &minus; unrealized &middot; exact by construction'),
@@ -784,38 +784,6 @@ async function load(){
         +'<td class=num>'+(h.exit_px!=null?h.exit_px+'&cent;':(h.outcome===1?'100&cent;':'0&cent;'))+'</td>'
         +'<td class=num>'+h.count+'</td>'
         +'<td>'+(h.outcome===1?'<span class=pos>WON</span>':(h.outcome===0?'<span class=neg>LOST</span>':'STOP'))+'</td>'
-        +'<td class=num><span class="'+C(h.pnl)+'">'+M(h.pnl)+'</span></td></tr>').join('');}}
-  if(d.driftc&&d.driftc.summary){const A=d.driftc,S2=A.summary||{};
-    document.getElementById('lane2').style.display='block';
-    const stake=(A.open||[]).reduce((a,b)=>a+(b.entry||0)*(b.count||0)/100,0);
-    const bank=(S2.cash||0)+stake;
-    const settled=(S2.wins||0)+(S2.losses||0);
-    $('lane2tiles').innerHTML=[
-      tile('Paper bank',F(bank),'started $'+(S2.start||100).toFixed(0)+' &middot; '+F(stake)+' at stake'),
-      tile('Net (after fees)',(S2.net!=null)?('<span class="'+C(S2.net)+'">'+M(S2.net)+'</span>'):'&ndash;','fees '+F(S2.fees||0)+' &middot; fee-inclusive, the driftw lesson'),
-      tile('Record',(S2.wins||0)+'W / '+(S2.losses||0)+'L',(S2.open||0)+' open &middot; '+(S2.placed||0)+' placed &middot; era driftc1'),
-      tile('Audition gate',settled+' / 100 settled','pass = net &gt; 0 after fees at 100 &middot; fail = killed at $0 cost'),
-      tile('Rules',(S2.gate==='scale'?'scale':'probe')+' sizing','80&cent; floor &middot; 35&cent; stop &middot; trail OFF &middot; spread &le;3&cent; &middot; vol &ge;500')
-    ].join('');
-    $('lane2tbl').innerHTML=((A.open||[]).map(b=>'<tr><td>'+(b.name||b.ticker||'')+'</td>'
-      +'<td><span class=chip style="background:'+(b.side==='yes'?'rgba(47,208,140,.13);color:var(--grn)':'rgba(244,105,95,.13);color:var(--red)')+'">'+String(b.side||'').toUpperCase()+'</span></td>'
-      +'<td class=num>'+Math.round((b.pside||0)*100)+'%</td>'
-      +'<td>'+(b.trig||'')+'</td>'
-      +'<td class=num>'+b.entry+'&cent;</td>'
-      +'<td class=num>'+(b.now!=null?b.now+'&cent;':'&ndash;')+'</td>'
-      +'<td class=num>'+b.count+'</td>'
-      +'<td class=num>'+(b.value!=null?F(b.value):F((b.entry||0)*(b.count||0)/100))+'</td>'
-      +'<td class=num>'+(b.upnl!=null?('<span class="'+C(b.upnl)+'">'+M(b.upnl)+'</span>'):'&ndash;')+'</td></tr>').join(''))
-      ||'<tr><td colspan=9 class=empty>Scanning crypto hourlies&hellip; first entries land within minutes of a qualifying signal.</td></tr>';
-    const rl2=(A.settled||[]).slice(0,10);
-    if(rl2.length){document.getElementById('lane2realwrap').style.display='block';
-      $('lane2real').innerHTML=rl2.map(h=>'<tr><td>'+String(h.ts||'').slice(5,16).replace('T',' ')+'</td>'
-        +'<td>'+(h.name||'')+'</td>'
-        +'<td>'+String(h.side||'').toUpperCase()+'</td>'
-        +'<td class=num>'+h.entry+'&cent;</td>'
-        +'<td class=num>'+(h.exit_px!=null?h.exit_px+'&cent;':(h.outcome===1?'100&cent;':'0&cent;'))+'</td>'
-        +'<td class=num>'+h.count+'</td>'
-        +'<td>'+(h.outcome===1?'<span class=pos>WON</span>':(h.outcome===0?'<span class=neg>LOST</span>':(h.stopped?'STOP':'FADE')))+'</td>'
         +'<td class=num><span class="'+C(h.pnl)+'">'+M(h.pnl)+'</span></td></tr>').join('');}}
   {const strip=[];
    const fmtL=(tag,LV)=>{const L=LV.summary;return tag+' '+(L.mode||'LIVE')+' '+M(L.net||0)+' ('+(L.wins||0)+'W/'+(L.losses||0)+'L)'

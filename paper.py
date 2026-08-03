@@ -591,12 +591,26 @@ def main():
     # LANE 2 AUDITION (Adam 7/31): drift brain on Kalshi CRYPTO, paper,
     # live-book config (80c floor, 35c stop, trail off, fee-inclusive).
     # Gate: 100+ settled net-positive after fees -> live; else killed.
+    # Crypto paper audition RETIRED 8/3 (Adam) - it did its job: gate
+    # passed in 3 days (148 settled, 140W/8L, +$13.04 after fees) and the
+    # LIVE crypto book (crypto_live.py) replaced it. Ledger archived,
+    # never deleted. Revive with PAPER_DRIFTC_RETIRED=0.
     dc_bot = None
-    try:
-        import drift_crypto
-        dc_bot = drift_crypto.DriftCrypto()
-    except Exception:
-        dc_bot = None
+    if os.environ.get("PAPER_DRIFTC_RETIRED", "1") != "1":
+        try:
+            import drift_crypto
+            dc_bot = drift_crypto.DriftCrypto()
+        except Exception:
+            dc_bot = None
+    else:
+        try:
+            _dcp = os.path.join("logs", "driftc_state.json")
+            if os.path.exists(_dcp):
+                os.replace(_dcp, os.path.join("logs",
+                                              "driftc_state_retired.json"))
+                print("archived logs/driftc_state.json (audition passed -> live book)")
+        except Exception:
+            pass
     # retired strategies (funding 7/18, sports/sharp 7/21): purge orphaned books
     for _fs in ("funding_state.json", "sharpev_state.json", "sharpev_sim.json"):
         try:
