@@ -316,8 +316,19 @@ def build_data():
             # tracker shows the app's number.
             last = px.get("last") or 0
             yb_, ya_ = px["yes_bid"], px["yes_ask"]
-            ym = last if last > 0 else (
-                (yb_ + ya_) / 2.0 if (yb_ and ya_) else (yb_ or ya_))
+            if last > 0:
+                ym = last
+            elif yb_ and ya_:
+                ym = (yb_ + ya_) / 2.0
+            elif yb_:
+                ym = yb_
+            else:
+                # ask-only book (close-to-settlement limbo): no honest
+                # mark exists - hold at cost, show a dash (8/3 fix)
+                b["now"] = None
+                b["upnl"] = None
+                dval += b.get("entry", 0) * b.get("count", 0) / 100.0
+                continue
             mark = ym if b.get("side") == "yes" else (100 - ym)
             mark = int(round(max(0, min(100, mark))))
             b["now"] = mark
@@ -366,13 +377,30 @@ def build_data():
         du, dpriced, dval = 0.0, 0, 0.0
         for b in dop:
             px = dprices.get(b.get("ticker") or "")
-            if not px or not (px["yes_bid"] or px["yes_ask"]):
+            # 8/3 phantom-loss fix (Adam's SOL screenshot: NO marked 0c,
+            # -$0.92, then WON 2 min later): between close and settlement
+            # a book often holds only a vestigial 100c ask - marking off
+            # a one-sided ask zeroed the NO side. Honest mark = last
+            # trade, else two-sided mid, else bid; ask-only/empty books
+            # get NO mark (held at cost, shown as dash) until settlement.
+            last = (px or {}).get("last") or 0
+            yb_ = (px or {}).get("yes_bid") or 0
+            ya_ = (px or {}).get("yes_ask") or 0
+            if last > 0:
+                ym = last
+            elif yb_ and ya_:
+                ym = (yb_ + ya_) / 2.0
+            elif yb_:
+                ym = yb_
+            else:
+                ym = None
+            if ym is None:
                 b["now"] = None
                 b["upnl"] = None
                 dval += b.get("entry", 0) * b.get("count", 0) / 100.0
                 continue
-            mark = px["yes_bid"] if b.get("side") == "yes" else (100 - px["yes_ask"])
-            mark = max(0, min(100, mark))
+            mark = ym if b.get("side") == "yes" else (100 - ym)
+            mark = int(round(max(0, min(100, mark))))
             b["now"] = mark
             b["value"] = round(mark * b.get("count", 0) / 100.0, 2)
             b["upnl"] = round((mark - b.get("entry", 0)) * b.get("count", 0) / 100.0, 2)
