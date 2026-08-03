@@ -483,20 +483,25 @@ td.num,th.num{text-align:right}
     <div class=d id=rmpnld></div></div>
 </div>
 <div class=grid id=rmtiles></div>
-<div style="margin-top:12px"><div class=t style="margin-bottom:6px">Capital routing &middot; live bucket evidence (trigger &times; entry band &middot; all realized outcomes &middot; negative buckets auto-blocked at n&ge;8)</div>
+<h2 style="margin:18px 0 10px;border-top:1px solid rgba(125,144,173,.25);padding-top:14px">Book 1 &middot; Weather <span style="text-transform:none;letter-spacing:0">(era dlive1 &middot; maker + pursuit ladder &middot; 50% of NAV)</span></h2>
+<div class=grid id=wxtiles></div>
+<details style="margin-top:10px"><summary style="cursor:pointer;font-size:11px;color:var(--mut);text-transform:uppercase;letter-spacing:.12em">Diagnostics &amp; capital routing</summary>
+<div class=grid id=wxdiag style="margin-top:10px"></div>
+<div style="margin-top:12px"><div class=t style="margin-bottom:6px">Bucket routing (trigger &times; entry band &middot; negative at n&ge;8 auto-blocked)</div>
 <table><thead><tr><th>Bucket</th><th class=num>N</th><th class=num>Record</th><th class=num>Net</th><th>Routing</th></tr></thead>
 <tbody id=rmbuckets></tbody></table></div>
-<div style="margin-top:12px"><div class=t style="margin-bottom:6px">Positions &amp; resting orders (marked live)</div>
+</details>
+<div style="margin-top:12px"><div class=t style="margin-bottom:6px">Weather positions &amp; resting orders (marked live)</div>
 <table><thead><tr><th>Market</th><th>Side</th><th>Status</th><th class=num>Mkt prob</th>
 <th class=num>Entry</th><th class=num>Now</th><th class=num>Qty</th><th class=num>Value</th><th class=num>uP&amp;L</th></tr></thead>
 <tbody id=rmopen></tbody></table></div>
-<div style="margin-top:12px"><div class=t style="margin-bottom:6px">Realized (settled &amp; exits)</div>
+<div style="margin-top:12px"><div class=t style="margin-bottom:6px">Weather results (settled &amp; exits)</div>
 <table><thead><tr><th>Closed</th><th>Market</th><th>Side</th><th class=num>Entry</th>
 <th class=num>Exit/Settle</th><th class=num>Qty</th><th>Result</th><th class=num>P&amp;L</th></tr></thead>
 <tbody id=rmreal></tbody></table></div>
 </div>
 <div id=clivewrap style="display:none;border:1.5px solid rgba(96,165,250,.55);border-radius:12px;padding:14px 18px;margin:14px 0 4px;background:linear-gradient(180deg,rgba(96,165,250,.05),transparent)">
-<h2 style="margin:0 0 10px">Lane 2 LIVE &middot; crypto drift <span id=clmode style="text-transform:none;letter-spacing:0"></span></h2>
+<h2 style="margin:0 0 10px">Book 2 &middot; Crypto drift <span id=clmode style="text-transform:none;letter-spacing:0"></span></h2>
 <div class=grid id=cltiles></div>
 <div style="margin-top:12px"><div class=t style="margin-bottom:6px">Crypto positions (marked live)</div>
 <table><thead><tr><th>Market</th><th>Side</th><th class=num>Mkt prob</th>
@@ -699,27 +704,32 @@ async function load(){
     // EVERY number below is derived from Kalshi's own records (settlements,
     // positions, balance). The bot's internal diary is never displayed.
     const todayTrue=(L.marked_nav!=null&&S.day_nav0!=null)?(L.marked_nav-S.day_nav0):null;
+    // ACCOUNT row: the five numbers that matter, nothing else
+    const cS=((d.clive||{}).summary)||{};
     $('rmtiles').innerHTML=[
-      tile('Weather book P&L',(L.pnl_weather!=null)?('<span class="'+C(L.pnl_weather)+'">'+M(L.pnl_weather)+'</span>'):NA,'era dlive1 &middot; total minus crypto &middot; sums to the hero exactly'),
-      tile('Crypto book P&L',(L.pnl_crypto!=null)?('<span class="'+C(L.pnl_crypto)+'">'+M(L.pnl_crypto)+'</span>'):NA,'era clive1 &middot; realized + marked open positions'),
-      tile('Account balance',bal!=null?F(bal):NA,'live from Kalshi'),
-      tile('Marked NAV',(L.marked_nav!=null)?F(L.marked_nav):NA,'ACCOUNT: balance + BOTH books&rsquo; positions at last trade &middot; matches the Kalshi app'),
-      tile('Realized (Kalshi)',(L.pnl_true!=null&&L.unrealized!=null)?'<span class="'+C(L.pnl_true-L.unrealized)+'">'+M(L.pnl_true-L.unrealized)+'</span>':'<span class=mut>syncing&hellip;</span>','NAV identity: total P&L &minus; unrealized &middot; exact by construction'),
-      tile('Unrealized (marked)',(L.unrealized!=null)?'<span class="'+C(L.unrealized)+'">'+M(L.unrealized)+'</span>':NA,'open positions vs cost'),
-      tile("Today's P&L",(todayTrue!=null)?'<span class="'+C(todayTrue)+'">'+M(todayTrue)+'</span>':'<span class=mut>anchoring&hellip;</span>','NAV vs day-start NAV &middot; halts at -'+(S.caps?F(S.caps.halt):'$12')),
-      tile('Record (Kalshi settlements)',(S.has_kalshi_truth&&S.k_wins!=null)?((S.k_wins||0)+'W / '+(S.k_losses||0)+'L'):'<span class=mut>syncing&hellip;</span>','held-to-settlement markets, per the exchange &middot; early exits live in Realized &middot; '+((S.k_open!=null?S.k_open:S.open)||0)+' positions &middot; '+((S.k_resting_n!=null?S.k_resting_n:S.resting)||0)+' resting (per Kalshi)'),
-      tile('Gate',(S.gate==='scale')?('SCALE &middot; '+(S.gate_n||0)+' settled'):((S.gate||'probe')+' '+(S.gate_n||0)+'/30'),(S.gate==='scale')?'passed &middot; Kelly sizing live &middot; rolling 60-settlement window':'probe sizing until 30 settled pass'),
-      (S.caps?tile('Risk caps'+(S.caps.dyn?' (compounding)':''),F(S.caps.bet)+'/bet','open '+F(S.caps.open)+' &middot; day-halt '+F(S.caps.halt)+(S.caps.dyn?' &middot; 3% / 60% / 10% of NAV, refreshed every cycle':' &middot; fixed')+(S.caps.floor?' &middot; entries &ge;'+S.caps.floor+'&cent; only':'')):''),
-      tile('Fees (Kalshi)',(S.k_fees!=null)?F(S.k_fees):F(S.fees||0),(S.placed||0)+' placed &middot; '+(S.canceled||0)+' canceled'),
-      tile('Mirror sync',(S.sync_diffs==null)?NA:(S.sync_diffs===0?'<span class=pos>1:1 WITH KALSHI</span>':'<span class=neg>'+S.sync_diffs+' DIFFS</span>'),'bot book vs exchange positions, checked every cycle'),
-      (L.nickel?tile('Nickel lane (all realized)',(L.nickel.wins||0)+'W / '+(L.nickel.losses!=null?L.nickel.losses:((L.nickel.n||0)-(L.nickel.wins||0)))+'L &middot; <span class="'+C(L.nickel.net)+'">'+M(L.nickel.net||0)+'</span>',(L.nickel.open||0)+'/'+(L.nickel.max_open||5)+' lanes &middot; trail OFF, settle-or-stop'+(L.nickel.pos_cap?' &middot; NAV caps '+F(L.nickel.pos_cap)+'/pos &middot; '+F(L.nickel.lane_cap)+' lane':'')):''),
+      tile('Weather book P&L',(L.pnl_weather!=null)?('<span class="'+C(L.pnl_weather)+'">'+M(L.pnl_weather)+'</span>'):NA,'era dlive1'),
+      tile('Crypto book P&L',(L.pnl_crypto!=null)?('<span class="'+C(L.pnl_crypto)+'">'+M(L.pnl_crypto)+'</span>'):NA,'era clive1'),
+      tile('Account balance',bal!=null?F(bal):NA,'cash, live from Kalshi'),
+      tile("Today's P&L",(todayTrue!=null)?'<span class="'+C(todayTrue)+'">'+M(todayTrue)+'</span>':'<span class=mut>anchoring&hellip;</span>','account, NAV vs day start'),
+      tile('Fees (total)',F((S.k_fees||0)+(cS.fees||0)),'both books, lifetime')
+    ].join('');
+    // BOOK 1 - WEATHER: status at a glance
+    $('wxtiles').innerHTML=[
+      tile('Record',(S.has_kalshi_truth&&S.k_wins!=null)?((S.k_wins||0)+'W / '+(S.k_losses||0)+'L'):'<span class=mut>syncing&hellip;</span>','Kalshi settlements &middot; '+((S.k_open!=null?S.k_open:S.open)||0)+' open &middot; '+((S.k_resting_n!=null?S.k_resting_n:S.resting)||0)+' resting'),
+      (S.caps?tile('Sizing',F(S.caps.bet)+'/bet','gate '+(S.gate==='scale'?'PASSED':'probe')+' &middot; halt -'+F(S.caps.halt)+' &middot; entries &ge;'+(S.caps.floor||80)+'&cent;'):''),
+      (L.nickel?tile('Nickel lane',(L.nickel.wins||0)+'W / '+(L.nickel.losses!=null?L.nickel.losses:((L.nickel.n||0)-(L.nickel.wins||0)))+'L &middot; <span class="'+C(L.nickel.net)+'">'+M(L.nickel.net||0)+'</span>',(L.nickel.open||0)+'/'+(L.nickel.max_open||5)+' lanes &middot; settle-or-stop'):''),
+      tile('Mirror sync',(S.sync_diffs==null)?NA:(S.sync_diffs===0?'<span class=pos>1:1 WITH KALSHI</span>':'<span class=neg>'+S.sync_diffs+' DIFFS</span>'),'book vs exchange, every cycle')
+    ].join('');
+    // diagnostics drawer: the instruments, out of the way until wanted
+    $('wxdiag').innerHTML=[
+      tile('Unrealized (weather)',(L.unrealized!=null)?'<span class="'+C(L.unrealized)+'">'+M(L.unrealized)+'</span>':NA,'open positions vs cost'),
       (function(){const E=S.exec||{};const pm=E.placed_maker||0,fm=E.filled_maker||0;
         return tile('Execution',pm?Math.round(100*fm/pm)+'% maker fill':'&ndash;',
-          'takers '+(E.filled_taker||0)+'/'+(E.placed_taker||0)+' &middot; requotes '+(E.requotes||0)+' &middot; bucket-blocked '+(E.bucket_blocked||0));})(),
+          'takers '+(E.filled_taker||0)+'/'+(E.placed_taker||0)+' &middot; bucket-blocked '+(E.bucket_blocked||0));})(),
       tile('Exit autopsy',(S.autopsy_n_settled?('exits '+((S.autopsy_saved||0)>=0?'saved ':'cost ')+'<span class="'+C(S.autopsy_saved)+'">'+M(S.autopsy_saved||0)+'</span>'):'<span class=mut>grading&hellip;</span>'),
-        (S.autopsy_would_won||0)+' of '+(S.autopsy_n_settled||0)+' graded exits would have WON &middot; '+(S.autopsy_exits||0)+' total exits'),
+        (S.autopsy_would_won||0)+' of '+(S.autopsy_n_settled||0)+' graded would have won'),
       tile('Missed fills',(S.miss_settled?('patience '+((S.miss_cost||0)>0?'cost ':'saved ')+'<span class="'+C(-(S.miss_cost||0))+'">'+M(Math.abs(S.miss_cost||0))+'</span>'):'<span class=mut>grading&hellip;</span>'),
-        (S.miss_would_won||0)+' of '+(S.miss_settled||0)+' graded unfilled cancels would have WON &middot; '+(S.miss_n||0)+' logged &middot; the case for/against crossing the spread')
+        (S.miss_would_won||0)+' of '+(S.miss_settled||0)+' would have won &middot; '+(S.miss_n||0)+' logged)')
     ].join('');
     $('rmbuckets').innerHTML=((S.buckets||[]).map(b=>'<tr><td>'+b.bucket+'</td>'
       +'<td class=num>'+b.n+'</td><td class=num>'+b.wins+'W/'+(b.n-b.wins)+'L</td>'
