@@ -149,6 +149,27 @@ GATE_MIN_N = dp.GATE_MIN_N
 GATE_MAX_GAP = dp.GATE_MAX_GAP
 PROBE_COST_CENTS = dp.PROBE_COST_CENTS
 ERA = "dlive1"
+# --- TWO BOOKS, ONE ACCOUNT (8/3, Adam: crypto live, 50/50 NAV split) ---
+# Universe fence: this executor manages ONLY weather-series tickers; the
+# crypto executor (crypto_live.py, same process) manages only its own.
+# Without the fence, reconcile_positions would ADOPT the crypto book's
+# positions and stop-sell them. Capital: this book's bankroll =
+# WX_ALLOC x account NAV (balance + BOTH books' position cost).
+WX_ALLOC = float(os.environ.get("DRIFT_WX_ALLOC", "0.5"))
+CRYPTO_STATE_PATH = os.path.join("logs", "crypto_live_state.json")
+
+
+def _is_wx(tk):
+    return (tk or "").split("-")[0] in we.SERIES
+
+
+def _crypto_cost_c():
+    try:
+        d = json.load(open(CRYPTO_STATE_PATH))
+        return sum(float(b.get("entry", 0)) * int(b.get("count", 0))
+                   for b in (d.get("bets") or {}).values())
+    except Exception:
+        return 0
 
 
 # Self-restart on deploy (7/25: kalshi-update.timer never restarted this
@@ -157,6 +178,11 @@ ERA = "dlive1"
 # change on disk (git pull), the loop exits cleanly and systemd
 # Restart=always brings it back on the new build within 30s.
 _SRC_FILES = [os.path.abspath(__file__), os.path.abspath(dp.__file__)]
+try:
+    import crypto_live as _cl_mod
+    _SRC_FILES.append(os.path.abspath(_cl_mod.__file__))
+except Exception:
+    _cl_mod = None
 _SRC_MTIMES = {f: os.path.getmtime(f) for f in _SRC_FILES if os.path.exists(f)}
 
 
@@ -640,6 +666,8 @@ class DriftLive:
                 if ts and ts < LIVE_EPOCH:
                     continue        # pre-Leonard account history: not ours
                 tk = s.get("ticker") or ""
+                if not _is_wx(tk):
+                    continue    # crypto settlements: the other book's ledger
                 # payout comes split: 'revenue' (NO-side wins) + 'value'
                 # (YES-side wins), both int cents; costs are dollar-strings
                 rev = self._kval(s, "revenue") or 0.0
@@ -668,6 +696,8 @@ class DriftLive:
                 if pos == 0:
                     continue
                 tk = p.get("ticker") or ""
+                if not _is_wx(tk):
+                    continue    # mirror shows THIS book vs ITS universe
                 cnt = abs(pos)
                 exp = abs(self._kval(p, "market_exposure") or 0)
                 b = self.bets.get(tk) or {}
@@ -686,6 +716,8 @@ class DriftLive:
             kr = []
             for o in self.client.get_resting_orders():
                 tk = o.get("ticker") or ""
+                if not _is_wx(tk):
+                    continue    # crypto book's resting orders, not ours
                 side = o.get("side") or "?"
                 cnt = int(round(self._kval(o, "remaining_count")
                                 or self._kval(o, "count") or 0))
@@ -886,6 +918,8 @@ class DriftLive:
         changed = 0
         done = set(self.settled_tks)
         for tk, p in by_tk.items():
+            if not _is_wx(tk):
+                continue    # crypto book's turf (8/3 universe fence)
             pos = int(round(_num(p, "position_fp", "position")))
             if pos == 0:
                 continue
@@ -1043,8 +1077,11 @@ class DriftLive:
         already includes cash held for resting orders). Percentages mean
         winning grows the bets and drawdowns shrink them - risk stays
         proportional without manual raises."""
-        nav_c = balance_c + sum(b["entry"] * b["count"]
-                                for b in self.bets.values())
+        # account NAV = balance + BOTH books' position cost; this book's
+        # bankroll is its allocated share (8/3: 50/50 weather/crypto)
+        nav_c = int((balance_c
+                     + sum(b["entry"] * b["count"] for b in self.bets.values())
+                     + _crypto_cost_c()) * WX_ALLOC)
         if nav_c > 0:
             self.last_nav_c = nav_c    # nickel guardrails read this too
         if not DYN_CAPS:
@@ -1433,8 +1470,22 @@ def main():
           f"${dl.max_open_c/100:.2f} open, ${dl.max_day_loss_c/100:.2f} daily "
           f"halt; trail={'on' if TRAIL_ON else 'OFF - hold to settlement'}; "
           f"rest<= {REST_MAX_H}h)")
+    # LANE 2 LIVE (8/3): the crypto executor rides in this armed process -
+    # same key, same kill switch. Its own ledger, caps and universe.
+    cl = None
+    if _cl_mod is not None and _cl_mod.CRYPTO_ON:
+        try:
+            cl = _cl_mod.CryptoLive(client=dl.client, mode=dl.mode)
+            print(f"[{now()}] crypto book UP in {cl.mode} mode - "
+                  f"alloc {_cl_mod.ALLOC:.0%} of NAV, taker-first, "
+                  f"band {_cl_mod.ENTRY_MIN}-{_cl_mod.ENTRY_MAX}c, "
+                  f"stop {_cl_mod.STOP_C:.0f}c, no trail")
+        except Exception as e:
+            print(f"[{now()}] crypto book failed to start: {e}")
     if "--once" in sys.argv:
         dl.step()
+        if cl is not None:
+            cl.step()
         return 0
     while True:
         try:
@@ -1444,6 +1495,11 @@ def main():
             return 0
         except Exception as e:
             print(f"[{now()}] cycle error: {e}")
+        if cl is not None:
+            try:
+                cl.step()
+            except Exception as e:
+                print(f"[{now()}] crypto cycle error: {e}")
         if _code_changed():
             print(f"[{now()}] new build on disk - restarting (systemd revives)")
             return 0

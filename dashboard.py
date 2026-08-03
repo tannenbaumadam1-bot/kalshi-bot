@@ -349,7 +349,8 @@ def build_data():
     # poly reward-farming book RETIRED 7/23 (ledger archived, not deleted)
     # drift1 paper book retired 7/25; driftw2-fin retired 7/30
     # driftc = LANE 2 AUDITION (7/31): crypto drift paper book, gate 100
-    for key, fname in (("driftc", "driftc_state.json"),):
+    for key, fname in (("driftc", "driftc_state.json"),
+                       ("clive", "crypto_live_state.json"),):
         fpath = os.path.join("logs", fname)
         if os.path.exists(fpath):
             try:
@@ -383,6 +384,23 @@ def build_data():
             if dpriced:
                 dsum["unrealized"] = round(du, 2)
             dsum["marked_nav"] = round(float(dsum.get("cash") or 0) + dval, 2)
+    # 8/3 TWO LIVE BOOKS: the hero is the ACCOUNT - balance + weather
+    # positions + crypto positions, all marked. dlive's own block only
+    # counted its (now weather-fenced) universe.
+    try:
+        dv, cv = out.get("dlive") or {}, out.get("clive") or {}
+        if dv.get("balance_c") is not None:
+            def _val(rows):
+                return sum((b.get("value") if b.get("value") is not None
+                            else (b.get("entry", 0) or 0)
+                            * (b.get("count", 0) or 0) / 100.0)
+                           for b in rows or [])
+            acct = round(dv["balance_c"] / 100.0 + _val(dv.get("open"))
+                         + _val(cv.get("open")), 2)
+            dv["marked_nav"] = acct
+            dv["pnl_true"] = round(acct - float(dv.get("baseline") or 100.09), 2)
+    except Exception:
+        pass
     return out
 
 
@@ -468,6 +486,18 @@ td.num,th.num{text-align:right}
 <table><thead><tr><th>Closed</th><th>Market</th><th>Side</th><th class=num>Entry</th>
 <th class=num>Exit/Settle</th><th class=num>Qty</th><th>Result</th><th class=num>P&amp;L</th></tr></thead>
 <tbody id=rmreal></tbody></table></div>
+</div>
+<div id=clivewrap style="display:none;border:1.5px solid rgba(96,165,250,.55);border-radius:12px;padding:14px 18px;margin:14px 0 4px;background:linear-gradient(180deg,rgba(96,165,250,.05),transparent)">
+<h2 style="margin:0 0 10px">Lane 2 LIVE &middot; crypto drift <span id=clmode style="text-transform:none;letter-spacing:0"></span></h2>
+<div class=grid id=cltiles></div>
+<div style="margin-top:12px"><div class=t style="margin-bottom:6px">Crypto positions (marked live)</div>
+<table><thead><tr><th>Market</th><th>Side</th><th class=num>Mkt prob</th>
+<th class=num>Entry</th><th class=num>Now</th><th class=num>Qty</th><th class=num>Value</th><th class=num>uP&amp;L</th></tr></thead>
+<tbody id=cltbl></tbody></table></div>
+<div id=clrealwrap style="margin-top:12px;display:none"><div class=t style="margin-bottom:6px">Crypto results (latest)</div>
+<table><thead><tr><th>Closed</th><th>Market</th><th>Side</th><th class=num>Entry</th>
+<th class=num>Exit/Settle</th><th class=num>Qty</th><th>Result</th><th class=num>P&amp;L</th></tr></thead>
+<tbody id=clreal></tbody></table></div>
 </div>
 <div id=lane2 style="display:none;border:1px solid rgba(125,144,173,.35);border-radius:12px;padding:14px 18px;margin:14px 0 4px;">
 <h2 style="margin:0 0 10px">Lane 2 audition &middot; crypto drift <span style="text-transform:none;letter-spacing:0">(PAPER &mdash; live-book rules on Kalshi crypto hourlies &middot; real money only if the gate passes)</span></h2>
@@ -673,7 +703,7 @@ async function load(){
     const todayTrue=(L.marked_nav!=null&&S.day_nav0!=null)?(L.marked_nav-S.day_nav0):null;
     $('rmtiles').innerHTML=[
       tile('Account balance',bal!=null?F(bal):NA,'live from Kalshi'),
-      tile('Marked NAV',(L.marked_nav!=null)?F(L.marked_nav):NA,'balance + positions at last trade &middot; matches the Kalshi app&rsquo;s Portfolio number'),
+      tile('Marked NAV',(L.marked_nav!=null)?F(L.marked_nav):NA,'ACCOUNT: balance + BOTH books&rsquo; positions at last trade &middot; matches the Kalshi app'),
       tile('Realized (Kalshi)',(L.pnl_true!=null&&L.unrealized!=null)?'<span class="'+C(L.pnl_true-L.unrealized)+'">'+M(L.pnl_true-L.unrealized)+'</span>':'<span class=mut>syncing&hellip;</span>','NAV identity: total P&L &minus; unrealized &middot; exact by construction'),
       tile('Unrealized (marked)',(L.unrealized!=null)?'<span class="'+C(L.unrealized)+'">'+M(L.unrealized)+'</span>':NA,'open positions vs cost'),
       tile("Today's P&L",(todayTrue!=null)?'<span class="'+C(todayTrue)+'">'+M(todayTrue)+'</span>':'<span class=mut>anchoring&hellip;</span>','NAV vs day-start NAV &middot; halts at -'+(S.caps?F(S.caps.halt):'$12')),
@@ -722,6 +752,39 @@ async function load(){
       +'<td class=num><span class="'+C(b.pnl)+'">'+M(b.pnl)+'</span></td></tr>');});
     $('rmreal').innerHTML=rl.join('')||'<tr><td colspan=8 class=empty>Nothing realized yet &mdash; first settlements land tomorrow morning.</td></tr>';
   }
+  if(d.clive&&d.clive.summary){const K2=d.clive,S3=K2.summary||{};
+    document.getElementById('clivewrap').style.display='block';
+    const cLive=(S3.mode==='LIVE');
+    $('clmode').innerHTML='<span class=chip style="background:'+(cLive?'rgba(244,105,95,.15);color:var(--red)':'rgba(125,144,173,.13);color:var(--mut)')+'">'+(S3.mode||'?')+'</span>'
+      +(S3.halted?' <span class=chip style="background:rgba(244,105,95,.25);color:var(--red)">DAY HALTED</span>':'')
+      +' <span class=mut style="font-size:11px">era clive1 &middot; taker-first &middot; '+Math.round((S3.alloc||0.5)*100)+'% of NAV &middot; band 80-92&cent; &middot; 35&cent; stop &middot; no trail</span>';
+    const cc=S3.caps||{};
+    $('cltiles').innerHTML=[
+      tile('Book bankroll',F(S3.bank||0),'its half of account NAV &middot; caps '+F(cc.bet||0)+'/bet &middot; '+F(cc.open||0)+' open &middot; halt '+F(cc.halt||0)),
+      tile('Realized (after fees)',(S3.realized!=null)?('<span class="'+C(S3.realized)+'">'+M(S3.realized)+'</span>'):'&ndash;','fees '+F(S3.fees||0)+' &middot; settle/stop ledger'),
+      tile('Record',(S3.wins||0)+'W / '+(S3.losses||0)+'L',(S3.open||0)+' open &middot; '+(S3.resting||0)+' resting &middot; '+(S3.placed||0)+' placed'),
+      tile("Today's P&L",(S3.day_pnl!=null)?('<span class="'+C(S3.day_pnl)+'">'+M(S3.day_pnl)+'</span>'):'&ndash;','halts at -'+F(cc.halt||0)),
+      tile('Mirror sync',(S3.sync_diffs==null)?'<span class=mut>syncing&hellip;</span>':(S3.sync_diffs===0?'<span class=pos>1:1 WITH KALSHI</span>':'<span class=neg>'+S3.sync_diffs+' DIFFS</span>'),'crypto book vs exchange positions (crypto universe)')
+    ].join('');
+    $('cltbl').innerHTML=((K2.open||[]).map(b=>'<tr><td>'+(b.name||b.ticker||'')+'</td>'
+      +'<td><span class=chip style="background:'+(b.side==='yes'?'rgba(47,208,140,.13);color:var(--grn)':'rgba(244,105,95,.13);color:var(--red)')+'">'+String(b.side||'').toUpperCase()+'</span></td>'
+      +'<td class=num>'+Math.round((b.pside||0)*100)+'%</td>'
+      +'<td class=num>'+b.entry+'&cent;</td>'
+      +'<td class=num>'+(b.now!=null?b.now+'&cent;':'&ndash;')+'</td>'
+      +'<td class=num>'+b.count+'</td>'
+      +'<td class=num>'+(b.value!=null?F(b.value):F((b.entry||0)*(b.count||0)/100))+'</td>'
+      +'<td class=num>'+(b.upnl!=null?('<span class="'+C(b.upnl)+'">'+M(b.upnl)+'</span>'):'&ndash;')+'</td></tr>').join(''))
+      ||'<tr><td colspan=8 class=empty>Scanning crypto hourlies for 80-92&cent; favorites&hellip;</td></tr>';
+    const crl=(K2.settled||[]).slice(0,10);
+    if(crl.length){document.getElementById('clrealwrap').style.display='block';
+      $('clreal').innerHTML=crl.map(h=>'<tr><td>'+String(h.ts||'').slice(5,16).replace('T',' ')+'</td>'
+        +'<td>'+(h.name||'')+'</td>'
+        +'<td>'+String(h.side||'').toUpperCase()+'</td>'
+        +'<td class=num>'+h.entry+'&cent;</td>'
+        +'<td class=num>'+(h.exit_px!=null?h.exit_px+'&cent;':(h.outcome===1?'100&cent;':'0&cent;'))+'</td>'
+        +'<td class=num>'+h.count+'</td>'
+        +'<td>'+(h.outcome===1?'<span class=pos>WON</span>':(h.outcome===0?'<span class=neg>LOST</span>':'STOP'))+'</td>'
+        +'<td class=num><span class="'+C(h.pnl)+'">'+M(h.pnl)+'</span></td></tr>').join('');}}
   if(d.driftc&&d.driftc.summary){const A=d.driftc,S2=A.summary||{};
     document.getElementById('lane2').style.display='block';
     const stake=(A.open||[]).reduce((a,b)=>a+(b.entry||0)*(b.count||0)/100,0);

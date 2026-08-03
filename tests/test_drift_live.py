@@ -46,6 +46,7 @@ def test_level_entry_dry_fills(tmp_path, monkeypatch):
 
 
 def test_nickel_lane_places_and_skips_gate(tmp_path, monkeypatch):
+    monkeypatch.setattr(dl, 'WX_ALLOC', 1.0)   # cap math, pre-split
     b = _bot(tmp_path, monkeypatch)
     # side-mid 96, entry 95c bid in 93..96 -> 10-contract nickel, own lane
     assert b.place(mkts=[_mk(bid=95, ask=97)]) == 1
@@ -185,6 +186,7 @@ def test_evidence_weighted_kelly_fraction(tmp_path, monkeypatch):
 
 
 def test_proven_bucket_sizes_up(tmp_path, monkeypatch):
+    monkeypatch.setattr(dl, 'WX_ALLOC', 1.0)   # cap math, pre-split
     b = _bot(tmp_path, monkeypatch)
     b.history = _proven_hist()                 # gate=scale + proven 85-89
     assert b._gate()[0] == "scale"
@@ -212,6 +214,7 @@ def test_taker_falls_back_to_maker_when_toll_too_big(tmp_path, monkeypatch):
 
 
 def test_nickel_pos_cap_trims_to_nav(tmp_path, monkeypatch):
+    monkeypatch.setattr(dl, 'WX_ALLOC', 1.0)   # cap math, pre-split
     # 7/29: no single nickel may cost more than 10% of NAV
     b = _bot(tmp_path, monkeypatch)
     b.dry_balance_c = 3000                    # NAV $30 -> pos cap $3.00
@@ -322,6 +325,7 @@ def test_taker_first_on_proven_lane(tmp_path, monkeypatch):
 
 
 def test_dynamic_caps_track_nav(tmp_path, monkeypatch):
+    monkeypatch.setattr(dl, 'WX_ALLOC', 1.0)   # cap math, pre-split
     b = _bot(tmp_path, monkeypatch)
     b.dry_balance_c = 20000                     # NAV $200, nothing filled
     b._refresh_caps(b.balance_c())
