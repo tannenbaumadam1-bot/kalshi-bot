@@ -111,6 +111,7 @@ class CryptoLive:
         self.sync_diffs = None
         self.dry_balance_c = 10000
         self.bank_c = 0          # allocated bankroll, refreshed each cycle
+        self.pnl_days = {}       # date -> realized $ that day (never trimmed)
         self.load()
 
     # ---- persistence ----
@@ -122,11 +123,23 @@ class CryptoLive:
                     return
                 for k in ("bets", "pending", "history", "wins", "losses",
                           "fees_c", "realized_c", "placed", "canceled",
-                          "day", "day_pnl_c", "dry_balance_c"):
+                          "day", "day_pnl_c", "dry_balance_c", "pnl_days"):
                     if k in d:
                         setattr(self, k, d[k])
             except Exception:
                 pass
+        # one-time backfill (history is complete this early in the era;
+        # the daily ledger itself is never trimmed - 8/3 lesson)
+        if not self.pnl_days and self.history:
+            for h in self.history:
+                p, ts = h.get("pnl"), (h.get("ts") or "")[:10]
+                if p is not None and ts:
+                    self.pnl_days[ts] = round(
+                        self.pnl_days.get(ts, 0.0) + float(p), 2)
+
+    def _day_add(self, net_c):
+        d = today()
+        self.pnl_days[d] = round(self.pnl_days.get(d, 0.0) + net_c / 100.0, 2)
 
     def save(self, balance_c=None):
         try:
@@ -134,6 +147,7 @@ class CryptoLive:
             d = {"updated": now(), "era": ERA, "mode": self.mode,
                  "bets": self.bets, "pending": self.pending,
                  "history": self.history[-120:],
+                 "pnl_days": self.pnl_days,
                  "wins": self.wins, "losses": self.losses,
                  "fees_c": self.fees_c, "realized_c": self.realized_c,
                  "placed": self.placed, "canceled": self.canceled,
@@ -362,6 +376,7 @@ class CryptoLive:
             exit_fee = fee_cents(bid, b["count"], taker=True)
             net = (bid - b["entry"]) * b["count"] - b.get("fee", 0) - exit_fee
             self.realized_c += net
+            self._day_add(net)
             self.day_pnl_c += net
             self.fees_c += exit_fee
             if self.client is None:
@@ -390,6 +405,7 @@ class CryptoLive:
             payout = 100 if won else 0
             net = (payout - b["entry"]) * b["count"] - b.get("fee", 0)
             self.realized_c += net
+            self._day_add(net)
             self.day_pnl_c += net
             self.wins += int(won)
             self.losses += int(not won)

@@ -476,3 +476,22 @@ def test_cumulative_ledger_never_shrinks(tmp_path, monkeypatch):
     b.sync_kalshi_truth()
     assert b.k_cum["w"] == 6           # never shrinks, never double-counts
     assert round(b.k_cum["pnl"], 2) == round(6 * 0.17, 2)
+
+
+def test_daily_pnl_ledger_seeds_with_residual(tmp_path, monkeypatch):
+    # trimmed-off history rows can't be dated: their P&L lands on the era
+    # epoch so weekly/monthly columns still sum to lifetime realized
+    import json as _json
+    monkeypatch.setattr(dl, "STATE", str(tmp_path / "s.json"))
+    monkeypatch.setattr(dl, "BETS", str(tmp_path / "b.csv"))
+    (tmp_path / "s.json").write_text(_json.dumps({
+        "mode": "DRY",
+        "realized_c": 500.0,   # $5 lifetime; surviving rows only show $3
+        "history": [
+            {"pnl": 1.0, "ts": "2026-07-28T12:00:00"},
+            {"pnl": 2.0, "ts": "2026-07-29T12:00:00"}]}))
+    b = dl.DriftLive(None, mode="DRY")
+    assert b.pnl_days["2026-07-28"] == 1.0
+    assert b.pnl_days["2026-07-29"] == 2.0
+    assert b.pnl_days[dl.LIVE_EPOCH[:10]] == 2.0    # the $2 residual
+    assert abs(sum(b.pnl_days.values()) - 5.0) < 0.005

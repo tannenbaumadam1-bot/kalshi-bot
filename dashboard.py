@@ -437,6 +437,71 @@ def build_data():
             dv["pnl_weather"] = round(dv["pnl_true"] - c_pnl, 2)
     except Exception:
         pass
+    # 8/3 PERFORMANCE BREAKOUT (Adam: weekly & monthly % by strategy):
+    # built from each book's persistent daily-P&L ledger (never trimmed).
+    # Closed periods are realized-only; the CURRENT period is everything
+    # else (open positions marked live + any ledger drift), so each
+    # column telescopes EXACTLY to the account scoreboard. Return % is
+    # on period-start NAV (baseline + all prior periods), compounding.
+    try:
+        import datetime as _dt
+        dv = out.get("dlive") or {}
+        if dv.get("pnl_true") is not None:
+            def _days(fname):
+                try:
+                    d = json.load(open(os.path.join("logs", fname)))
+                    return d.get("pnl_days") or {}
+                except Exception:
+                    return {}
+            wx_d = _days("drift_live_state.json")
+            cr_d = _days("crypto_live_state.json")
+            base = float(dv.get("baseline") or 100.09)
+            today_s = _dt.date.today().isoformat()
+            def _periods(kind):
+                buckets, order = {}, []
+                alldays = sorted(set(list(wx_d) + list(cr_d) + [today_s]))
+                for ds in alldays:
+                    try:
+                        d = _dt.date.fromisoformat(ds)
+                    except ValueError:
+                        continue
+                    if kind == "w":
+                        mon = d - _dt.timedelta(days=d.weekday())
+                        k = mon.isoformat()
+                        lab = (mon.strftime("%b %-d") + " – "
+                               + (mon + _dt.timedelta(days=6)).strftime("%b %-d"))
+                    else:
+                        k = ds[:7]
+                        lab = d.strftime("%B %Y")
+                    if k not in buckets:
+                        buckets[k] = {"wx": 0.0, "cr": 0.0, "label": lab}
+                        order.append(k)
+                    buckets[k]["wx"] += float(wx_d.get(ds) or 0)
+                    buckets[k]["cr"] += float(cr_d.get(ds) or 0)
+                if not order:
+                    return []
+                cw = sum(buckets[k]["wx"] for k in order[:-1])
+                cc = sum(buckets[k]["cr"] for k in order[:-1])
+                buckets[order[-1]]["wx"] = float(dv.get("pnl_weather") or 0) - cw
+                buckets[order[-1]]["cr"] = float(dv.get("pnl_crypto") or 0) - cc
+                res, nav0 = [], base
+                for i, k in enumerate(order):
+                    b = buckets[k]
+                    tot = b["wx"] + b["cr"]
+                    res.append({"label": b["label"],
+                                "live": i == len(order) - 1,
+                                "wx": round(b["wx"], 2),
+                                "cr": round(b["cr"], 2),
+                                "tot": round(tot, 2),
+                                "wx_pct": round(b["wx"] / nav0 * 100, 2) if nav0 else None,
+                                "cr_pct": round(b["cr"] / nav0 * 100, 2) if nav0 else None,
+                                "tot_pct": round(tot / nav0 * 100, 2) if nav0 else None,
+                                "nav1": round(nav0 + tot, 2)})
+                    nav0 += tot
+                return res
+            dv["perf"] = {"weekly": _periods("w"), "monthly": _periods("m")}
+    except Exception:
+        pass
     return out
 
 
@@ -511,6 +576,16 @@ td.num,th.num{text-align:right}
     <div class=d id=rmpnld></div></div>
 </div>
 <div class=grid id=rmtiles></div>
+<div id=perfwrap style="display:none;margin-top:16px;border-top:1px solid rgba(125,144,173,.25);padding-top:14px">
+<h2 style="margin:0 0 10px">Performance &middot; returns by period <span style="text-transform:none;letter-spacing:0;font-size:11px;color:var(--mut)">&middot; % on period-start NAV &middot; open period marked live</span></h2>
+<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(340px,1fr));gap:18px">
+<div><div class=t style="margin-bottom:6px">Weekly</div>
+<table><thead><tr><th>Week</th><th class=num>Weather</th><th class=num>Crypto</th><th class=num>Total</th><th class=num>NAV end</th></tr></thead>
+<tbody id=perfw></tbody></table></div>
+<div><div class=t style="margin-bottom:6px">Monthly</div>
+<table><thead><tr><th>Month</th><th class=num>Weather</th><th class=num>Crypto</th><th class=num>Total</th><th class=num>NAV end</th></tr></thead>
+<tbody id=perfm></tbody></table></div>
+</div></div>
 <h2 style="margin:18px 0 10px;border-top:1px solid rgba(125,144,173,.25);padding-top:14px">Book 1 &middot; Weather <span style="text-transform:none;letter-spacing:0">(era dlive1 &middot; maker + pursuit ladder &middot; 50% of NAV)</span></h2>
 <div class=grid id=wxtiles></div>
 <details style="margin-top:10px"><summary style="cursor:pointer;font-size:11px;color:var(--mut);text-transform:uppercase;letter-spacing:.12em">Diagnostics &amp; capital routing</summary>
@@ -748,6 +823,18 @@ async function load(){
       tile("Today's return",(todayTrue!=null)?('<span class="'+C(todayTrue)+'">'+(todayPct!=null?P(todayPct):M(todayTrue))+'</span>'):'<span class=mut>anchoring&hellip;</span>',(todayTrue!=null)?('<span class="'+C(todayTrue)+'">'+M(todayTrue)+'</span> &middot; NAV vs day start '+F(S.day_nav0)):'account, NAV vs day start'),
       tile('Fees (total)',F((S.k_fees||0)+(cS.fees||0)),'both books, lifetime')
     ].join('');
+    // PERFORMANCE - weekly & monthly % returns by book, from the
+    // never-trimmed daily ledgers; % beside $, live period chipped
+    if(L.perf&&((L.perf.weekly||[]).length||(L.perf.monthly||[]).length)){
+      $('perfwrap').style.display='block';
+      const pc=(v,p)=>'<td class=num><span class="'+C(v)+'">'+(p!=null?P(p):M(v))+'</span><br><span class=mut style="font-size:10px">'+M(v)+'</span></td>';
+      const rows=a=>a.map(r=>'<tr'+(r.live?' style="background:rgba(232,180,76,.05)"':'')+'><td>'+r.label
+        +(r.live?' <span class=chip style="background:rgba(232,180,76,.18);color:var(--amb);font-size:9px">LIVE</span>':'')
+        +'</td>'+pc(r.wx,r.wx_pct)+pc(r.cr,r.cr_pct)+pc(r.tot,r.tot_pct)
+        +'<td class=num>'+F(r.nav1)+'</td></tr>').join('');
+      $('perfw').innerHTML=rows(L.perf.weekly||[]);
+      $('perfm').innerHTML=rows(L.perf.monthly||[]);
+    }
     // BOOK 1 - WEATHER: status at a glance
     $('wxtiles').innerHTML=[
       tile('Record',(S.has_kalshi_truth&&S.k_wins!=null)?((S.k_wins||0)+'W / '+(S.k_losses||0)+'L'):'<span class=mut>syncing&hellip;</span>','Kalshi settlements, lifetime &middot; '+((S.k_open!=null?S.k_open:S.open)||0)+' open &middot; '+((S.k_resting_n!=null?S.k_resting_n:S.resting)||0)+' resting'),

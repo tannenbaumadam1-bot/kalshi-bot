@@ -130,3 +130,24 @@ def test_bank_compounds_with_account_nav(tmp_path, monkeypatch):
     b.dry_balance_c = 14000                           # account grew 40%
     b.refresh_bank(b.balance_c())
     assert b.bank_c == 7000 and b._bet_cap_c() > cap1  # caps grew with it
+
+
+def test_daily_pnl_ledger_never_trims(tmp_path, monkeypatch):
+    # 8/3: weekly/monthly perf derives from pnl_days, which must survive
+    # the history[-120:] trim - one float per date, forever
+    b = _bot(tmp_path, monkeypatch)
+    b.dry_balance_c = 20000
+    b.place(mkts=[_mk()])
+    tk = "KXBTCD-26AUG0317-T64000"
+    monkeypatch.setattr(cl.dw.DriftWide, "_quotes",
+                        lambda self, tks: {tk: (30, 33)})
+    assert b.stop_check() == 1
+    d = cl.today()
+    assert d in b.pnl_days
+    assert abs(b.pnl_days[d] - b.history[-1]["pnl"]) < 0.005
+    # backfill: a reloaded book with history but no ledger seeds itself
+    b.save()
+    b2 = cl.CryptoLive(None, mode="DRY")
+    b2.pnl_days = {}
+    b2.load()
+    assert d in b2.pnl_days and abs(b2.pnl_days[d] - b.pnl_days[d]) < 0.005

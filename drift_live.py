@@ -237,6 +237,7 @@ class DriftLive:
         self.settled_tks = []    # tickers already settled by us (anti-double-settle)
         self.k_settlements = []  # Kalshi's OWN settlement records (the proof)
         self.k_cum = {}          # cumulative settlement ledger (never rolls)
+        self.pnl_days = {}       # date -> realized $ that day (never trimmed)
         self.k_exit_realized_c = 0.0   # Kalshi's realized pnl on open markets
         self.day_nav0_c = None   # NAV anchor at day start (for true today-P&L)
         self.autopsy = []        # every exit, graded vs eventual settlement
@@ -259,12 +260,40 @@ class DriftLive:
                           "canceled", "day", "day_pnl_c", "history",
                           "settled_tks", "k_settlements", "k_exit_realized_c",
                           "day_nav0_c", "autopsy", "miss", "exec_stats",
-                          "k_cum",
+                          "k_cum", "pnl_days",
                           "k_positions", "k_resting", "dry_balance_c"):
                     if k in d:
                         setattr(self, k, d[k])
             except Exception:
                 pass
+        self._seed_pnl_days()
+
+    def _day_add(self, net_c):
+        """Fold a realized P&L (cents) into today's bucket of the daily
+        ledger. The ledger is one float per date and is NEVER trimmed -
+        weekly/monthly performance derives from it, so it must not rot
+        the way the 200-row history window does (8/3 lesson)."""
+        d = today()
+        self.pnl_days[d] = round(self.pnl_days.get(d, 0.0) + net_c / 100.0, 2)
+
+    def _seed_pnl_days(self):
+        """One-time backfill from the surviving history rows. Rows already
+        trimmed off can't be dated - their P&L lands on the era epoch so
+        every column still sums exactly to lifetime realized."""
+        if self.pnl_days or not self.history:
+            return
+        tot = 0.0
+        for h in self.history:
+            p = h.get("pnl")
+            ts = (h.get("ts") or "")[:10]
+            if p is None or not ts:
+                continue
+            self.pnl_days[ts] = round(self.pnl_days.get(ts, 0.0) + float(p), 2)
+            tot += float(p)
+        resid = round(self.realized_c / 100.0 - tot, 2)
+        if abs(resid) >= 0.01:
+            d0 = LIVE_EPOCH[:10]
+            self.pnl_days[d0] = round(self.pnl_days.get(d0, 0.0) + resid, 2)
 
     def _real_record(self):
         """The HONEST record (Adam 7/25: 'bets have lost'): every realized
@@ -505,6 +534,7 @@ class DriftLive:
              "settled_tks": self.settled_tks[-300:],
              "k_settlements": self.k_settlements[:300],
              "k_cum": self.k_cum,
+             "pnl_days": self.pnl_days,
              "k_exit_realized_c": self.k_exit_realized_c,
              "autopsy": self.autopsy[-200:],
              "miss": self.miss[-200:],
@@ -1045,6 +1075,7 @@ class DriftLive:
             payout = 100 if won else 0
             net = (payout - b["entry"]) * b["count"] - b.get("fee", 0)
             self.realized_c += net
+            self._day_add(net)
             self.day_pnl_c += net
             if self.client is None:
                 self.dry_balance_c += payout * b["count"]
@@ -1101,6 +1132,7 @@ class DriftLive:
             exit_fee = fee_cents(bid, cnt, taker=True)
             net = (bid - b["entry"]) * cnt - b.get("fee", 0) - exit_fee
             self.realized_c += net
+            self._day_add(net)
             self.day_pnl_c += net
             self.fees_c += exit_fee
             if self.client is None:
