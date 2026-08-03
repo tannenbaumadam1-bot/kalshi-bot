@@ -138,6 +138,16 @@ class KalshiClient:
                              params={"limit": limit})
         return data.get("settlements", []) or []
 
+    def get_settlements_page(self, limit: int = 200,
+                             cursor: Optional[str] = None):
+        """One page of settlements plus the next-page cursor (for the
+        cumulative ledger's one-time full-history seed)."""
+        params: Dict[str, Any] = {"limit": limit}
+        if cursor:
+            params["cursor"] = cursor
+        data = self._request("GET", "/portfolio/settlements", params=params)
+        return (data.get("settlements", []) or []), data.get("cursor")
+
     # ----- market data ---------------------------------------------
     def get_markets(self, limit: int = 100, status: str = "open",
                     cursor: Optional[str] = None) -> Dict[str, Any]:

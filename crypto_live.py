@@ -55,7 +55,16 @@ MIN_VOL24 = float(os.environ.get("CRYPTO_MIN_VOL24", "500"))
 STOP_C = float(os.environ.get("CRYPTO_STOP_C", "35"))
 MAX_PER_DAY = int(os.environ.get("CRYPTO_MAX_PER_DAY", "40"))
 REST_MAX_MIN = float(os.environ.get("CRYPTO_REST_MAX_MIN", "30"))
+# COMPOUNDING LADDER (8/3, Adam): the bankroll side already compounds -
+# bank = 50% of account NAV, refreshed EVERY cycle, so every settled win
+# raises the very next bet across both books automatically. The sizing
+# side now compounds on evidence too: quarter-Kelly until the LIVE book
+# proves itself (>=100 settled, net realized > 0 - the audition's bar,
+# re-earned with real fills), then half-Kelly. At crypto's settlement
+# cadence that ladder can climb in days, not weeks.
 KELLY = float(os.environ.get("CRYPTO_KELLY", "0.25"))
+KELLY_PROVEN = float(os.environ.get("CRYPTO_KELLY_PROVEN", "0.5"))
+KELLY_PROVEN_N = int(os.environ.get("CRYPTO_KELLY_PROVEN_N", "100"))
 # 8/3 (Adam): 15-minute series EXCLUDED. The audition measured them at
 # ~zero edge (n=11, +$0.12 - noise) while hourly/daily carried all the
 # profit, and the live book's first 15-min trade lost -$0.84. A price
@@ -147,6 +156,8 @@ class CryptoLive:
                      "day_pnl": round(self.day_pnl_c / 100.0, 2),
                      "halted": self.halted,
                      "no_15m": NO_15M,
+                     "kelly": self._kelly(),
+                     "kelly_n": self.wins + self.losses,
                      "sync_diffs": self.sync_diffs},
                  "open": [dict(b, ticker=tk) for tk, b in self.bets.items()],
                  "settled": list(reversed(self.history[-40:]))}
@@ -201,6 +212,13 @@ class CryptoLive:
 
     def _halt_c(self):
         return max(200, int(self.bank_c * HALT_PCT))
+
+    def _kelly(self):
+        """Evidence-earned sizing: half-Kelly only after 100+ LIVE
+        settlements with positive realized P&L (net of fees)."""
+        if (self.wins + self.losses) >= KELLY_PROVEN_N and self.realized_c > 0:
+            return KELLY_PROVEN
+        return KELLY
 
     # ---- lifecycle ----
     def _roll_day(self):
@@ -450,7 +468,7 @@ class CryptoLive:
             pside = smid / 100.0
             # Kelly at the BID (the signal), cost at the ASK (the toll)
             b_odds = (100 - e_bid) / e_bid
-            f_star = max(0.0, pside - (1 - pside) / b_odds) * KELLY
+            f_star = max(0.0, pside - (1 - pside) / b_odds) * self._kelly()
             size = int(min(f_star, BET_PCT) * self.bank_c // e_ask)
             if size < 1:
                 continue

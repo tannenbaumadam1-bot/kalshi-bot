@@ -743,7 +743,7 @@ async function load(){
     ].join('');
     // BOOK 1 - WEATHER: status at a glance
     $('wxtiles').innerHTML=[
-      tile('Record',(S.has_kalshi_truth&&S.k_wins!=null)?((S.k_wins||0)+'W / '+(S.k_losses||0)+'L'):'<span class=mut>syncing&hellip;</span>','Kalshi settlements &middot; '+((S.k_open!=null?S.k_open:S.open)||0)+' open &middot; '+((S.k_resting_n!=null?S.k_resting_n:S.resting)||0)+' resting'),
+      tile('Record',(S.has_kalshi_truth&&S.k_wins!=null)?((S.k_wins||0)+'W / '+(S.k_losses||0)+'L'):'<span class=mut>syncing&hellip;</span>','Kalshi settlements, lifetime &middot; '+((S.k_open!=null?S.k_open:S.open)||0)+' open &middot; '+((S.k_resting_n!=null?S.k_resting_n:S.resting)||0)+' resting'),
       (S.caps?tile('Sizing',F(S.caps.bet)+'/bet','gate '+(S.gate==='scale'?'PASSED':'probe')+' &middot; halt -'+F(S.caps.halt)+' &middot; entries &ge;'+(S.caps.floor||80)+'&cent;'):''),
       (L.nickel?tile('Nickel lane',(L.nickel.wins||0)+'W / '+(L.nickel.losses!=null?L.nickel.losses:((L.nickel.n||0)-(L.nickel.wins||0)))+'L &middot; <span class="'+C(L.nickel.net)+'">'+M(L.nickel.net||0)+'</span>',(L.nickel.open||0)+'/'+(L.nickel.max_open||5)+' lanes &middot; settle-or-stop'):''),
       tile('Mirror sync',(S.sync_diffs==null)?NA:(S.sync_diffs===0?'<span class=pos>1:1 WITH KALSHI</span>':'<span class=neg>'+S.sync_diffs+' DIFFS</span>'),'book vs exchange, every cycle')
@@ -798,7 +798,7 @@ async function load(){
       +' <span class=mut style="font-size:11px">era clive1 &middot; taker-first &middot; '+Math.round((S3.alloc||0.5)*100)+'% of NAV &middot; band 80-92&cent; &middot; 35&cent; stop &middot; no trail</span>';
     const cc=S3.caps||{};
     $('cltiles').innerHTML=[
-      tile('Book bankroll',F(S3.bank||0),'its half of account NAV &middot; caps '+F(cc.bet||0)+'/bet &middot; '+F(cc.open||0)+' open &middot; halt '+F(cc.halt||0)),
+      tile('Book bankroll',F(S3.bank||0),'50% of NAV, compounds every cycle &middot; '+((S3.kelly||0.25)>=0.5?'&frac12;':'&frac14;')+'-Kelly ('+(S3.kelly_n||0)+'/100 to upgrade) &middot; '+F(cc.bet||0)+'/bet'),
       tile('Realized (after fees)',(S3.realized!=null)?('<span class="'+C(S3.realized)+'">'+M(S3.realized)+'</span>'):'&ndash;','fees '+F(S3.fees||0)+' &middot; settle/stop ledger'),
       tile('Record',(S3.wins||0)+'W / '+(S3.losses||0)+'L',(S3.open||0)+' open &middot; '+(S3.resting||0)+' resting &middot; '+(S3.placed||0)+' placed'),
       tile("Today's P&L",(S3.day_pnl!=null)?('<span class="'+C(S3.day_pnl)+'">'+M(S3.day_pnl)+'</span>'):'&ndash;','halts at -'+F(cc.halt||0)),

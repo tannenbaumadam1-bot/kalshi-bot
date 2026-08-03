@@ -236,6 +236,7 @@ class DriftLive:
         self.history = []
         self.settled_tks = []    # tickers already settled by us (anti-double-settle)
         self.k_settlements = []  # Kalshi's OWN settlement records (the proof)
+        self.k_cum = {}          # cumulative settlement ledger (never rolls)
         self.k_exit_realized_c = 0.0   # Kalshi's realized pnl on open markets
         self.day_nav0_c = None   # NAV anchor at day start (for true today-P&L)
         self.autopsy = []        # every exit, graded vs eventual settlement
@@ -258,6 +259,7 @@ class DriftLive:
                           "canceled", "day", "day_pnl_c", "history",
                           "settled_tks", "k_settlements", "k_exit_realized_c",
                           "day_nav0_c", "autopsy", "miss", "exec_stats",
+                          "k_cum",
                           "k_positions", "k_resting", "dry_balance_c"):
                     if k in d:
                         setattr(self, k, d[k])
@@ -502,6 +504,7 @@ class DriftLive:
              "dry_balance_c": self.dry_balance_c,
              "settled_tks": self.settled_tks[-300:],
              "k_settlements": self.k_settlements[:300],
+             "k_cum": self.k_cum,
              "k_exit_realized_c": self.k_exit_realized_c,
              "autopsy": self.autopsy[-200:],
              "miss": self.miss[-200:],
@@ -516,11 +519,21 @@ class DriftLive:
                  "wins": self.wins, "losses": self.losses,
                  "real_wins": real_w, "real_losses": real_l,
                  # Kalshi-derived truth (only shown numbers):
-                 "k_wins": sum(1 for s in self.k_settlements if s["pnl"] > 0),
-                 "k_losses": sum(1 for s in self.k_settlements if s["pnl"] < 0),
-                 "k_settle_realized": round(sum(s["pnl"] for s in self.k_settlements), 2),
+                 # LIFETIME record from the cumulative ledger - never a
+                 # rolling window (falls back to the recent rows pre-seed)
+                 "k_wins": (self.k_cum.get("w")
+                            if self.k_cum.get("seeded")
+                            else sum(1 for s in self.k_settlements if s["pnl"] > 0)),
+                 "k_losses": (self.k_cum.get("l")
+                              if self.k_cum.get("seeded")
+                              else sum(1 for s in self.k_settlements if s["pnl"] < 0)),
+                 "k_settle_realized": (round(self.k_cum.get("pnl", 0), 2)
+                                       if self.k_cum.get("seeded")
+                                       else round(sum(s["pnl"] for s in self.k_settlements), 2)),
                  "k_exit_realized": round(self.k_exit_realized_c / 100.0, 2),
-                 "k_realized": round(sum(s["pnl"] for s in self.k_settlements)
+                 "k_realized": round((self.k_cum.get("pnl", 0)
+                                      if self.k_cum.get("seeded")
+                                      else sum(s["pnl"] for s in self.k_settlements))
                                      + self.k_exit_realized_c / 100.0, 2),
                  "day_nav0": (round(self.day_nav0_c / 100.0, 2)
                               if self.day_nav0_c is not None else None),
@@ -529,7 +542,9 @@ class DriftLive:
                  # mirror counts + fees straight from Kalshi's records
                  "k_open": (len(self.k_positions) if self.client is not None else None),
                  "k_resting_n": (len(self.k_resting) if self.client is not None else None),
-                 "k_fees": round(sum(s.get("fee", 0) for s in self.k_settlements)
+                 "k_fees": round((self.k_cum.get("fees", 0)
+                                  if self.k_cum.get("seeded")
+                                  else sum(s.get("fee", 0) for s in self.k_settlements))
                                  + sum(p.get("fee", 0) for p in self.k_positions) / 100.0, 2),
                  "sync_diffs": self._sync_diffs(),
                  # live risk caps as currently applied (proof the dynamic
@@ -659,30 +674,77 @@ class DriftLive:
         bookkeeping (which double-counted and laundered losses into 'exits')."""
         if self.client is None:
             return
+
+        def _row(s):
+            ts = s.get("settled_time", "") or ""
+            if ts and ts < LIVE_EPOCH:
+                return None         # pre-Leonard account history: not ours
+            tk = s.get("ticker") or ""
+            if not _is_wx(tk):
+                return None     # crypto settlements: the other book's ledger
+            # payout comes split: 'revenue' (NO-side wins) + 'value'
+            # (YES-side wins), both int cents; costs are dollar-strings
+            rev = self._kval(s, "revenue") or 0.0
+            val = self._kval(s, "value") or 0.0
+            cy = self._kval(s, "yes_total_cost") or 0.0
+            cn = self._kval(s, "no_total_cost") or 0.0
+            # fee_cost is a dollars-STRING without the _dollars suffix
+            fraw = s.get("fee_cost_dollars", s.get("fee_cost"))
+            try:
+                fee = float(fraw) * 100.0 if isinstance(fraw, str) else float(fraw or 0)
+            except (TypeError, ValueError):
+                fee = 0.0
+            pnl_c = rev + val - cy - cn - fee
+            return {"tk": tk, "pnl": round(pnl_c / 100.0, 2),
+                    "fee": round(fee / 100.0, 2), "ts": ts}
+
         try:
-            rows = []
-            for s in self.client.get_settlements(limit=200):
-                ts = s.get("settled_time", "") or ""
-                if ts and ts < LIVE_EPOCH:
-                    continue        # pre-Leonard account history: not ours
-                tk = s.get("ticker") or ""
-                if not _is_wx(tk):
-                    continue    # crypto settlements: the other book's ledger
-                # payout comes split: 'revenue' (NO-side wins) + 'value'
-                # (YES-side wins), both int cents; costs are dollar-strings
-                rev = self._kval(s, "revenue") or 0.0
-                val = self._kval(s, "value") or 0.0
-                cy = self._kval(s, "yes_total_cost") or 0.0
-                cn = self._kval(s, "no_total_cost") or 0.0
-                # fee_cost is a dollars-STRING without the _dollars suffix
-                fraw = s.get("fee_cost_dollars", s.get("fee_cost"))
+            # CUMULATIVE LEDGER (8/3, Adam: 'the tracker needs to be
+            # perfect'): two books share one settlement feed, so the
+            # 200-row window ROLLS - the record must never shrink. Every
+            # settlement is folded into persistent counters exactly once
+            # (keyed ticker+time). One-time seed paginates the FULL era
+            # history so the lifetime record is exact from day one.
+            if not self.k_cum.get("seeded"):
+                cur, pages = None, 0
+                allrows = []
                 try:
-                    fee = float(fraw) * 100.0 if isinstance(fraw, str) else float(fraw or 0)
-                except (TypeError, ValueError):
-                    fee = 0.0
-                pnl_c = rev + val - cy - cn - fee
-                rows.append({"tk": tk, "pnl": round(pnl_c / 100.0, 2),
-                             "fee": round(fee / 100.0, 2), "ts": ts})
+                    while pages < 15:
+                        batch, cur = self.client.get_settlements_page(
+                            limit=200, cursor=cur)
+                        pages += 1
+                        allrows.extend(batch)
+                        if not cur or not batch:
+                            break
+                        oldest = min((b.get("settled_time") or "~")
+                                     for b in batch)
+                        if oldest < LIVE_EPOCH:
+                            break       # reached pre-era history
+                    self.k_cum["seeded"] = True
+                except Exception:
+                    allrows = self.client.get_settlements(limit=200)
+                    self.k_cum["seeded"] = True
+                src = allrows
+            else:
+                src = self.client.get_settlements(limit=200)
+            rows, seen = [], set(self.k_cum.get("keys") or [])
+            for s in src:
+                r = _row(s)
+                if r is None:
+                    continue
+                rows.append(r)
+                key = f"{r['ts']}|{r['tk']}"
+                if key in seen:
+                    continue
+                seen.add(key)
+                if r["pnl"] > 0:
+                    self.k_cum["w"] = self.k_cum.get("w", 0) + 1
+                elif r["pnl"] < 0:
+                    self.k_cum["l"] = self.k_cum.get("l", 0) + 1
+                self.k_cum["pnl"] = round(self.k_cum.get("pnl", 0) + r["pnl"], 2)
+                self.k_cum["fees"] = round(self.k_cum.get("fees", 0) + r["fee"], 2)
+            self.k_cum["keys"] = sorted(seen)[-800:]
+            rows.sort(key=lambda r: r["ts"], reverse=True)
             self.k_settlements = rows[:300]
         except Exception:
             pass

@@ -445,3 +445,34 @@ def test_build_is_dry_without_key(tmp_path, monkeypatch):
     monkeypatch.delenv("KALSHI_ENV", raising=False)
     b = dl.build()
     assert b.mode == "DRY" and b.client is None
+
+
+class _SettleClient:
+    """Settlement feed client: page1/page2 for the seed, then a ROLLING
+    window that drops the oldest rows - the cumulative ledger must not."""
+    def __init__(self):
+        self.rows = [
+            {"ticker": f"KXHIGHNY-26JUL-T{i}", "settled_time": f"2026-07-2{4+i%5}T0{i%9}:00:00",
+             "revenue": 100, "value": 0, "yes_total_cost": 0,
+             "no_total_cost": 82, "fee_cost": "0.01"} for i in range(6)]
+
+    def get_settlements_page(self, limit=200, cursor=None):
+        if cursor is None:
+            return self.rows[:3], "c2"
+        return self.rows[3:], None
+
+    def get_settlements(self, limit=200):
+        return self.rows[2:]           # window rolled: first two gone
+
+
+def test_cumulative_ledger_never_shrinks(tmp_path, monkeypatch):
+    monkeypatch.setattr(dl, "STATE", str(tmp_path / "s.json"))
+    monkeypatch.setattr(dl, "BETS", str(tmp_path / "b.csv"))
+    b = dl.DriftLive(None, mode="DRY")
+    b.client = _SettleClient()
+    b.sync_kalshi_truth()              # seed: paginates BOTH pages
+    assert b.k_cum["w"] == 6 and b.k_cum["seeded"] is True
+    b.sync_kalshi_truth()              # window rolled; dedupe holds
+    b.sync_kalshi_truth()
+    assert b.k_cum["w"] == 6           # never shrinks, never double-counts
+    assert round(b.k_cum["pnl"], 2) == round(6 * 0.17, 2)

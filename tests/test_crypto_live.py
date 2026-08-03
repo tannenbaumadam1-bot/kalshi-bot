@@ -110,3 +110,23 @@ def test_weather_caps_use_alloc_and_peer(tmp_path, monkeypatch):
     assert b.max_bet_c == 200                         # 3% of 50 = 1.50 -> floor $2
     assert b.max_open_c == 3000                       # 60% of $50
     assert b.max_day_loss_c == 500                    # 10% of $50
+
+def test_kelly_ladder_compounds_on_evidence(tmp_path, monkeypatch):
+    b = _bot(tmp_path, monkeypatch)
+    assert b._kelly() == cl.KELLY                     # unproven: quarter
+    b.wins, b.losses, b.realized_c = 95, 4, 500.0
+    assert b._kelly() == cl.KELLY                     # n=99: not yet
+    b.wins = 96
+    assert b._kelly() == cl.KELLY_PROVEN              # 100 settled, net>0
+    b.realized_c = -1.0
+    assert b._kelly() == cl.KELLY                     # net<0: no upgrade
+
+
+def test_bank_compounds_with_account_nav(tmp_path, monkeypatch):
+    b = _bot(tmp_path, monkeypatch, peer_cost=0)
+    b.dry_balance_c = 10000
+    b.refresh_bank(b.balance_c())
+    cap1 = b._bet_cap_c()
+    b.dry_balance_c = 14000                           # account grew 40%
+    b.refresh_bank(b.balance_c())
+    assert b.bank_c == 7000 and b._bet_cap_c() > cap1  # caps grew with it
