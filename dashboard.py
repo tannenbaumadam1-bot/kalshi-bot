@@ -507,7 +507,7 @@ td.num,th.num{text-align:right}
 <div id=rmwrap style="display:none;border:1.5px solid var(--amb);border-radius:12px;padding:16px 18px;margin:18px 0 4px;background:linear-gradient(180deg,rgba(232,180,76,.05),transparent)">
 <h2 style="margin:0 0 12px">Real money &middot; THE scoreboard <span id=rmmode style="text-transform:none;letter-spacing:0"></span></h2>
 <div class=hero style="margin:4px 0 12px">
-  <div class=nav><div class=k>P&amp;L &middot; Kalshi is the source of truth</div><div class=v id=rmpnl>&ndash;</div>
+  <div class=nav><div class=k>Account NAV &middot; Kalshi is the source of truth</div><div class=v id=rmpnl>&ndash;</div>
     <div class=d id=rmpnld></div></div>
 </div>
 <div class=grid id=rmtiles></div>
@@ -604,6 +604,7 @@ const F=x=>'$'+Number(x||0).toFixed(2);
 const M=x=>{const n=Number(x||0);return (n>=0?'+':'-')+'$'+Math.abs(n).toFixed(2);};
 const C=x=>Number(x||0)>=0?'pos':'neg';
 const NA='<span class=mut>&ndash;</span>';
+const P=x=>{const n=Number(x||0);return (n>=0?'+':'-')+Math.abs(n).toFixed(2)+'%';};
 const feeC=f=>(f==null)?NA:(Number(f).toFixed(0)+'&cent;');
 function mkt(b){const kk=b.kind||'ge';
   const st=(kk==='band')?(b.strike+'&ndash;'+(b.cap!=null?b.cap:'?')+'&deg;'):((kk==='le')?'&le;'+b.strike+'&deg;':'&ge;'+b.strike+'&deg;');
@@ -723,10 +724,14 @@ async function load(){
       +(S.caps?' &middot; caps '+F(S.caps.bet)+'/bet &middot; '+F(S.caps.open)+' open &middot; '+F(S.caps.halt)+' daily halt'+(S.caps.dyn?' (% of NAV, live)':''):'')
       +'</span>';
     const bal=(L.balance_c!=null)?L.balance_c/100:null;
-    if(L.pnl_true!=null){
-      $('rmpnl').innerHTML='<span class="'+C(L.pnl_true)+'">'+M(L.pnl_true)+'</span>';
-      $('rmpnld').innerHTML='<span class=mut>TOTAL &middot; both books &middot; Kalshi NAV '+F(L.marked_nav)+' vs deposits '+F(L.baseline)
-        +((L.pnl_weather!=null&&L.pnl_crypto!=null)?(' &middot; weather <span class="'+C(L.pnl_weather)+'">'+M(L.pnl_weather)+'</span> + crypto <span class="'+C(L.pnl_crypto)+'">'+M(L.pnl_crypto)+'</span>'):'')
+    if(L.pnl_true!=null&&L.marked_nav!=null){
+      const base=Number(L.baseline||100.09);
+      const retPct=base>0?(L.pnl_true/base*100):null;
+      $('rmpnl').innerHTML=F(L.marked_nav)
+        +' <span class="'+C(L.pnl_true)+'" style="font-size:22px">'+(retPct!=null?P(retPct):'')+'</span>'
+        +' <span class="'+C(L.pnl_true)+'" style="font-size:15px;font-weight:600">'+M(L.pnl_true)+'</span>';
+      $('rmpnld').innerHTML='<span class=mut>total return on '+F(base)+' deposited'
+        +((L.pnl_weather!=null&&L.pnl_crypto!=null&&base>0)?(' &middot; weather <span class="'+C(L.pnl_weather)+'">'+M(L.pnl_weather)+' ('+P(L.pnl_weather/base*100)+')</span> + crypto <span class="'+C(L.pnl_crypto)+'">'+M(L.pnl_crypto)+' ('+P(L.pnl_crypto/base*100)+')</span>'):'')
         +' &middot; the exchange is proof</span>';
     }
     // EVERY number below is derived from Kalshi's own records (settlements,
@@ -734,11 +739,13 @@ async function load(){
     const todayTrue=(L.marked_nav!=null&&S.day_nav0!=null)?(L.marked_nav-S.day_nav0):null;
     // ACCOUNT row: the five numbers that matter, nothing else
     const cS=((d.clive||{}).summary)||{};
+    const base2=Number(L.baseline||100.09);
+    const todayPct=(todayTrue!=null&&S.day_nav0>0)?(todayTrue/S.day_nav0*100):null;
     $('rmtiles').innerHTML=[
-      tile('Weather book P&L',(L.pnl_weather!=null)?('<span class="'+C(L.pnl_weather)+'">'+M(L.pnl_weather)+'</span>'):NA,'era dlive1'),
-      tile('Crypto book P&L',(L.pnl_crypto!=null)?('<span class="'+C(L.pnl_crypto)+'">'+M(L.pnl_crypto)+'</span>'):NA,'era clive1'),
+      tile('Weather book P&L',(L.pnl_weather!=null)?('<span class="'+C(L.pnl_weather)+'">'+M(L.pnl_weather)+'</span>'):NA,'era dlive1'+((L.pnl_weather!=null&&base2>0)?' &middot; '+P(L.pnl_weather/base2*100)+' of deposits':'')),
+      tile('Crypto book P&L',(L.pnl_crypto!=null)?('<span class="'+C(L.pnl_crypto)+'">'+M(L.pnl_crypto)+'</span>'):NA,'era clive1'+((L.pnl_crypto!=null&&base2>0)?' &middot; '+P(L.pnl_crypto/base2*100)+' of deposits':'')),
       tile('Account balance',bal!=null?F(bal):NA,'cash, live from Kalshi'),
-      tile("Today's P&L",(todayTrue!=null)?'<span class="'+C(todayTrue)+'">'+M(todayTrue)+'</span>':'<span class=mut>anchoring&hellip;</span>','account, NAV vs day start'),
+      tile("Today's return",(todayTrue!=null)?('<span class="'+C(todayTrue)+'">'+(todayPct!=null?P(todayPct):M(todayTrue))+'</span>'):'<span class=mut>anchoring&hellip;</span>',(todayTrue!=null)?('<span class="'+C(todayTrue)+'">'+M(todayTrue)+'</span> &middot; NAV vs day start '+F(S.day_nav0)):'account, NAV vs day start'),
       tile('Fees (total)',F((S.k_fees||0)+(cS.fees||0)),'both books, lifetime')
     ].join('');
     // BOOK 1 - WEATHER: status at a glance
@@ -835,7 +842,8 @@ async function load(){
    // scoreboard - e.g. '+$8.32 (102W/1L)' vs Kalshi's '+$3.17 82W/34L')
    if(d.dlive&&d.dlive.summary){const LV=d.dlive,L=LV.summary;
      const day=(LV.marked_nav!=null&&L.day_nav0!=null)?(LV.marked_nav-L.day_nav0):null;
-     strip.push('DRIFT '+(L.mode||'LIVE')+' '+(LV.pnl_true!=null?M(LV.pnl_true):'–')
+     const bpct=(LV.pnl_true!=null&&Number(LV.baseline)>0)?P(LV.pnl_true/Number(LV.baseline)*100):null;
+     strip.push('NAV '+(LV.marked_nav!=null?F(LV.marked_nav):'–')+(bpct?' '+bpct:'')
       +' ('+(L.k_wins!=null?L.k_wins:'–')+'W/'+(L.k_losses!=null?L.k_losses:'–')+'L)'
       +(L.k_resting_n!=null?' · '+L.k_resting_n+' resting':'')
       +(day!=null?' · day '+M(day):'')
