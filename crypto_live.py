@@ -56,6 +56,17 @@ STOP_C = float(os.environ.get("CRYPTO_STOP_C", "35"))
 MAX_PER_DAY = int(os.environ.get("CRYPTO_MAX_PER_DAY", "40"))
 REST_MAX_MIN = float(os.environ.get("CRYPTO_REST_MAX_MIN", "30"))
 KELLY = float(os.environ.get("CRYPTO_KELLY", "0.25"))
+# 8/3 (Adam): 15-minute series EXCLUDED. The audition measured them at
+# ~zero edge (n=11, +$0.12 - noise) while hourly/daily carried all the
+# profit, and the live book's first 15-min trade lost -$0.84. A price
+# 15 minutes out is a coin flip at the wire, not convergence.
+NO_15M = os.environ.get("CRYPTO_NO_15M", "1") == "1"
+
+
+def _is_15m(tk, name=""):
+    return ("15M" in (tk or "").split("-")[0].upper()
+            or "15 min" in (name or "").lower()
+            or "next 15" in (name or "").lower())
 
 
 def now():
@@ -135,6 +146,7 @@ class CryptoLive:
                      "placed": self.placed, "canceled": self.canceled,
                      "day_pnl": round(self.day_pnl_c / 100.0, 2),
                      "halted": self.halted,
+                     "no_15m": NO_15M,
                      "sync_diffs": self.sync_diffs},
                  "open": [dict(b, ticker=tk) for tk, b in self.bets.items()],
                  "settled": list(reversed(self.history[-40:]))}
@@ -408,6 +420,8 @@ class CryptoLive:
         cands = []
         for mk in mkts:
             tk = mk["ticker"]
+            if NO_15M and _is_15m(tk, mk.get("name", "")):
+                continue    # coin flips at the wire, not convergence
             bid, ask = mk["yes_bid"], mk["yes_ask"]
             if bid <= 0 or ask <= 0 or (ask - bid) > MAX_SPREAD:
                 continue

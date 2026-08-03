@@ -55,6 +55,17 @@ def test_taker_entry_band_and_dry_fill(tmp_path, monkeypatch):
     assert b.bets["T5"]["side"] == "no" and b.bets["T5"]["entry"] == 87
 
 
+def test_15_minute_series_excluded(tmp_path, monkeypatch):
+    # 8/3: audition measured 15-min at ~zero edge; live trade lost
+    assert cl._is_15m("KXETH15M-26AUG0314-T1890") is True
+    assert cl._is_15m("KXNEARD-1", "NEAR price up in next 15 mins?") is True
+    assert cl._is_15m("KXBTCD-26AUG0317-T64000", "Bitcoin price") is False
+    b = _bot(tmp_path, monkeypatch)
+    b.dry_balance_c = 20000
+    assert b.place(mkts=[_mk(tk="KXSOL15M-1", ev="E9")]) == 0   # excluded
+    assert b.place(mkts=[_mk()]) == 1                           # hourly fine
+
+
 def test_one_bet_per_event(tmp_path, monkeypatch):
     b = _bot(tmp_path, monkeypatch)
     b.dry_balance_c = 20000
