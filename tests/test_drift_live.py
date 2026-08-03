@@ -253,13 +253,28 @@ def test_cross_expiring_takes_the_ask(tmp_path, monkeypatch):
 
 def test_cross_expiring_refuses_bad_setups(tmp_path, monkeypatch):
     b = _bot(tmp_path, monkeypatch)
-    # market ran away past the 5c chase cap: 90 - 80 > 5
+    # market ran away past the 8c chase cap: 90 - 80 > 8
     assert b._cross_expiring(_stale_order(tk="T2"), 2, q=(88, 90)) is False
     # signal faded below our entry: smid 76 < 80
     assert b._cross_expiring(_stale_order(tk="T3"), 2, q=(74, 78)) is False
     # nothing unfilled
     assert b._cross_expiring(_stale_order(tk="T4"), 0, q=(82, 84)) is False
     assert not b.bets and not b.pending
+
+
+def test_pursuit_ladder_boards_runners(tmp_path, monkeypatch):
+    # 8/3: a runner at 86/88 (8c above our 80c join) now gets crossed
+    b = _bot(tmp_path, monkeypatch)
+    assert b._cross_expiring(_stale_order(tk="T5"), 2, q=(86, 88)) is True
+    assert b.bets["T5"]["entry"] == 88
+    # and the requote chases past the old 92c ceiling, up to 96c
+    b2 = _bot(tmp_path, monkeypatch)
+    b2.pending = {"o9": dict(_stale_order(tk="T9"), ticker="T9", oid="o9")}
+    mk = {"ticker": "T9", "yes_bid": 94, "yes_ask": 96, "city": "x",
+          "strike": 1, "hl": "hi"}
+    assert b2._maybe_requote("T9", mk) is not False  # 94c join placed
+    o = list(b2.pending.values())[0]
+    assert o["entry"] == 94 and o["requotes"] == 1
 
 
 def test_cross_expiring_respects_caps(tmp_path, monkeypatch):
@@ -271,9 +286,13 @@ def test_cross_expiring_respects_caps(tmp_path, monkeypatch):
 
 def test_execution_defaults_widened():
     # 7/28 (miss-autopsy 9/9 would-won): taker gate widened, stop deepened
-    assert dl.TAKER_MIN_SMID == 84 and dl.TAKER_MAX_SPREAD == 3
+    assert dl.TAKER_MIN_SMID == 84 and dl.TAKER_MAX_SPREAD == 4
     assert dl.STOP_C == 35
     assert dl.ENTRY_FLOOR == 80          # 7/31: sub-80c entries killed
+    # 8/3 pursuit ladder (49/49 misses would have won, $25.01):
+    assert dl.REST_MAX_H == 0.75         # politeness has a deadline
+    assert dl.CHASE_MAX_E == 96          # chase winners past the entry band
+    assert dl.CROSS_MAX_CHASE == 8       # pay up to 8c to board a runner
 
 
 def test_entry_floor_blocks_sub_80(tmp_path, monkeypatch):

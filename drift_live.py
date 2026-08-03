@@ -52,8 +52,15 @@ ARM_FILE = os.path.join("logs", "DRIFT_LIVE_ARMED")
 LIVE_BASE = "https://api.elections.kalshi.com/trade-api/v2"
 DEMO_BASE = "https://demo-api.kalshi.co/trade-api/v2"
 
-# momentum decays fast: an unfilled maker join is stale in 2h, not 4
-REST_MAX_H = float(os.environ.get("DRIFT_LIVE_REST_MAX_H", "2"))
+# THE PURSUIT LADDER (8/3, Adam: 'fix this, this is unacceptable' - 49/49
+# expired joins would have WON, $25.01 forfeited). Root causes found: the
+# requote refused to chase past DRIFT_MAX_ENTRY (~92c) while winners ran
+# to 95c+; one-sided books (no ask near settlement) were skipped
+# entirely; and the 2h stale window meant everything was long gone.
+# Now: join -> requote every cycle up to 96c -> unfilled at 45min
+# converts to a taker cross (chase cap 8c). Politeness has a deadline.
+REST_MAX_H = float(os.environ.get("DRIFT_LIVE_REST_MAX_H", "0.75"))
+CHASE_MAX_E = int(os.environ.get("DRIFT_LIVE_CHASE_MAX_E", "96"))
 # Nickel trail-bleed fix (7/25: trail exits cost -$5+ on a lane that was 3-0
 # at settlement - wobble papercuts exceeded the gap risk they insure against).
 # Live nickels now HOLD TO SETTLEMENT like the original design; the <50c
@@ -90,7 +97,7 @@ REQUOTE_MAX = int(os.environ.get("DRIFT_LIVE_REQUOTE_MAX", "2"))
 # 1-2c toll instead of missing the winner entirely.
 TAKER_ON = os.environ.get("DRIFT_LIVE_TAKER", "1") == "1"
 TAKER_MIN_SMID = float(os.environ.get("DRIFT_LIVE_TAKER_SMID", "84"))
-TAKER_MAX_SPREAD = int(os.environ.get("DRIFT_LIVE_TAKER_SPREAD", "3"))
+TAKER_MAX_SPREAD = int(os.environ.get("DRIFT_LIVE_TAKER_SPREAD", "4"))
 # 7/28 widening (Adam-approved): miss-autopsy day one - 9/9 canceled
 # unfilled orders would have WON, $3.44 forfeited to patience. Was 88/2.
 # Live disaster stop (7/28, Adam-approved): exit autopsy says 5/6 stops
@@ -126,7 +133,7 @@ NICKEL_LANE_PCT = float(os.environ.get("DRIFT_LIVE_NICKEL_LANE_PCT", "0.30"))
 # above it), pay the ask instead of dying on the vine. All caps, bucket
 # blocks and the NAV nickel guardrails still apply to the cross.
 CROSS_EXPIRY = os.environ.get("DRIFT_LIVE_CROSS_EXPIRY", "1") == "1"
-CROSS_MAX_CHASE = int(os.environ.get("DRIFT_LIVE_CROSS_CHASE", "5"))
+CROSS_MAX_CHASE = int(os.environ.get("DRIFT_LIVE_CROSS_CHASE", "8"))
 # THE CONCENTRATION PACKAGE (7/31, Adam-approved). Bucket attribution
 # after 8 days live: ALL profit (+$7.60) came from entries at 80-96c
 # (level:80-84 +3.54, nickel +4.06); EVERY band below 80c lost money on
@@ -358,7 +365,7 @@ class DriftLive:
         ask_s = ya if o["side"] == "yes" else 100 - yb
         smid = (bid_s + ask_s) / 2.0
         max_e = (dp.NICKEL_MAX_ENTRY if o.get("trig") == "nickel"
-                 else dp.DRIFT_MAX_ENTRY)
+                 else CHASE_MAX_E)
         if (ask_s <= 0 or ask_s > max_e or smid < o["entry"]
                 or ask_s - o["entry"] > CROSS_MAX_CHASE):
             return False
@@ -1074,6 +1081,12 @@ class DriftLive:
         for mk in mkts:
             tk = mk["ticker"]
             bid, ask = mk["yes_bid"], mk["yes_ask"]
+            if tk in pending_tks:
+                # 8/3: pursue pending joins BEFORE the two-sided filter -
+                # near-settlement books go one-sided (no ask) and winners
+                # were escaping unchased behind that skip
+                self._maybe_requote(tk, mk)
+                continue
             if bid <= 0 or ask <= 0:
                 continue
             mid = (bid + ask) / 2.0
@@ -1085,9 +1098,6 @@ class DriftLive:
             if tk in self.bets:
                 # runner re-qualified -> maybe rest a pyramid add (paper rule)
                 self._maybe_pyramid_order(tk, mk, mid, gate_mode, balance_c)
-                continue
-            if tk in pending_tks:
-                self._maybe_requote(tk, mk)
                 continue
             ekey = (mk["city"], mk.get("date", ""),
                     "lo" if mk["is_low"] else "hi")
@@ -1269,7 +1279,10 @@ class DriftLive:
         if int(o.get("requotes", 0)) >= REQUOTE_MAX or o.get("exec") == "taker":
             return False
         join = mk["yes_bid"] if o["side"] == "yes" else 100 - mk["yes_ask"]
-        max_e = dp.NICKEL_MAX_ENTRY if o.get("trig") == "nickel" else dp.DRIFT_MAX_ENTRY
+        # 8/3 pursuit ladder: chase to CHASE_MAX_E (96c), not the entry band
+        # ceiling - winners run past 92c and were escaping unchased
+        max_e = (dp.NICKEL_MAX_ENTRY if o.get("trig") == "nickel"
+                 else CHASE_MAX_E)
         if join - o["entry"] < REQUOTE_C or join > max_e or join <= 0:
             return False
         new_oid = f"rq-{self.placed + 1}"

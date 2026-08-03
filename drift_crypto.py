@@ -22,6 +22,14 @@ THE GATE (promote/kill bar): 100+ settled on era driftc1 with net > 0
 AFTER FEES -> goes live on the first capital-ladder rung. Anything less
 -> killed, having cost $0.
 
+LIVE MANDATE (8/3, Adam - after the live weather book forfeited $25 to
+unfilled maker joins): when this lane goes live, entries are
+TAKER-FIRST BY DEFAULT. Crypto books are deep and tight (1-3c toll vs
+the audition's ~+9c/bet edge) - the missed-fill leak class gets
+designed OUT of lane 2, not patched afterward. Maker joins only as the
+wide-spread fallback, and any join follows the pursuit ladder
+(requote every cycle, cross at 45min).
+
 Implementation: wraps DriftWide with a config context that swaps the
 module constants in and RESTORES them after every call, so importing this
 module never mutates drift_wide for anyone else (tests, a revived driftw).
