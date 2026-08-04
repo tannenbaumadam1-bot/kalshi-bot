@@ -112,14 +112,16 @@ def test_weather_caps_use_alloc_and_peer(tmp_path, monkeypatch):
     assert b.max_day_loss_c == 500                    # 10% of $50
 
 def test_kelly_ladder_compounds_on_evidence(tmp_path, monkeypatch):
+    # gate lowered 100 -> 25 on 8/4 (Adam override at 34 settled 33W/1L);
+    # the net-positive guard and auto-downgrade are the invariants
     b = _bot(tmp_path, monkeypatch)
     assert b._kelly() == cl.KELLY                     # unproven: quarter
-    b.wins, b.losses, b.realized_c = 95, 4, 500.0
-    assert b._kelly() == cl.KELLY                     # n=99: not yet
-    b.wins = 96
-    assert b._kelly() == cl.KELLY_PROVEN              # 100 settled, net>0
+    b.wins, b.losses, b.realized_c = 20, 4, 500.0
+    assert b._kelly() == cl.KELLY                     # n=24: not yet
+    b.wins = 21
+    assert b._kelly() == cl.KELLY_PROVEN              # 25 settled, net>0
     b.realized_c = -1.0
-    assert b._kelly() == cl.KELLY                     # net<0: no upgrade
+    assert b._kelly() == cl.KELLY                     # net<0: auto-revert
 
 
 def test_bank_compounds_with_account_nav(tmp_path, monkeypatch):

@@ -64,7 +64,11 @@ REST_MAX_MIN = float(os.environ.get("CRYPTO_REST_MAX_MIN", "30"))
 # cadence that ladder can climb in days, not weeks.
 KELLY = float(os.environ.get("CRYPTO_KELLY", "0.25"))
 KELLY_PROVEN = float(os.environ.get("CRYPTO_KELLY_PROVEN", "0.5"))
-KELLY_PROVEN_N = int(os.environ.get("CRYPTO_KELLY_PROVEN_N", "100"))
+# 8/4 Adam override ("fire the kelly leg up now, the strategy is clearly
+# working"): evidence gate lowered 100 -> 25 (book was 34 settled, 33W/1L,
+# +$2.33 net). The guard rails stay: upgrade only while lifetime realized
+# is POSITIVE, and it auto-reverts to quarter-Kelly if the book goes red.
+KELLY_PROVEN_N = int(os.environ.get("CRYPTO_KELLY_PROVEN_N", "25"))
 # 8/3 (Adam): 15-minute series EXCLUDED. The audition measured them at
 # ~zero edge (n=11, +$0.12 - noise) while hourly/daily carried all the
 # profit, and the live book's first 15-min trade lost -$0.84. A price
@@ -172,6 +176,7 @@ class CryptoLive:
                      "no_15m": NO_15M,
                      "kelly": self._kelly(),
                      "kelly_n": self.wins + self.losses,
+                     "kelly_gate": KELLY_PROVEN_N,
                      "sync_diffs": self.sync_diffs},
                  "open": [dict(b, ticker=tk) for tk, b in self.bets.items()],
                  "settled": list(reversed(self.history[-40:]))}
