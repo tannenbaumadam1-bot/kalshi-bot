@@ -59,8 +59,12 @@ DEMO_BASE = "https://demo-api.kalshi.co/trade-api/v2"
 # entirely; and the 2h stale window meant everything was long gone.
 # Now: join -> requote every cycle up to 96c -> unfilled at 45min
 # converts to a taker cross (chase cap 8c). Politeness has a deadline.
-REST_MAX_H = float(os.environ.get("DRIFT_LIVE_REST_MAX_H", "0.75"))
-CHASE_MAX_E = int(os.environ.get("DRIFT_LIVE_CHASE_MAX_E", "96"))
+# 8/4 pursuit escalation (Adam: "fix the miss leak for good"): the 8/3
+# ladder didn't stem the leak (49->52 misses, $26.72, ALL would-won in
+# its first 20h). Cross at 30 min not 45, chase to 97c, and cross
+# one-sided books (see _cross_expiring).
+REST_MAX_H = float(os.environ.get("DRIFT_LIVE_REST_MAX_H", "0.5"))
+CHASE_MAX_E = int(os.environ.get("DRIFT_LIVE_CHASE_MAX_E", "97"))
 # Nickel trail-bleed fix (7/25: trail exits cost -$5+ on a lane that was 3-0
 # at settlement - wobble papercuts exceeded the gap risk they insure against).
 # Live nickels now HOLD TO SETTLEMENT like the original design; the <50c
@@ -415,12 +419,23 @@ class DriftLive:
                 q = dp.DriftPaper._quotes(self, [tk]).get(tk)
             except Exception:
                 q = None
-        if not q or not q[0] or not q[1]:
+        if not q:
             return False
         yb, ya = q
-        bid_s = yb if o["side"] == "yes" else 100 - ya
-        ask_s = ya if o["side"] == "yes" else 100 - yb
-        smid = (bid_s + ask_s) / 2.0
+        # 8/4: one-sided books cross too. Near settlement the runaway
+        # winner's book often shows only an ask - exactly where all 52
+        # logged misses died. Crossing needs OUR side's ask only; when
+        # the bid is gone the signal-hold check falls back to that ask
+        # (still fenced by max_e and CROSS_MAX_CHASE below).
+        if o["side"] == "yes":
+            if not ya:
+                return False
+            bid_s, ask_s = (yb or 0), ya
+        else:
+            if not yb:
+                return False
+            bid_s, ask_s = ((100 - ya) if ya else 0), 100 - yb
+        smid = (bid_s + ask_s) / 2.0 if bid_s else float(ask_s)
         max_e = (dp.NICKEL_MAX_ENTRY if o.get("trig") == "nickel"
                  else CHASE_MAX_E)
         if (ask_s <= 0 or ask_s > max_e or smid < o["entry"]
@@ -582,7 +597,8 @@ class DriftLive:
                  "caps": {"bet": round(self.max_bet_c / 100.0, 2),
                           "open": round(self.max_open_c / 100.0, 2),
                           "halt": round(self.max_day_loss_c / 100.0, 2),
-                          "dyn": DYN_CAPS, "floor": ENTRY_FLOOR},
+                          "dyn": DYN_CAPS, "floor": ENTRY_FLOOR,
+                          "chase": CHASE_MAX_E, "rest_h": REST_MAX_H},
                  **self._autopsy_summary(),
                  **self._miss_summary(),
                  "buckets": [dict(v, bucket=k,

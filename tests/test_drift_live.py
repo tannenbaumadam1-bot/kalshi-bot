@@ -292,9 +292,9 @@ def test_execution_defaults_widened():
     assert dl.TAKER_MIN_SMID == 84 and dl.TAKER_MAX_SPREAD == 4
     assert dl.STOP_C == 35
     assert dl.ENTRY_FLOOR == 80          # 7/31: sub-80c entries killed
-    # 8/3 pursuit ladder (49/49 misses would have won, $25.01):
-    assert dl.REST_MAX_H == 0.75         # politeness has a deadline
-    assert dl.CHASE_MAX_E == 96          # chase winners past the entry band
+    # 8/4 pursuit escalation (52/52 misses would have won, $26.72):
+    assert dl.REST_MAX_H == 0.5          # cross at 30 min, not 45
+    assert dl.CHASE_MAX_E == 97          # chase winners to 97c
     assert dl.CROSS_MAX_CHASE == 8       # pay up to 8c to board a runner
 
 
@@ -495,3 +495,26 @@ def test_daily_pnl_ledger_seeds_with_residual(tmp_path, monkeypatch):
     assert b.pnl_days["2026-07-29"] == 2.0
     assert b.pnl_days[dl.LIVE_EPOCH[:10]] == 2.0    # the $2 residual
     assert abs(sum(b.pnl_days.values()) - 5.0) < 0.005
+
+
+def test_cross_expiring_one_sided_books(tmp_path, monkeypatch):
+    # 8/4: every one of the 52 logged misses would have WON - near
+    # settlement the runner's book often holds only an ask. Cross it.
+    b = _bot(tmp_path, monkeypatch)
+    # YES side, ask-only book (no bid): entry 80, ask 84 -> cross
+    assert b._cross_expiring(_stale_order(tk="T1"), 2, q=(0, 84)) is True
+    assert b.bets["T1"]["entry"] == 84
+    # YES side, ask-only but ask BELOW entry: signal faded -> refuse
+    assert b._cross_expiring(_stale_order(tk="T2"), 2, q=(0, 78)) is False
+    # YES side, ask-only vestigial 99c: above 97c ceiling -> refuse
+    assert b._cross_expiring(_stale_order(tk="T3", entry=95, trig="x"),
+                             2, q=(0, 99)) is False
+    # YES side, bid-only book (no ask to cross) -> refuse
+    assert b._cross_expiring(_stale_order(tk="T4"), 2, q=(82, 0)) is False
+    # NO side, yes-bid-only book: our ask = 100-yb = 84 -> cross
+    o = dict(_stale_order(tk="T5"), side="no")
+    assert b._cross_expiring(o, 2, q=(16, 0)) is True
+    assert b.bets["T5"]["entry"] == 84
+    # NO side, yes-ask-only (no yes bid = no NO ask) -> refuse
+    o2 = dict(_stale_order(tk="T6"), side="no")
+    assert b._cross_expiring(o2, 2, q=(0, 20)) is False
