@@ -83,6 +83,11 @@ TRAIL_ON = os.environ.get("DRIFT_LIVE_TRAIL", "0") == "1"
 # in drawdown. Floors keep probes viable. Set DYN_CAPS=0 to freeze.
 DYN_CAPS = os.environ.get("DRIFT_LIVE_DYN_CAPS", "1") == "1"
 BET_PCT = float(os.environ.get("DRIFT_LIVE_BET_PCT", "0.03"))    # per bet
+# 8/4 Adam: small-account boost - 6% per bet until ACCOUNT NAV reaches
+# $300, then auto-revert to the standard 3%. Note the handoff is a step
+# DOWN in bet dollars (~$9 -> ~$4.50); that's the design, not a bug.
+BET_PCT_BOOST = float(os.environ.get("DRIFT_LIVE_BET_PCT_BOOST", "0.06"))
+BOOST_NAV_C = int(os.environ.get("DRIFT_LIVE_BOOST_NAV_C", "30000"))
 OPEN_PCT = float(os.environ.get("DRIFT_LIVE_OPEN_PCT", "0.60"))  # exposure
 HALT_PCT = float(os.environ.get("DRIFT_LIVE_HALT_PCT", "0.10"))  # day loss
 BET_FLOOR_C = 200    # a probe must always be placeable
@@ -598,7 +603,8 @@ class DriftLive:
                           "open": round(self.max_open_c / 100.0, 2),
                           "halt": round(self.max_day_loss_c / 100.0, 2),
                           "dyn": DYN_CAPS, "floor": ENTRY_FLOOR,
-                          "chase": CHASE_MAX_E, "rest_h": REST_MAX_H},
+                          "chase": CHASE_MAX_E, "rest_h": REST_MAX_H,
+                          "bet_pct": getattr(self, "bet_pct_now", BET_PCT)},
                  **self._autopsy_summary(),
                  **self._miss_summary(),
                  "buckets": [dict(v, bucket=k,
@@ -1189,16 +1195,20 @@ class DriftLive:
         proportional without manual raises."""
         # account NAV = balance + BOTH books' position cost; this book's
         # bankroll is its allocated share (8/3: 50/50 weather/crypto)
-        nav_c = int((balance_c
-                     + sum(b["entry"] * b["count"] for b in self.bets.values())
-                     + _crypto_cost_c()) * WX_ALLOC)
+        acct_nav_c = int(balance_c
+                         + sum(b["entry"] * b["count"] for b in self.bets.values())
+                         + _crypto_cost_c())
+        nav_c = int(acct_nav_c * WX_ALLOC)
         if nav_c > 0:
             self.last_nav_c = nav_c    # nickel guardrails read this too
         if not DYN_CAPS:
             return
         if nav_c <= 0:
             return
-        self.max_bet_c = max(BET_FLOOR_C, int(nav_c * BET_PCT))
+        # 8/4 small-account boost: 6%/bet below $300 account NAV, 3% after
+        bet_pct = BET_PCT_BOOST if acct_nav_c < BOOST_NAV_C else BET_PCT
+        self.bet_pct_now = bet_pct
+        self.max_bet_c = max(BET_FLOOR_C, int(nav_c * bet_pct))
         self.max_open_c = int(nav_c * OPEN_PCT)
         self.max_day_loss_c = max(HALT_FLOOR_C, int(nav_c * HALT_PCT))
 

@@ -31,7 +31,7 @@ def test_fifty_fifty_allocation(tmp_path, monkeypatch):
     b.dry_balance_c = 8000                            # cash $80
     b.refresh_bank(b.balance_c())
     assert b.bank_c == 5000                           # (80+20)/2 = $50
-    assert b._bet_cap_c() == 150                      # 3% of $50, floor $1.50
+    assert b._bet_cap_c() == 300                      # 6% boost of $50
     assert b._open_cap_c() == 3000                    # 60%
     assert b._halt_c() == 500                         # 10%
 
@@ -107,7 +107,7 @@ def test_weather_caps_use_alloc_and_peer(tmp_path, monkeypatch):
     b.dry_balance_c = 8000                            # cash $80 + crypto $20
     b._refresh_caps(b.balance_c())
     # account NAV $100, weather alloc 50% -> caps on $50
-    assert b.max_bet_c == 200                         # 3% of 50 = 1.50 -> floor $2
+    assert b.max_bet_c == 300                         # 6% boost of $50
     assert b.max_open_c == 3000                       # 60% of $50
     assert b.max_day_loss_c == 500                    # 10% of $50
 
@@ -153,3 +153,29 @@ def test_daily_pnl_ledger_never_trims(tmp_path, monkeypatch):
     b2.pnl_days = {}
     b2.load()
     assert d in b2.pnl_days and abs(b2.pnl_days[d] - b.pnl_days[d]) < 0.005
+
+
+def test_bet_pct_boost_reverts_at_300_nav(tmp_path, monkeypatch):
+    # 8/4 Adam: 6%/bet while account NAV < $300, standard 3% after.
+    # The handoff is a step DOWN in bet dollars - that is the design.
+    b = _bot(tmp_path, monkeypatch, peer_cost=0)
+    b.dry_balance_c = 29900                           # $299: boosted
+    b.refresh_bank(b.balance_c())
+    assert b._bet_pct() == cl.BET_PCT_BOOST
+    assert b._bet_cap_c() == int(29900 * 0.5 * 0.06)  # ~$8.97
+    b.dry_balance_c = 30000                           # $300: reverts
+    b.refresh_bank(b.balance_c())
+    assert b._bet_pct() == cl.BET_PCT
+    assert b._bet_cap_c() == int(30000 * 0.5 * 0.03)  # $4.50
+    # weather book steps at the same account-NAV threshold
+    import drift_live as dl2
+    monkeypatch.setattr(dl2, "STATE", str(tmp_path / "w.json"))
+    monkeypatch.setattr(dl2, "BETS", str(tmp_path / "w.csv"))
+    monkeypatch.setattr(dl2, "CRYPTO_STATE_PATH", str(tmp_path / "none.json"))
+    w = dl2.DriftLive(None, mode="DRY")
+    w.dry_balance_c = 29900
+    w._refresh_caps(w.balance_c())
+    assert w.max_bet_c == int(29900 * 0.5 * 0.06)
+    w.dry_balance_c = 30000
+    w._refresh_caps(w.balance_c())
+    assert w.max_bet_c == int(30000 * 0.5 * 0.03)

@@ -329,7 +329,7 @@ def test_dynamic_caps_track_nav(tmp_path, monkeypatch):
     b = _bot(tmp_path, monkeypatch)
     b.dry_balance_c = 20000                     # NAV $200, nothing filled
     b._refresh_caps(b.balance_c())
-    assert b.max_bet_c == 600                   # 3% of NAV
+    assert b.max_bet_c == 1200                  # 6% boost (NAV < $300)
     assert b.max_open_c == 12000                # 60%
     assert b.max_day_loss_c == 2000             # 10%
     # filled positions count toward NAV at cost

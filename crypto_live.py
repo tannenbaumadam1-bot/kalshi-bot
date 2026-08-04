@@ -45,6 +45,11 @@ ERA = "clive1"
 CRYPTO_ON = os.environ.get("DRIFT_LIVE_CRYPTO", "1") == "1"
 ALLOC = float(os.environ.get("CRYPTO_ALLOC", "0.5"))
 BET_PCT = float(os.environ.get("CRYPTO_BET_PCT", "0.03"))
+# 8/4 Adam: small-account boost - 6% per bet until ACCOUNT NAV reaches
+# $300, then auto-revert to the standard 3% (a step DOWN in bet dollars
+# at the threshold, by design).
+BET_PCT_BOOST = float(os.environ.get("CRYPTO_BET_PCT_BOOST", "0.06"))
+BOOST_NAV_C = int(os.environ.get("CRYPTO_BOOST_NAV_C", "30000"))
 OPEN_PCT = float(os.environ.get("CRYPTO_OPEN_PCT", "0.60"))
 HALT_PCT = float(os.environ.get("CRYPTO_HALT_PCT", "0.10"))
 RESERVE_C = int(os.environ.get("CRYPTO_RESERVE_C", "200"))
@@ -165,7 +170,8 @@ class CryptoLive:
                      "bank": round(self.bank_c / 100.0, 2),
                      "caps": {"bet": round(self._bet_cap_c() / 100.0, 2),
                               "open": round(self._open_cap_c() / 100.0, 2),
-                              "halt": round(self._halt_c() / 100.0, 2)},
+                              "halt": round(self._halt_c() / 100.0, 2),
+                              "bet_pct": self._bet_pct()},
                      "wins": self.wins, "losses": self.losses,
                      "realized": round(self.realized_c / 100.0, 2),
                      "fees": round(self.fees_c / 100.0, 2),
@@ -222,9 +228,15 @@ class CryptoLive:
         nav = balance_c + self.open_cost_c() + self._peer_cost_c()
         if nav > 0:
             self.bank_c = int(nav * ALLOC)
+            self.acct_nav_c = int(nav)
+
+    def _bet_pct(self):
+        # 8/4 small-account boost: 6%/bet below $300 account NAV, 3% after
+        nav = getattr(self, "acct_nav_c", 0)
+        return BET_PCT_BOOST if 0 < nav < BOOST_NAV_C else BET_PCT
 
     def _bet_cap_c(self):
-        return max(150, int(self.bank_c * BET_PCT))
+        return max(150, int(self.bank_c * self._bet_pct()))
 
     def _open_cap_c(self):
         return int(self.bank_c * OPEN_PCT)
@@ -490,7 +502,7 @@ class CryptoLive:
             # Kelly at the BID (the signal), cost at the ASK (the toll)
             b_odds = (100 - e_bid) / e_bid
             f_star = max(0.0, pside - (1 - pside) / b_odds) * self._kelly()
-            size = int(min(f_star, BET_PCT) * self.bank_c // e_ask)
+            size = int(min(f_star, self._bet_pct()) * self.bank_c // e_ask)
             if size < 1:
                 continue
             while size > 1 and e_ask * size > self._bet_cap_c():
