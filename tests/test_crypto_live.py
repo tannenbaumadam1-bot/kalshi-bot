@@ -44,8 +44,12 @@ def test_taker_entry_band_and_dry_fill(tmp_path, monkeypatch):
     bet = b.bets["KXBTCD-26AUG0317-T64000"]
     assert bet["entry"] == 86 and bet["era"] == "clive1"
     assert b.fees_c > 0
-    # ask above the 92c band ceiling: refused
-    assert b.place(mkts=[_mk(tk="T2", ev="E2", bid=92, ask=94)]) == 0
+    # ask above the 92c core ceiling: now the 93-96c PROBE band (8/4),
+    # tagged and ledgered separately
+    assert b.place(mkts=[_mk(tk="T2", ev="E2", bid=92, ask=94)]) == 1
+    assert b.bets["T2"]["band"] == "hi"
+    # above the 96c probe ceiling: refused - no payoff left
+    assert b.place(mkts=[_mk(tk="T2b", ev="E2b", bid=96, ask=98)]) == 0
     # ask below the 80c floor (mid 20-zone NO side is fine, but sub-80 no)
     assert b.place(mkts=[_mk(tk="T3", ev="E3", bid=74, ask=76)]) == 0
     # spread wider than 4c: SKIPPED, never joined (taker-first mandate)
@@ -179,3 +183,27 @@ def test_bet_pct_boost_reverts_at_300_nav(tmp_path, monkeypatch):
     w.dry_balance_c = 30000
     w._refresh_caps(w.balance_c())
     assert w.max_bet_c == int(30000 * 0.5 * 0.03)
+
+
+def test_hi_band_probe_ledger(tmp_path, monkeypatch):
+    # 8/4 crypto nickel probe: 93-96c entries keep their own W/L ledger
+    # (weather-nickel playbook) so the lane earns promotion on evidence
+    b = _bot(tmp_path, monkeypatch)
+    b.dry_balance_c = 20000
+    assert b.place(mkts=[_mk(tk="H1", ev="EH1", bid=93, ask=95)]) == 1
+    assert b.bets["H1"]["band"] == "hi"
+    assert b.place(mkts=[_mk(tk="C1", ev="EC1", bid=84, ask=86)]) == 1
+    assert b.bets["C1"]["band"] == "core"
+    # hi-band win folds into the probe ledger; core win does not
+    import weather_paper as wp
+    monkeypatch.setattr(cl, "fetch_result", lambda tk: "yes")
+    b.bets["H1"]["side"] = "yes"
+    b.bets["C1"]["side"] = "yes"
+    b.settle()
+    assert b.hi["w"] == 1 and b.hi["l"] == 0
+    assert b.hi["pnl"] > 0
+    assert b.history[-1]["band"] in ("hi", "core")
+    # probe ledger survives a save/load round-trip
+    b.save()
+    b2 = cl.CryptoLive(None, mode="DRY")
+    assert b2.hi["w"] == 1
