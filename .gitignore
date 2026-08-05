@@ -18,3 +18,6 @@ KalshiPaperBot_share.zip
 cloud_oneshot.sh
 autopush_hidden.flag
 github_token.txt
+
+# Cowork cloud sessions cannot delete on the mounted folder; stale files get moved here
+_to_delete/

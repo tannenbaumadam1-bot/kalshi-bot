@@ -63,6 +63,18 @@ ENTRY_MAX = int(os.environ.get("CRYPTO_ENTRY_MAX", "92"))
 # after a stop, so this bucket keeps its own W/L ledger and earns (or
 # loses) its lane on evidence, in public, on the tracker.
 PROBE_MAX = int(os.environ.get("CRYPTO_PROBE_MAX", "96"))
+# 8/5 HI-BAND SIZE LADDER (Adam: "press the crypto nickel" - weather's
+# earn-the-raise playbook, automated): the 93-96c bucket sizes at the
+# base per-bet cap until it PROVES itself, then steps up on its own -
+# 8% of bank once 10 settled hi bets are net-positive, 10% once 20 are.
+# The raise is revoked instantly (back to base) whenever lifetime hi
+# net is not positive, and a proven-negative bucket (>=8 settled, net
+# < 0) is BLOCKED from new entries outright. No manual sizing, ever.
+HI_STEP1_N = int(os.environ.get("CRYPTO_HI_STEP1_N", "10"))
+HI_STEP2_N = int(os.environ.get("CRYPTO_HI_STEP2_N", "20"))
+HI_PCT1 = float(os.environ.get("CRYPTO_HI_PCT1", "0.08"))
+HI_PCT2 = float(os.environ.get("CRYPTO_HI_PCT2", "0.10"))
+HI_BLOCK_N = int(os.environ.get("CRYPTO_HI_BLOCK_N", "8"))
 MAX_SPREAD = int(os.environ.get("CRYPTO_MAX_SPREAD", "4"))
 MIN_VOL24 = float(os.environ.get("CRYPTO_MIN_VOL24", "500"))
 STOP_C = float(os.environ.get("CRYPTO_STOP_C", "35"))
@@ -199,7 +211,10 @@ class CryptoLive:
                             "pnl": round(self.hi.get("pnl", 0.0), 2),
                             "open": sum(1 for b in self.bets.values()
                                         if b.get("band") == "hi"),
-                            "max": PROBE_MAX},
+                            "max": PROBE_MAX,
+                            "pct": self._hi_pct(),
+                            "n1": HI_STEP1_N, "n2": HI_STEP2_N,
+                            "blocked": self._hi_blocked()},
                      "sync_diffs": self.sync_diffs},
                  "open": [dict(b, ticker=tk) for tk, b in self.bets.items()],
                  "settled": list(reversed(self.history[-40:]))}
@@ -254,6 +269,26 @@ class CryptoLive:
 
     def _bet_cap_c(self):
         return max(150, int(self.bank_c * self._bet_pct()))
+
+    def _hi_pct(self):
+        # 8/5 evidence ladder for the 93-96c bucket; never below base,
+        # never raised unless the bucket's lifetime net is positive
+        w, l = self.hi.get("w", 0), self.hi.get("l", 0)
+        if self.hi.get("pnl", 0.0) <= 0:
+            return self._bet_pct()
+        if w + l >= HI_STEP2_N:
+            return max(self._bet_pct(), HI_PCT2)
+        if w + l >= HI_STEP1_N:
+            return max(self._bet_pct(), HI_PCT1)
+        return self._bet_pct()
+
+    def _hi_cap_c(self):
+        return max(150, int(self.bank_c * self._hi_pct()))
+
+    def _hi_blocked(self):
+        # weather bucket-routing rule: proven negative = no new entries
+        w, l = self.hi.get("w", 0), self.hi.get("l", 0)
+        return w + l >= HI_BLOCK_N and self.hi.get("pnl", 0.0) < 0
 
     def _open_cap_c(self):
         return int(self.bank_c * OPEN_PCT)
@@ -516,6 +551,8 @@ class CryptoLive:
             if e_ask < ENTRY_MIN or e_ask > PROBE_MAX or e_bid < 1:
                 continue
             band = "hi" if e_ask > ENTRY_MAX else "core"
+            if band == "hi" and self._hi_blocked():
+                continue      # proven-negative probe: lane is closed
             cands.append((smid, mk, side, e_bid, e_ask, band))
         cands.sort(key=lambda c: -c[0])
         placed = 0
@@ -529,12 +566,14 @@ class CryptoLive:
             # Kelly at the BID (the signal), cost at the ASK (the toll)
             b_odds = (100 - e_bid) / e_bid
             f_star = max(0.0, pside - (1 - pside) / b_odds) * self._kelly()
-            size = int(min(f_star, self._bet_pct()) * self.bank_c // e_ask)
+            pct = self._hi_pct() if band == "hi" else self._bet_pct()
+            cap_c = self._hi_cap_c() if band == "hi" else self._bet_cap_c()
+            size = int(min(f_star, pct) * self.bank_c // e_ask)
             if size < 1:
                 continue
-            while size > 1 and e_ask * size > self._bet_cap_c():
+            while size > 1 and e_ask * size > cap_c:
                 size -= 1
-            if e_ask * size > self._bet_cap_c():
+            if e_ask * size > cap_c:
                 continue
             if self.open_cost_c() + e_ask * size > self._open_cap_c():
                 continue

@@ -207,3 +207,51 @@ def test_hi_band_probe_ledger(tmp_path, monkeypatch):
     b.save()
     b2 = cl.CryptoLive(None, mode="DRY")
     assert b2.hi["w"] == 1
+
+
+def test_hi_ladder_steps_on_evidence(tmp_path, monkeypatch):
+    # 8/5 hi-band size ladder: base pct until 10 settled NET-POSITIVE
+    # (8%), 10% at 20 - and straight back to base if net goes negative
+    b = _bot(tmp_path, monkeypatch)
+    b.dry_balance_c = 20000                           # bank $100, NAV<$300
+    b.refresh_bank(b.balance_c())
+    assert b._hi_pct() == cl.BET_PCT_BOOST            # 0 settled: base 6%
+    b.hi = {"w": 9, "l": 0, "pnl": 0.55}
+    assert b._hi_pct() == cl.BET_PCT_BOOST            # 9 settled: not yet
+    b.hi = {"w": 10, "l": 0, "pnl": 0.6}
+    assert b._hi_pct() == cl.HI_PCT1                  # 10 net+: 8%
+    assert b._hi_cap_c() == int(b.bank_c * cl.HI_PCT1)
+    b.hi = {"w": 19, "l": 1, "pnl": 0.7}
+    assert b._hi_pct() == cl.HI_PCT2                  # 20 net+: full 10%
+    b.hi = {"w": 19, "l": 1, "pnl": -0.10}
+    assert b._hi_pct() == cl.BET_PCT_BOOST            # net<=0: raise revoked
+    b.hi = {"w": 20, "l": 0, "pnl": 0.0}
+    assert b._hi_pct() == cl.BET_PCT_BOOST            # zero net is not proof
+    # ladder never sizes BELOW base: at >=$300 NAV base is 3%, steps hold
+    b.dry_balance_c = 40000
+    b.refresh_bank(b.balance_c())
+    b.hi = {"w": 10, "l": 0, "pnl": 0.6}
+    assert b._hi_pct() == cl.HI_PCT1
+    # core band is untouched by the hi ledger
+    assert b._bet_pct() == cl.BET_PCT
+
+
+def test_hi_block_closes_lane_when_proven_negative(tmp_path, monkeypatch):
+    # 8/5: >=8 settled and net<0 = proven negative -> no NEW hi entries,
+    # core entries unaffected (weather bucket-routing rule)
+    b = _bot(tmp_path, monkeypatch)
+    b.dry_balance_c = 20000
+    b.hi = {"w": 3, "l": 5, "pnl": -1.20}
+    assert b._hi_blocked()
+    assert b.place(mkts=[_mk(tk="HB1", ev="EHB1", bid=93, ask=95)]) == 0
+    assert b.place(mkts=[_mk(tk="CB1", ev="ECB1", bid=84, ask=86)]) == 1
+    # not blocked while n<8 even if temporarily negative (still learning)
+    b.hi = {"w": 2, "l": 3, "pnl": -0.60}
+    assert not b._hi_blocked()
+    assert b.place(mkts=[_mk(tk="HB2", ev="EHB2", bid=93, ask=95)]) == 1
+    # ladder state is published for the tracker
+    b.save()
+    d = json.load(open(cl.STATE))
+    hi = d["summary"]["hi"]
+    assert hi["pct"] == b._hi_pct() and hi["blocked"] is False
+    assert hi["n1"] == cl.HI_STEP1_N and hi["n2"] == cl.HI_STEP2_N
