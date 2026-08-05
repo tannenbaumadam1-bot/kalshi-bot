@@ -895,6 +895,7 @@ async function load(){
       tile('Book bankroll',F(S3.bank||0),'50% of NAV, compounds every cycle &middot; '+((S3.kelly||0.25)>=0.5?'&frac12;-Kelly (PROVEN, n='+(S3.kelly_n||0)+')':'&frac14;-Kelly ('+(S3.kelly_n||0)+'/'+(S3.kelly_gate||100)+' to upgrade)')+' &middot; '+F(cc.bet||0)+'/bet'),
       tile('Realized (after fees)',(S3.realized!=null)?('<span class="'+C(S3.realized)+'">'+M(S3.realized)+'</span>'):'&ndash;','fees '+F(S3.fees||0)+' &middot; settle/stop ledger'),
       tile('Record',(S3.wins||0)+'W / '+(S3.losses||0)+'L',(S3.open||0)+' open &middot; '+(S3.resting||0)+' resting &middot; '+(S3.placed||0)+' placed'),
+      (S3.hi?tile('93-96&cent; probe',((S3.hi.w||0)+(S3.hi.l||0))?((S3.hi.w||0)+'W / '+(S3.hi.l||0)+'L &middot; <span class="'+C(S3.hi.pnl)+'">'+M(S3.hi.pnl||0)+'</span>'):'<span class=mut>no settles yet</span>',(S3.hi.open||0)+' open &middot; earns its lane on evidence'):''),
       tile("Today's P&L",(S3.day_pnl!=null)?('<span class="'+C(S3.day_pnl)+'">'+M(S3.day_pnl)+'</span>'):'&ndash;','halts at -'+F(cc.halt||0)),
       tile('Mirror sync',(S3.sync_diffs==null)?'<span class=mut>syncing&hellip;</span>':(S3.sync_diffs===0?'<span class=pos>1:1 WITH KALSHI</span>':'<span class=neg>'+S3.sync_diffs+' DIFFS</span>'),'crypto book vs exchange positions (crypto universe)')
     ].join('');

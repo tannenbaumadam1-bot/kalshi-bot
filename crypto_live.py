@@ -55,6 +55,14 @@ HALT_PCT = float(os.environ.get("CRYPTO_HALT_PCT", "0.10"))
 RESERVE_C = int(os.environ.get("CRYPTO_RESERVE_C", "200"))
 ENTRY_MIN = int(os.environ.get("CRYPTO_ENTRY_MIN", "80"))
 ENTRY_MAX = int(os.environ.get("CRYPTO_ENTRY_MAX", "92"))
+# 8/4 HIGH-BAND PROBE (Adam: "take advantage of convergence to certainty,
+# ship at half kelly"): entries 93-96c allowed as a SEPARATELY TRACKED
+# bucket - weather's nickel lane playbook. Our shadow calibration has
+# 90-95c markets settling YES 24/24, but crypto above 92c is UNPROVEN
+# (the audition never traded there) and the payoff is +4-7c vs ~-60c
+# after a stop, so this bucket keeps its own W/L ledger and earns (or
+# loses) its lane on evidence, in public, on the tracker.
+PROBE_MAX = int(os.environ.get("CRYPTO_PROBE_MAX", "96"))
 MAX_SPREAD = int(os.environ.get("CRYPTO_MAX_SPREAD", "4"))
 MIN_VOL24 = float(os.environ.get("CRYPTO_MIN_VOL24", "500"))
 STOP_C = float(os.environ.get("CRYPTO_STOP_C", "35"))
@@ -121,6 +129,7 @@ class CryptoLive:
         self.dry_balance_c = 10000
         self.bank_c = 0          # allocated bankroll, refreshed each cycle
         self.pnl_days = {}       # date -> realized $ that day (never trimmed)
+        self.hi = {"w": 0, "l": 0, "pnl": 0.0}   # 93-96c probe ledger
         self.load()
 
     # ---- persistence ----
@@ -132,7 +141,8 @@ class CryptoLive:
                     return
                 for k in ("bets", "pending", "history", "wins", "losses",
                           "fees_c", "realized_c", "placed", "canceled",
-                          "day", "day_pnl_c", "dry_balance_c", "pnl_days"):
+                          "day", "day_pnl_c", "dry_balance_c", "pnl_days",
+                          "hi"):
                     if k in d:
                         setattr(self, k, d[k])
             except Exception:
@@ -157,6 +167,7 @@ class CryptoLive:
                  "bets": self.bets, "pending": self.pending,
                  "history": self.history[-120:],
                  "pnl_days": self.pnl_days,
+                 "hi": self.hi,
                  "wins": self.wins, "losses": self.losses,
                  "fees_c": self.fees_c, "realized_c": self.realized_c,
                  "placed": self.placed, "canceled": self.canceled,
@@ -183,6 +194,12 @@ class CryptoLive:
                      "kelly": self._kelly(),
                      "kelly_n": self.wins + self.losses,
                      "kelly_gate": KELLY_PROVEN_N,
+                     "hi": {"w": self.hi.get("w", 0),
+                            "l": self.hi.get("l", 0),
+                            "pnl": round(self.hi.get("pnl", 0.0), 2),
+                            "open": sum(1 for b in self.bets.values()
+                                        if b.get("band") == "hi"),
+                            "max": PROBE_MAX},
                      "sync_diffs": self.sync_diffs},
                  "open": [dict(b, ticker=tk) for tk, b in self.bets.items()],
                  "settled": list(reversed(self.history[-40:]))}
@@ -326,6 +343,7 @@ class CryptoLive:
                              "pside": o["pside"], "name": o.get("name", tk),
                              "event": o.get("event", ""),
                              "peak": o.get("peak", o["entry"]),
+                             "band": o.get("band", "core"),
                              "ots": o.get("ots", now()), "era": ERA}
         self._log([now(), "FILL", self.mode, tk, o.get("name", "")[:60],
                    o["side"], round(o["pside"], 3), o["entry"], filled,
@@ -398,10 +416,14 @@ class CryptoLive:
             self.fees_c += exit_fee
             if self.client is None:
                 self.dry_balance_c += bid * b["count"] - exit_fee
+            if b.get("band") == "hi":
+                self.hi["l"] += 1
+                self.hi["pnl"] = round(self.hi["pnl"] + net / 100.0, 2)
             self.history.append({"name": b.get("name", tk), "tk": tk,
                                  "side": b["side"], "pside": b["pside"],
                                  "entry": b["entry"], "count": b["count"],
                                  "outcome": None, "stopped": True,
+                                 "band": b.get("band", "core"),
                                  "exit_px": bid,
                                  "pnl": round(net / 100.0, 2),
                                  "ts": now(), "ots": b.get("ots", ""),
@@ -428,10 +450,14 @@ class CryptoLive:
             self.losses += int(not won)
             if self.client is None:
                 self.dry_balance_c += payout * b["count"]
+            if b.get("band") == "hi":
+                self.hi["w" if won else "l"] += 1
+                self.hi["pnl"] = round(self.hi["pnl"] + net / 100.0, 2)
             self.history.append({"name": b.get("name", tk), "tk": tk,
                                  "side": b["side"], "pside": b["pside"],
                                  "entry": b["entry"], "count": b["count"],
                                  "outcome": 1 if won else 0,
+                                 "band": b.get("band", "core"),
                                  "pnl": round(net / 100.0, 2),
                                  "ts": now(), "ots": b.get("ots", ""),
                                  "era": ERA})
@@ -487,12 +513,13 @@ class CryptoLive:
                 side, e_bid, e_ask, smid = "no", 100 - ask, 100 - bid, 100 - mid
             else:
                 continue
-            if e_ask < ENTRY_MIN or e_ask > ENTRY_MAX or e_bid < 1:
+            if e_ask < ENTRY_MIN or e_ask > PROBE_MAX or e_bid < 1:
                 continue
-            cands.append((smid, mk, side, e_bid, e_ask))
+            band = "hi" if e_ask > ENTRY_MAX else "core"
+            cands.append((smid, mk, side, e_bid, e_ask, band))
         cands.sort(key=lambda c: -c[0])
         placed = 0
-        for smid, mk, side, e_bid, e_ask in cands:
+        for smid, mk, side, e_bid, e_ask, band in cands:
             if placed >= budget:
                 break
             if mk["event"] in ev_keys:
@@ -527,6 +554,7 @@ class CryptoLive:
             o = {"ticker": tk, "side": side, "entry": e_ask, "count": size,
                  "pside": pside, "name": mk.get("name", tk),
                  "event": mk["event"], "peak": smid, "exec": "taker",
+                 "band": band,
                  "filled_seen": 0, "ots": now(), "era": ERA}
             self.pending[oid] = o
             ev_keys.add(mk["event"])     # a strike ladder is ONE opinion
