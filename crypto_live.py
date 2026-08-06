@@ -77,6 +77,16 @@ HI_PCT2 = float(os.environ.get("CRYPTO_HI_PCT2", "0.10"))
 HI_BLOCK_N = int(os.environ.get("CRYPTO_HI_BLOCK_N", "8"))
 MAX_SPREAD = int(os.environ.get("CRYPTO_MAX_SPREAD", "4"))
 MIN_VOL24 = float(os.environ.get("CRYPTO_MIN_VOL24", "500"))
+# 8/6: Kalshi now lists each hourly crypto event only ~60 min before its
+# close (open_time = top of the prior hour), so vol24 reads ~0 for most
+# of an hourly's life and the 500 floor silently excluded EVERY hourly
+# market - only the long-listed noon/5pm dailies ever traded (Adam
+# spotted it: "only trading the 5pm market"). Near the close, the
+# two-sided-quote + spread<=MAX_SPREAD gate is the real liquidity test
+# for a taker buying 1-5 contracts, so within HOURLY_H hours of close
+# the volume floor drops to MIN_VOL24_LATE.
+HOURLY_H = float(os.environ.get("CRYPTO_HOURLY_H", "1.5"))
+MIN_VOL24_LATE = float(os.environ.get("CRYPTO_MIN_VOL24_LATE", "0"))
 STOP_C = float(os.environ.get("CRYPTO_STOP_C", "35"))
 MAX_PER_DAY = int(os.environ.get("CRYPTO_MAX_PER_DAY", "40"))
 REST_MAX_MIN = float(os.environ.get("CRYPTO_REST_MAX_MIN", "30"))
@@ -537,7 +547,10 @@ class CryptoLive:
             bid, ask = mk["yes_bid"], mk["yes_ask"]
             if bid <= 0 or ask <= 0 or (ask - bid) > MAX_SPREAD:
                 continue
-            if float(mk.get("vol", 0) or 0) < MIN_VOL24:
+            vol_floor = (MIN_VOL24_LATE
+                         if float(mk.get("hrs", 99) or 99) <= HOURLY_H
+                         else MIN_VOL24)
+            if float(mk.get("vol", 0) or 0) < vol_floor:
                 continue
             if tk in self.bets or tk in pend_tks or mk["event"] in ev_keys:
                 continue

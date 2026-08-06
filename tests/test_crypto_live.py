@@ -255,3 +255,20 @@ def test_hi_block_closes_lane_when_proven_negative(tmp_path, monkeypatch):
     hi = d["summary"]["hi"]
     assert hi["pct"] == b._hi_pct() and hi["blocked"] is False
     assert hi["n1"] == cl.HI_STEP1_N and hi["n2"] == cl.HI_STEP2_N
+
+
+def test_hourly_markets_pass_without_vol24(tmp_path, monkeypatch):
+    # 8/6: Kalshi lists hourlies only ~60min before close -> vol24 ~0.
+    # Within HOURLY_H of close the volume floor drops away; the spread
+    # gate stays. Far-from-close markets still need the 500 floor.
+    b = _bot(tmp_path, monkeypatch)
+    b.dry_balance_c = 20000
+    # young hourly, zero volume, tight book, 47 min to close: TRADES
+    assert b.place(mkts=[_mk(tk="HR1", ev="EHR1", bid=84, ask=86,
+                             vol=0.0, hrs=0.78)]) == 1
+    # same zero volume but 5h out (a daily going stale): still refused
+    assert b.place(mkts=[_mk(tk="HR2", ev="EHR2", bid=84, ask=86,
+                             vol=0.0, hrs=5.0)]) == 0
+    # near close does NOT relax the spread gate
+    assert b.place(mkts=[_mk(tk="HR3", ev="EHR3", bid=80, ask=86,
+                             vol=0.0, hrs=0.5)]) == 0
