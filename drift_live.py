@@ -277,6 +277,10 @@ class DriftLive:
                           "k_positions", "k_resting", "dry_balance_c"):
                     if k in d:
                         setattr(self, k, d[k])
+                if not d.get("nav0_v2"):
+                    # 8/6 one-time: pre-fix anchor excluded crypto cost -
+                    # discard it; next cycle re-anchors with _day_anchor_c
+                    self.day_nav0_c = None
             except Exception:
                 pass
         self._seed_pnl_days()
@@ -553,7 +557,7 @@ class DriftLive:
              "wins": self.wins, "losses": self.losses,
              "placed": self.placed, "canceled": self.canceled,
              "day": self.day, "day_pnl_c": self.day_pnl_c,
-             "day_nav0_c": self.day_nav0_c,
+             "day_nav0_c": self.day_nav0_c, "nav0_v2": True,
              "dry_balance_c": self.dry_balance_c,
              "settled_tks": self.settled_tks[-300:],
              "k_settlements": self.k_settlements[:300],
@@ -697,6 +701,16 @@ class DriftLive:
             self.day_pnl_c = 0.0
             self.day_nav0_c = None   # re-anchor today's P&L off Kalshi NAV
             self.halted = False
+
+    def _day_anchor_c(self, bal):
+        # day anchor = cash + BOTH books' open cost. 8/6 bug (Adam caught
+        # it: tile +14.6% vs Kalshi ~flat): the anchor ignored the CRYPTO
+        # book's overnight positions, so the moment lane 2 started holding
+        # positions across midnight the baseline read ~$14 low and
+        # "today's return" claimed the whole crypto book as profit.
+        return (bal
+                + sum(b["entry"] * b["count"] for b in self.bets.values())
+                + _crypto_cost_c())
 
     # ---- Kalshi truth sync: the exchange's own records are the ONLY
     # numbers the scoreboard shows (Adam 7/25) ----
@@ -1549,9 +1563,7 @@ class DriftLive:
         except Exception:
             bal = None
         if bal is not None and self.day_nav0_c is None:
-            # day anchor: balance + cost of open positions at day start
-            self.day_nav0_c = bal + sum(
-                b["entry"] * b["count"] for b in self.bets.values())
+            self.day_nav0_c = self._day_anchor_c(bal)
         self.save(balance_c=bal)
 
 

@@ -518,3 +518,40 @@ def test_cross_expiring_one_sided_books(tmp_path, monkeypatch):
     # NO side, yes-ask-only (no yes bid = no NO ask) -> refuse
     o2 = dict(_stale_order(tk="T6"), side="no")
     assert b._cross_expiring(o2, 2, q=(0, 20)) is False
+
+
+def test_day_anchor_includes_both_books(tmp_path, monkeypatch):
+    # 8/6 (Adam caught the +14.6% ghost return): the day-start NAV anchor
+    # must count cash + WEATHER open cost + CRYPTO open cost. Excluding
+    # the crypto book made every overnight crypto dollar look like
+    # today's profit.
+    import json as _json
+    b = _bot(tmp_path, monkeypatch)
+    cpath = tmp_path / "crypto_state.json"
+    cpath.write_text(_json.dumps(
+        {"bets": {"KXBTCD-X": {"entry": 94, "count": 2},
+                  "KXETHD-X": {"entry": 90, "count": 3}}}))
+    monkeypatch.setattr(dl, "CRYPTO_STATE_PATH", str(cpath))
+    b.bets = {"W1": {"entry": 80, "count": 2}}
+    assert b._day_anchor_c(10000) == 10000 + 160 + (188 + 270)
+    # missing crypto state file -> anchor still works, crypto part 0
+    monkeypatch.setattr(dl, "CRYPTO_STATE_PATH", str(tmp_path / "none.json"))
+    assert b._day_anchor_c(10000) == 10160
+
+
+def test_stale_anchor_discarded_once_on_upgrade(tmp_path, monkeypatch):
+    # states written before the fix (no nav0_v2 flag) carry a crypto-blind
+    # anchor: it must be dropped at load so the next cycle re-anchors;
+    # states written by the fixed build keep their anchor across restarts
+    import json as _json
+    b = _bot(tmp_path, monkeypatch)
+    b.day_nav0_c = 9963
+    b.save(balance_c=None)
+    d = _json.load(open(dl.STATE))
+    assert d.get("nav0_v2") is True and d["day_nav0_c"] == 9963
+    b2 = dl.DriftLive(None, mode="DRY")
+    assert b2.day_nav0_c == 9963          # v2 state: anchor survives
+    d.pop("nav0_v2")
+    _json.dump(d, open(dl.STATE, "w"))
+    b3 = dl.DriftLive(None, mode="DRY")
+    assert b3.day_nav0_c is None          # pre-fix state: re-anchor
