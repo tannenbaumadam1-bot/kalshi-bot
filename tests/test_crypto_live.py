@@ -272,3 +272,55 @@ def test_hourly_markets_pass_without_vol24(tmp_path, monkeypatch):
     # near close does NOT relax the spread gate
     assert b.place(mkts=[_mk(tk="HR3", ev="EHR3", bid=80, ask=86,
                              vol=0.0, hrs=0.5)]) == 0
+
+
+def test_direct_series_fetch_parses_and_filters(tmp_path, monkeypatch):
+    # 8/6: crypto universe comes from per-series /markets calls (the
+    # global sweep missed short-lived hourlies). Parse + hrs filter.
+    calls = []
+
+    class _Resp:
+        def __init__(self, mks):
+            self._m = mks
+
+        def json(self):
+            return {"markets": self._m}
+
+    def fake_get(url, params=None, timeout=None):
+        calls.append(params["series_ticker"])
+        if params["series_ticker"] != "KXBTCD":
+            return _Resp([])
+        import datetime as _dt
+        nowdt = _dt.datetime.now(_dt.timezone.utc)
+        soon = (nowdt + _dt.timedelta(minutes=40)).strftime(
+            "%Y-%m-%dT%H:%M:%SZ")
+        far = (nowdt + _dt.timedelta(hours=30)).strftime(
+            "%Y-%m-%dT%H:%M:%SZ")
+        return _Resp([
+            {"ticker": "KXBTCD-26AUG0614-T64000", "event_ticker":
+             "KXBTCD-26AUG0614", "title": "Bitcoin price",
+             "yes_sub_title": "$64,000 or above", "close_time": soon,
+             "yes_bid_dollars": "0.90", "yes_ask_dollars": "0.91",
+             "volume_24h_fp": "0"},
+            {"ticker": "KXBTCD-26AUG0817-T64000", "event_ticker":
+             "KXBTCD-26AUG0817", "title": "too far out",
+             "close_time": far, "yes_bid_dollars": "0.85",
+             "yes_ask_dollars": "0.86", "volume_24h_fp": "9999"},
+            {"ticker": "KXBTCD-BAD", "title": "bad close",
+             "close_time": "nope", "yes_bid_dollars": "0.85",
+             "yes_ask_dollars": "0.86"},
+        ])
+
+    monkeypatch.setattr(cl.requests, "get", fake_get)
+    mkts = cl.fetch_crypto_mkts()
+    assert calls == cl.CRYPTO_SERIES          # every series asked, by name
+    assert [m["ticker"] for m in mkts] == ["KXBTCD-26AUG0614-T64000"]
+    m = mkts[0]
+    assert m["yes_bid"] == 90 and m["yes_ask"] == 91
+    assert m["event"] == "KXBTCD-26AUG0614" and 0 < m["hrs"] < 1
+    # and the young zero-volume hourly TRADES end to end via place(None)
+    b = _bot(tmp_path, monkeypatch)
+    b.dry_balance_c = 20000
+    monkeypatch.setattr(cl, "fetch_crypto_mkts", lambda: mkts)
+    assert b.place() == 1
+    assert b.bets["KXBTCD-26AUG0614-T64000"]["band"] == "core"

@@ -154,6 +154,10 @@ CROSS_MAX_CHASE = int(os.environ.get("DRIFT_LIVE_CROSS_CHASE", "8"))
 # lane with a tight spread, pay the ask immediately instead of queueing.
 ENTRY_FLOOR = int(os.environ.get("DRIFT_LIVE_ENTRY_FLOOR", "80"))
 CYCLE_S = int(os.environ.get("DRIFT_LIVE_CYCLE_S", "600"))
+# 8/6: crypto sub-cycle - the crypto book scans every CRYPTO_SUB_S
+# seconds inside the drift book's CYCLE_S nap (hourly markets are too
+# short-lived for a 10-minute look interval).
+CRYPTO_SUB_S = int(os.environ.get("DRIFT_CRYPTO_SUB_S", "180"))
 GATE_MIN_N = dp.GATE_MIN_N
 GATE_MAX_GAP = dp.GATE_MAX_GAP
 PROBE_COST_CENTS = dp.PROBE_COST_CENTS
@@ -1623,7 +1627,23 @@ def main():
         if _code_changed():
             print(f"[{now()}] new build on disk - restarting (systemd revives)")
             return 0
-        time.sleep(CYCLE_S)
+        # 8/6: hourly crypto events live only ~60 min, so the crypto book
+        # re-scans every CRYPTO_SUB_S during the drift book's 10-min nap
+        # (direct series fetch = ~12 cheap calls, not the global sweep).
+        slept = 0
+        while slept < CYCLE_S:
+            nap = min(CRYPTO_SUB_S, CYCLE_S - slept)
+            time.sleep(nap)
+            slept += nap
+            if _code_changed():
+                print(f"[{now()}] new build on disk - restarting "
+                      f"(systemd revives)")
+                return 0
+            if cl is not None and slept < CYCLE_S:
+                try:
+                    cl.step()
+                except Exception as e:
+                    print(f"[{now()}] crypto cycle error: {e}")
 
 
 if __name__ == "__main__":

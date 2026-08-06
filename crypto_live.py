@@ -32,6 +32,8 @@ import datetime
 import json
 import os
 
+import requests
+
 import drift_wide as dw
 import drift_crypto as dcfg
 from weather_paper import fetch_result
@@ -115,6 +117,60 @@ def _is_15m(tk, name=""):
     return ("15M" in (tk or "").split("-")[0].upper()
             or "15 min" in (name or "").lower()
             or "next 15" in (name or "").lower())
+
+
+# 8/6 DIRECT SERIES FETCH: the global /events sweep (45 pages x 200,
+# category-filtered) was silently MISSING the new short-lived hourly
+# events - a 90/91c in-band BTC 1pm candidate sat unseen for 40+ min
+# while the sweep-fed scan placed nothing. Hourlies now open only ~60min
+# before close, and a paged global sweep is both truncatable and
+# breakable mid-page. So the crypto book asks Kalshi for ITS OWN series
+# by name - ~12 cheap /markets calls, no pagination lottery. The old
+# sweep stays as fallback if the direct fetch comes back empty.
+CRYPTO_SERIES = [s.strip() for s in os.environ.get(
+    "CRYPTO_SERIES",
+    "KXBTCD,KXBTC,KXETHD,KXETH,KXSOLD,KXSOLE,KXXRPD,KXXRP,"
+    "KXDOGED,KXDOGE,KXHYPED,KXHYPE").split(",") if s.strip()]
+CRYPTO_MAX_H = float(os.environ.get("CRYPTO_MAX_H", "24"))
+
+
+def fetch_crypto_mkts():
+    out = []
+    nowdt = datetime.datetime.now(datetime.timezone.utc)
+    for s in CRYPTO_SERIES:
+        try:
+            d = requests.get(dw.we.KALSHI + "/markets",
+                             params={"series_ticker": s, "status": "open",
+                                     "limit": 200}, timeout=10).json()
+        except Exception:
+            continue
+        for mk in d.get("markets") or []:
+            ct = (mk.get("close_time") or "")[:19]
+            try:
+                close = datetime.datetime.strptime(
+                    ct, "%Y-%m-%dT%H:%M:%S").replace(
+                    tzinfo=datetime.timezone.utc)
+            except Exception:
+                continue
+            hrs = (close - nowdt).total_seconds() / 3600
+            if hrs < -2 or hrs > CRYPTO_MAX_H:
+                continue
+            yb = int(round(float(mk.get("yes_bid_dollars") or 0) * 100))
+            ya = int(round(float(mk.get("yes_ask_dollars") or 0) * 100))
+            if yb <= 0 or ya <= 0:
+                continue
+            base = mk.get("title") or mk.get("ticker", "")
+            sub = mk.get("yes_sub_title") or ""
+            name = ((base + " - " + sub)
+                    if sub and sub.lower() not in base.lower() else base)
+            out.append({"ticker": mk["ticker"],
+                        "event": (mk.get("event_ticker")
+                                  or mk["ticker"].rsplit("-", 1)[0]),
+                        "name": name[:90],
+                        "yes_bid": yb, "yes_ask": ya,
+                        "vol": float(mk.get("volume_24h_fp") or 0),
+                        "hrs": hrs})
+    return out
 
 
 def now():
@@ -530,11 +586,13 @@ class CryptoLive:
             return 0
         self.refresh_bank(balance_c)
         if mkts is None:
-            try:
-                with dcfg._cfg():
-                    mkts = dw.find_wide_markets()
-            except Exception:
-                return 0
+            mkts = fetch_crypto_mkts()      # 8/6: direct, no sweep lottery
+            if not mkts:
+                try:
+                    with dcfg._cfg():
+                        mkts = dw.find_wide_markets()
+                except Exception:
+                    return 0
         budget = MAX_PER_DAY - self._placed_today()
         ev_keys = {b.get("event", "") for b in
                    list(self.bets.values()) + list(self.pending.values())}
