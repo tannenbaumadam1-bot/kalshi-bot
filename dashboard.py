@@ -129,6 +129,21 @@ def _era_stats(rows):
             "actual": round(100 * wins / n, 1)}
 
 
+def _freshest_balance_c(dv, cv):
+    """8/6 (Adam: "the NAV on the tracker and on kalshi need to line up"):
+    both live books snapshot the SAME account balance, but at different
+    moments - and with the crypto book cycling every 3 min vs the drift
+    book's 10, the hero NAV was gluing a stale dlive cash snapshot to
+    fresh position marks. Every crypto fill in the gap window showed up
+    twice (cash not yet debited + position counted), drifting the tracker
+    off the Kalshi app by dollars around busy hours. Use whichever book's
+    balance snapshot is newer."""
+    db, cb = dv.get("balance_c"), cv.get("balance_c")
+    if cb is not None and (cv.get("updated") or "") > (dv.get("updated") or ""):
+        return cb
+    return db
+
+
 def compute_kpis(out):
     """All book analytics, computed server-side from state + marks."""
     s = out.get("summary") or {}
@@ -423,7 +438,8 @@ def build_data():
                             else (b.get("entry", 0) or 0)
                             * (b.get("count", 0) or 0) / 100.0)
                            for b in rows or [])
-            acct = round(dv["balance_c"] / 100.0 + _val(dv.get("open"))
+            acct = round(_freshest_balance_c(dv, cv) / 100.0
+                         + _val(dv.get("open"))
                          + _val(cv.get("open")), 2)
             dv["marked_nav"] = acct
             dv["pnl_true"] = round(acct - float(dv.get("baseline") or 100.09), 2)
