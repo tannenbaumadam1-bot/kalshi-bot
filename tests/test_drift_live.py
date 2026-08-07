@@ -256,13 +256,17 @@ def test_cross_expiring_takes_the_ask(tmp_path, monkeypatch):
 
 def test_cross_expiring_refuses_bad_setups(tmp_path, monkeypatch):
     b = _bot(tmp_path, monkeypatch)
-    # market ran away past the 8c chase cap: 90 - 80 > 8
-    assert b._cross_expiring(_stale_order(tk="T2"), 2, q=(88, 90)) is False
+    # 8/7: a runner at 88/90 is now BOARDED, not forfeited. It is 10c
+    # above our stale 80c join, but 100-90-fee still leaves edge, and the
+    # stale join price has no bearing on whether the ask is worth paying.
+    assert b._cross_expiring(_stale_order(tk="T2"), 2, q=(88, 90)) is True
+    assert b.bets["T2"]["entry"] == 90
     # signal faded below our entry: smid 76 < 80
     assert b._cross_expiring(_stale_order(tk="T3"), 2, q=(74, 78)) is False
     # nothing unfilled
     assert b._cross_expiring(_stale_order(tk="T4"), 0, q=(82, 84)) is False
-    assert not b.bets and not b.pending
+    assert "T3" not in b.bets and "T4" not in b.bets
+    assert b._cross_why in ("nothing_unfilled",)
 
 
 def test_pursuit_ladder_boards_runners(tmp_path, monkeypatch):
@@ -295,7 +299,10 @@ def test_execution_defaults_widened():
     # 8/4 pursuit escalation (52/52 misses would have won, $26.72):
     assert dl.REST_MAX_H == 0.5          # cross at 30 min, not 45
     assert dl.CHASE_MAX_E == 97          # chase winners to 97c
-    assert dl.CROSS_MAX_CHASE == 8       # pay up to 8c to board a runner
+    # 8/7: the stale-anchor chase cap is retired (0 = off, env rollback
+    # only). Crossing is now decided by the edge left AT THE ASK.
+    assert dl.CROSS_MAX_CHASE == 0
+    assert dl.CROSS_MIN_EDGE_C == 3
 
 
 def test_entry_floor_blocks_sub_80(tmp_path, monkeypatch):
@@ -555,3 +562,63 @@ def test_stale_anchor_discarded_once_on_upgrade(tmp_path, monkeypatch):
     _json.dump(d, open(dl.STATE, "w"))
     b3 = dl.DriftLive(None, mode="DRY")
     assert b3.day_nav0_c is None          # pre-fix state: re-anchor
+
+
+# --- 8/7: the miss leak, measured instead of guessed -------------------
+
+def test_runaway_winner_is_boarded_not_forfeited(tmp_path, monkeypatch):
+    """The leak's actual shape: a join at 80c whose market ran to 96c was
+    refused for being 16c from a stale quote, then settled at 100."""
+    b = _bot(tmp_path, monkeypatch)
+    assert b._cross_expiring(_stale_order(tk="R1"), 2, q=(94, 96)) is True
+    assert b.bets["R1"]["entry"] == 96
+
+
+def test_cross_refused_only_when_no_edge_is_left(tmp_path, monkeypatch):
+    b = _bot(tmp_path, monkeypatch)
+    # 98c ask: above CHASE_MAX_E (97), nothing left worth paying for
+    assert b._cross_expiring(_stale_order(tk="E1"), 2, q=(97, 98)) is False
+    assert b._cross_why == "ask_above_ceiling"
+    # at the ceiling but the fee eats the remaining 3c
+    monkeypatch.setattr(dl, "CROSS_MIN_EDGE_C", 6)
+    assert b._cross_expiring(_stale_order(tk="E2"), 2, q=(95, 97)) is False
+    assert b._cross_why == "no_edge_left"
+
+
+def test_every_refusal_records_a_reason(tmp_path, monkeypatch):
+    """No silent forfeits - three passes at this leak failed because the
+    ledger never said WHY the cross was declined."""
+    b = _bot(tmp_path, monkeypatch)
+    for tk, q, expect in [("W1", None, "no_quote"),
+                          ("W2", (74, 78), "signal_faded"),
+                          ("W3", (97, 98), "ask_above_ceiling")]:
+        b._cross_expiring(_stale_order(tk=tk), 2, q=q)
+        assert b._cross_why == expect, (tk, b._cross_why)
+    b._cross_expiring(_stale_order(tk="W4"), 0, q=(82, 84))
+    assert b._cross_why == "nothing_unfilled"
+
+
+def test_miss_records_reason_and_the_ask_it_walked_away_from(
+        tmp_path, monkeypatch):
+    b = _bot(tmp_path, monkeypatch)
+    b._log_miss(_stale_order(tk="M1"), 2, why="signal_faded", ask=78)
+    r = b.miss[-1]
+    assert r["why"] == "signal_faded" and r["ask"] == 78
+    s = b._miss_summary()
+    assert s["miss_why"]["signal_faded"]["n"] == 1
+
+
+def test_recoverable_is_scored_at_the_refused_ask_not_the_stale_join(
+        tmp_path, monkeypatch):
+    """would_pnl prices a fill we could never have got; miss_recoverable
+    prices the one we actually turned down."""
+    b = _bot(tmp_path, monkeypatch)
+    b._log_miss(_stale_order(tk="M2", entry=80), 2, why="chase_cap", ask=96)
+    monkeypatch.setattr(dl, "fetch_result", lambda tk: "yes")
+    b.miss_check()
+    r = b.miss[-1]
+    assert r["res"] == "yes"
+    assert r["would_pnl"] > r["cross_pnl"]        # the honest number is lower
+    s = b._miss_summary()
+    assert s["miss_recoverable"] < s["miss_cost"]
+    assert s["miss_recoverable"] > 0              # but still real money

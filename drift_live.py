@@ -142,7 +142,21 @@ NICKEL_LANE_PCT = float(os.environ.get("DRIFT_LIVE_NICKEL_LANE_PCT", "0.30"))
 # above it), pay the ask instead of dying on the vine. All caps, bucket
 # blocks and the NAV nickel guardrails still apply to the cross.
 CROSS_EXPIRY = os.environ.get("DRIFT_LIVE_CROSS_EXPIRY", "1") == "1"
-CROSS_MAX_CHASE = int(os.environ.get("DRIFT_LIVE_CROSS_CHASE", "8"))
+# 8/7 THE LEAK, THIRD ATTEMPT - this time measured, not guessed. The 8/3
+# and 8/4 passes both tuned cent-caps and both failed (49 -> 52 -> 63
+# misses, ALL would-won). Root cause was never a cap value: it was that
+# CROSS_MAX_CHASE anchors the decision to the price we happened to quote
+# 30 minutes ago. A winner that runs 85c -> 96c is REFUSED for being 11c
+# away from a stale number, even though buying at 96c something that
+# settles at 100 is still profitable. The anchor is irrelevant to the
+# economics; what matters is whether there is still edge left AT THE ASK.
+#
+# So: cross whenever the remaining room to settlement covers fees plus a
+# margin (CROSS_MIN_EDGE_C), the signal still holds (smid >= entry) and
+# the ask is inside the trigger's ceiling. CROSS_MAX_CHASE stays as an
+# env-only rollback (0 = off).
+CROSS_MAX_CHASE = int(os.environ.get("DRIFT_LIVE_CROSS_CHASE", "0"))
+CROSS_MIN_EDGE_C = int(os.environ.get("DRIFT_LIVE_CROSS_MIN_EDGE", "3"))
 # THE CONCENTRATION PACKAGE (7/31, Adam-approved). Bucket attribution
 # after 8 days live: ALL profit (+$7.60) came from entries at 80-96c
 # (level:80-84 +3.54, nickel +4.06); EVERY band below 80c lost money on
@@ -409,13 +423,19 @@ class DriftLive:
     # ---- miss-autopsy (7/27): grade the road NOT taken. Every canceled
     # unfilled buy is scored against eventual settlement so "should we
     # cross the spread more?" is answered by the ledger, not opinion. ----
-    def _log_miss(self, o, unfilled):
+    def _log_miss(self, o, unfilled, why="", ask=0):
         if unfilled <= 0:
             return
         self.miss.append({"tk": o["ticker"], "side": o["side"],
                           "entry": o["entry"], "count": int(unfilled),
                           "trig": o.get("trig"),
                           "pside": round(o.get("pside", 0), 3),
+                          "why": why or "unknown",
+                          # 8/7: the ask we WALKED AWAY FROM. would_pnl is
+                          # scored at our stale join price, which is a price
+                          # we could no longer get - it overstates what was
+                          # actually recoverable. cross_pnl below is honest.
+                          "ask": int(ask or 0),
                           "ots": o.get("ots", ""), "cts": now(), "res": None})
         self.miss = self.miss[-200:]
 
@@ -424,7 +444,9 @@ class DriftLive:
         spread as a taker instead of being forfeited. Returns True if a
         replacement taker order was placed for `count` (possibly trimmed
         to caps) contracts."""
+        self._cross_why, self._cross_ask = "", 0
         if count <= 0:
+            self._cross_why = "nothing_unfilled"
             return False
         tk = o["ticker"]
         if q is None:
@@ -433,6 +455,7 @@ class DriftLive:
             except Exception:
                 q = None
         if not q:
+            self._cross_why = "no_quote"
             return False
         yb, ya = q
         # 8/4: one-sided books cross too. Near settlement the runaway
@@ -442,21 +465,40 @@ class DriftLive:
         # (still fenced by max_e and CROSS_MAX_CHASE below).
         if o["side"] == "yes":
             if not ya:
+                self._cross_why = "no_ask"
                 return False
             bid_s, ask_s = (yb or 0), ya
         else:
             if not yb:
+                self._cross_why = "no_ask"
                 return False
             bid_s, ask_s = ((100 - ya) if ya else 0), 100 - yb
         smid = (bid_s + ask_s) / 2.0 if bid_s else float(ask_s)
+        self._cross_ask = int(ask_s)
         max_e = (dp.NICKEL_MAX_ENTRY if o.get("trig") == "nickel"
                  else CHASE_MAX_E)
-        if (ask_s <= 0 or ask_s > max_e or smid < o["entry"]
-                or ask_s - o["entry"] > CROSS_MAX_CHASE):
+        if ask_s <= 0:
+            self._cross_why = "no_ask"
+            return False
+        if ask_s > max_e:
+            self._cross_why = "ask_above_ceiling"
+            return False
+        if smid < o["entry"]:
+            self._cross_why = "signal_faded"      # legitimate refusal
+            return False
+        # what's left to settlement after paying the ask, net of the
+        # taker fee - this, not the distance from a stale quote, decides.
+        edge = 100 - ask_s - fee_cents(ask_s, 1, taker=True)
+        if edge < CROSS_MIN_EDGE_C:
+            self._cross_why = "no_edge_left"
+            return False
+        if CROSS_MAX_CHASE > 0 and ask_s - o["entry"] > CROSS_MAX_CHASE:
+            self._cross_why = "chase_cap"         # rollback path only
             return False
         if (o.get("trig") != "nickel"
                 and self._bucket_blocked(self._bucket_stats(),
                                          o.get("trig"), ask_s)):
+            self._cross_why = "bucket_blocked"
             return False
         size = int(count)
         if o.get("trig") == "nickel":
@@ -466,19 +508,24 @@ class DriftLive:
                 while size > 1 and ask_s * size > cap:
                     size -= 1
                 if ask_s * size > cap:
+                    self._cross_why = "nickel_pos_cap"
                     return False
         else:
             while size > 1 and ask_s * size > self.max_bet_c:
                 size -= 1
             if ask_s * size > self.max_bet_c:
+                self._cross_why = "bet_cap"
                 return False
         try:
             bal = self.balance_c()
         except Exception:
+            self._cross_why = "balance_error"
             return False
         if bal - ask_s * size < self.reserve_c:
+            self._cross_why = "reserve"
             return False
         if self.open_cost_c() + ask_s * size > self.max_open_c:
+            self._cross_why = "open_cap"
             return False
         new_oid = f"xc-{self.placed + 1}"
         if self.client is not None:
@@ -491,6 +538,7 @@ class DriftLive:
                            or resp.get("order_id") or resp.get("id")
                            or new_oid)
             except Exception:
+                self._cross_why = "order_rejected"
                 return False
         no = dict(o)
         no.update({"entry": ask_s, "count": size, "exec": "taker",
@@ -522,9 +570,22 @@ class DriftLive:
             would = ((100 if won else 0) - row["entry"]) * row["count"] - mfee
             row["res"] = res
             row["would_pnl"] = round(would / 100.0, 2)
+            # what crossing at the ask we refused would ACTUALLY have paid
+            ask = int(row.get("ask") or 0)
+            if ask > 0:
+                tfee = fee_cents(ask, row["count"], taker=True)
+                row["cross_pnl"] = round(
+                    (((100 if won else 0) - ask) * row["count"] - tfee)
+                    / 100.0, 2)
 
     def _miss_summary(self):
         graded = [r for r in self.miss if r.get("res") is not None]
+        why = {}
+        for r in self.miss:
+            k = r.get("why") or "unknown"
+            a = why.setdefault(k, {"n": 0, "cost": 0.0})
+            a["n"] += 1
+            a["cost"] = round(a["cost"] + (r.get("cross_pnl") or 0), 2)
         return {"miss_n": len(self.miss),
                 "miss_settled": len(graded),
                 "miss_would_won": sum(1 for r in graded
@@ -532,7 +593,14 @@ class DriftLive:
                 # positive = money left on the table by not filling;
                 # negative = patience dodged losers and saved money
                 "miss_cost": round(sum(r.get("would_pnl", 0)
-                                       for r in graded), 2)}
+                                       for r in graded), 2),
+                # 8/7: the HONEST number - scored at the ask we actually
+                # refused, not at the stale join price we could never have
+                # got. This is what the fix can really recover.
+                "miss_recoverable": round(
+                    sum(r.get("cross_pnl") or 0 for r in graded), 2),
+                "miss_why": dict(sorted(why.items(),
+                                        key=lambda kv: -kv[1]["n"]))}
 
     def _sync_diffs(self):
         """How far our internal book diverges from Kalshi's positions.
@@ -967,7 +1035,8 @@ class DriftLive:
                     self._promote_fill(oid, o, filled)
                 if filled == 0 and seen == 0:
                     self.canceled += 1
-                self._log_miss(o, o["count"] - seen - filled)
+                self._log_miss(o, o["count"] - seen - filled,
+                               why="order_vanished")
                 del self.pending[oid]
                 continue
             # still resting: promote any PARTIAL fills so stops/settles
@@ -990,7 +1059,10 @@ class DriftLive:
                 unfilled = o["count"] - int(o.get("filled_seen", 0))
                 crossed = CROSS_EXPIRY and self._cross_expiring(o, unfilled)
                 if not crossed:
-                    self._log_miss(o, unfilled)
+                    self._log_miss(o, unfilled,
+                                   why=("cross_off" if not CROSS_EXPIRY
+                                        else getattr(self, "_cross_why", "")),
+                                   ask=getattr(self, "_cross_ask", 0))
                     if int(o.get("filled_seen", 0)) == 0:
                         self.canceled += 1
                 self._log([now(), "CANCEL", self.mode, o["city"], o["strike"],
@@ -1473,7 +1545,8 @@ class DriftLive:
                 new_oid = (ro.get("order_id") or ro.get("id")
                            or resp.get("order_id") or resp.get("id") or new_oid)
             except Exception:
-                self._log_miss(o, o["count"] - int(o.get("filled_seen", 0)))
+                self._log_miss(o, o["count"] - int(o.get("filled_seen", 0)),
+                               why="requote_rejected")
                 del self.pending[oid]       # canceled but not replaced
                 return False
         if self.client is None:

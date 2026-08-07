@@ -481,3 +481,38 @@ def test_explicit_daily_cap_is_still_honoured_if_set(tmp_path, monkeypatch):
                 ev=f"KXBTCD-26AUG07{h:02d}") for h in range(10, 16)]
     monkeypatch.setattr(cl, "fetch_crypto_mkts", lambda: mkts)
     assert b.place() == 2                  # 3 - 1 already opened today
+
+
+# --- 8/7: crypto miss autopsy (the book had none) ---------------------
+
+def test_expired_crypto_order_is_logged_as_a_miss(tmp_path, monkeypatch):
+    b = _bot(tmp_path, monkeypatch)
+    b.pending = {"o1": {"ticker": "KXBTCD-X", "side": "yes", "entry": 88,
+                        "count": 3, "pside": .88, "band": "core",
+                        "filled_seen": 0,
+                        "ots": "2020-01-01T00:00:00"}}      # ancient
+    b.check_orders()
+    assert b.miss and b.miss[-1]["why"] == "rest_expired"
+    assert b.miss[-1]["count"] == 3 and not b.pending
+
+
+def test_crypto_miss_is_graded_against_settlement(tmp_path, monkeypatch):
+    b = _bot(tmp_path, monkeypatch)
+    b._log_miss({"ticker": "KXBTCD-Y", "side": "yes", "entry": 90,
+                 "count": 2, "pside": .9, "band": "hi"}, 2, "rest_expired")
+    monkeypatch.setattr(cl, "fetch_result", lambda tk: "yes")
+    b.miss_check()
+    r = b.miss[-1]
+    assert r["res"] == "yes" and r["would_pnl"] > 0
+    s = b._miss_summary()
+    assert s["miss_n"] == 1 and s["miss_would_won"] == 1
+    assert s["miss_why"]["rest_expired"]["n"] == 1
+
+
+def test_crypto_miss_ledger_survives_a_restart(tmp_path, monkeypatch):
+    b = _bot(tmp_path, monkeypatch)
+    b._log_miss({"ticker": "KXBTCD-Z", "side": "no", "entry": 84,
+                 "count": 1, "pside": .84, "band": "core"}, 1, "order_vanished")
+    b.save(balance_c=1)
+    b2 = cl.CryptoLive(None, mode="DRY")
+    assert len(b2.miss) == 1 and b2.miss[0]["why"] == "order_vanished"

@@ -250,6 +250,12 @@ class CryptoLive:
         # band instead of being the one unmetered lane.
         self.core = {"w": 0, "l": 0, "pnl": 0.0}
         self.stops = 0                  # realized stop-outs (see stop_check)
+        # 8/7: the crypto book had NO miss ledger at all - an order that
+        # died unfilled just incremented `canceled` and was forgotten, so
+        # the fastest-growing book was the one flying blind on execution.
+        # Every unfilled death is now graded against settlement, exactly
+        # like the weather book's miss autopsy.
+        self.miss = []
         self.load()
 
     # ---- persistence ----
@@ -262,7 +268,7 @@ class CryptoLive:
                 for k in ("bets", "pending", "history", "wins", "losses",
                           "fees_c", "realized_c", "placed", "canceled",
                           "day", "day_pnl_c", "dry_balance_c", "pnl_days",
-                          "hi", "core", "stops"):
+                          "hi", "core", "stops", "miss"):
                     if k in d:
                         setattr(self, k, d[k])
             except Exception:
@@ -313,6 +319,7 @@ class CryptoLive:
                  "history": self.history[-120:],
                  "pnl_days": self.pnl_days,
                  "hi": self.hi, "core": self.core, "stops": self.stops,
+                 "miss": self.miss[-200:],
                  "wins": self.wins, "losses": self.losses,
                  "fees_c": self.fees_c, "realized_c": self.realized_c,
                  "placed": self.placed, "canceled": self.canceled,
@@ -360,6 +367,7 @@ class CryptoLive:
                      "max_day": MAX_PER_DAY,
                      "max_cycle": MAX_PER_CYCLE,
                      "day_tz": "ET",
+                     **self._miss_summary(),
                      "sync_diffs": self.sync_diffs},
                  "open": [dict(b, ticker=tk) for tk, b in self.bets.items()],
                  "settled": list(reversed(self.history[-40:]))}
@@ -491,6 +499,7 @@ class CryptoLive:
                     self._promote(oid, o, filled)
                 elif seen == 0:
                     self.canceled += 1
+                self._log_miss(o, o["count"] - seen - filled, "order_vanished")
                 del self.pending[oid]
                 continue
             if self.client is not None and fills_by_oid is not None:
@@ -511,7 +520,49 @@ class CryptoLive:
                         continue
                 if int(o.get("filled_seen", 0)) == 0:
                     self.canceled += 1
+                self._log_miss(o, o["count"] - int(o.get("filled_seen", 0)),
+                               "rest_expired")
                 del self.pending[oid]
+
+    # ---- miss autopsy (8/7): grade the road not taken --------------
+    def _log_miss(self, o, unfilled, why):
+        if unfilled <= 0:
+            return
+        self.miss.append({"tk": o["ticker"], "side": o["side"],
+                          "entry": o["entry"], "count": int(unfilled),
+                          "band": o.get("band", "core"),
+                          "pside": round(o.get("pside", 0), 3),
+                          "why": why, "cts": now(), "res": None})
+        self.miss = self.miss[-200:]
+
+    def miss_check(self, max_lookups=10):
+        done = 0
+        for row in self.miss:
+            if row.get("res") is not None or done >= max_lookups:
+                continue
+            res = fetch_result(row["tk"])
+            if res is None:
+                continue
+            done += 1
+            won = (res == row["side"])
+            fee = fee_cents(row["entry"], row["count"], taker=True)
+            row["res"] = res
+            row["would_pnl"] = round(
+                (((100 if won else 0) - row["entry"]) * row["count"] - fee)
+                / 100.0, 2)
+
+    def _miss_summary(self):
+        graded = [r for r in self.miss if r.get("res") is not None]
+        why = {}
+        for r in self.miss:
+            a = why.setdefault(r.get("why") or "unknown", {"n": 0})
+            a["n"] += 1
+        return {"miss_n": len(self.miss), "miss_settled": len(graded),
+                "miss_would_won": sum(1 for r in graded
+                                      if r.get("would_pnl", 0) > 0),
+                "miss_cost": round(sum(r.get("would_pnl", 0)
+                                       for r in graded), 2),
+                "miss_why": why}
 
     def _promote(self, oid, o, filled):
         fee = fee_cents(o["entry"], filled, taker=True)
@@ -783,6 +834,7 @@ class CryptoLive:
         self.mirror()
         self.settle()
         self.stop_check()
+        self.miss_check()          # grade unfilled deaths vs settlement
         self.place()
         try:
             bal = self.balance_c()
