@@ -87,6 +87,7 @@ def test_nickel_size_steps_on_proof(tmp_path, monkeypatch):
 
 
 def test_pyramid_add_on_runner(tmp_path, monkeypatch):
+    monkeypatch.setattr(dl, "MIN_CONTRACTS", 1)  # not what this tests
     b3 = _bot(tmp_path, monkeypatch)
     b3.place(mkts=[_mk(bid=80, ask=83)])         # level entry at 80
     tk3 = next(iter(b3.bets))
@@ -187,6 +188,7 @@ def test_evidence_weighted_kelly_fraction(tmp_path, monkeypatch):
 
 def test_proven_bucket_sizes_up(tmp_path, monkeypatch):
     monkeypatch.setattr(dl, 'WX_ALLOC', 1.0)   # cap math, pre-split
+    monkeypatch.setattr(dl, "MIN_CONTRACTS", 1)  # measuring Kelly, not the floor
     b = _bot(tmp_path, monkeypatch)
     b.history = _proven_hist()                 # gate=scale + proven 85-89
     assert b._gate()[0] == "scale"
@@ -200,6 +202,7 @@ def test_proven_bucket_sizes_up(tmp_path, monkeypatch):
 
 
 def test_taker_falls_back_to_maker_when_toll_too_big(tmp_path, monkeypatch):
+    monkeypatch.setattr(dl, "MIN_CONTRACTS", 1)  # not what this tests
     # regression (7/28): scale mode used to Kelly-size takers AT THE ASK,
     # where f*=0 by construction -> every high-mid tight-spread candidate
     # was dropped entirely (no maker join either). Now: edge measured at
@@ -622,3 +625,26 @@ def test_recoverable_is_scored_at_the_refused_ask_not_the_stale_join(
     s = b._miss_summary()
     assert s["miss_recoverable"] < s["miss_cost"]
     assert s["miss_recoverable"] > 0              # but still real money
+
+
+def test_weather_entry_floor_lifts_a_one_lot(tmp_path, monkeypatch):
+    """Kelly asked for 1-2; the fee round-up makes that 12-25% drag."""
+    b = _bot(tmp_path, monkeypatch)
+    monkeypatch.setattr(dl, "MIN_CONTRACTS", 3)
+    ms = [_mk(tk="KXHIGHNY-26JUL-T86", bid=88, ask=89, city="new york",
+              strike=87)]
+    b.place(mkts=ms)
+    if b.bets:
+        assert list(b.bets.values())[0]["count"] >= 3
+
+
+def test_weather_floor_never_breaches_the_bet_cap(tmp_path, monkeypatch):
+    """Filter, not inflator: if 3 lots won't fit the cap, skip."""
+    b = _bot(tmp_path, monkeypatch)
+    monkeypatch.setattr(dl, "MIN_CONTRACTS", 3)
+    monkeypatch.setattr(dl, "DYN_CAPS", False)   # caps are recomputed otherwise
+    b.max_bet_c = 100                       # 89c x 3 = 267 > cap
+    ms = [_mk(tk="KXHIGHNY-26JUL-T86", bid=88, ask=89, city="new york",
+              strike=87)]
+    b.place(mkts=ms)
+    assert not b.bets

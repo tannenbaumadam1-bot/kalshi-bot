@@ -167,6 +167,18 @@ CROSS_MIN_EDGE_C = int(os.environ.get("DRIFT_LIVE_CROSS_MIN_EDGE", "3"))
 # expired joins would have WON ($14.59 forfeited) - on a half-Kelly
 # lane with a tight spread, pay the ask immediately instead of queueing.
 ENTRY_FLOOR = int(os.environ.get("DRIFT_LIVE_ENTRY_FLOOR", "80"))
+# 8/7 FEE-ROUNDING FLOOR (Adam, both books). Kalshi rounds the fee UP to
+# the next whole cent PER ORDER, so a 1-contract fill pays for a cent it
+# never used - at 96c the raw fee is 0.27c but you are charged 1c, 25% of
+# a 4c win against a true drag of 6.7%. Three contracts at 96c pay the
+# SAME 1c. Across the crypto ledger 35% of trades were 1 contract and
+# fees ate 8.4% of gross winnings; the weather book has the same shape.
+# This is a FILTER, never an inflator: if the caps cannot fund
+# MIN_CONTRACTS the trade is skipped, never sized below it. Kelly takes
+# back control on its own once the bankroll is large enough that it asks
+# for >= MIN_CONTRACTS unaided (the max() simply stops binding). Nickels
+# are exempt - their own ladder already sizes well above the floor.
+MIN_CONTRACTS = int(os.environ.get("DRIFT_LIVE_MIN_CONTRACTS", "3"))
 CYCLE_S = int(os.environ.get("DRIFT_LIVE_CYCLE_S", "600"))
 # 8/6: crypto sub-cycle - the crypto book scans every CRYPTO_SUB_S
 # seconds inside the drift book's CYCLE_S nap (hourly markets are too
@@ -511,6 +523,9 @@ class DriftLive:
                     self._cross_why = "nickel_pos_cap"
                     return False
         else:
+            # NB: no MIN_CONTRACTS floor here - this path tops up an order
+            # that may already be partly filled, so lifting the remainder
+            # to the floor would overshoot the position's intended size.
             while size > 1 and ask_s * size > self.max_bet_c:
                 size -= 1
             if ask_s * size > self.max_bet_c:
@@ -1451,10 +1466,9 @@ class DriftLive:
                                    * bankroll // entry)
                     if size < 1:
                         continue
-                while size > 1 and entry * size > self.max_bet_c:
-                    size -= 1
+                size = max(size, MIN_CONTRACTS)   # fee-rounding floor
                 if entry * size > self.max_bet_c:
-                    continue
+                    continue                       # cannot fund it: skip
             if self.open_cost_c() + entry * size > self.max_open_c:
                 continue
             if balance_c - entry * size < self.reserve_c:

@@ -669,3 +669,45 @@ def test_day_roll_clears_the_rebase(tmp_path, monkeypatch):
     b.halt_base_c, b.day_pnl_c, b.day = -900.0, -900.0, "1999-01-01"
     b._roll_day()
     assert b.halt_base_c == 0.0 and b.day_pnl_c == 0.0 and not b.halted
+
+
+# --- 8/7: fee-rounding floor (min 3 contracts) ------------------------
+
+def test_min_contracts_floor_lifts_a_one_lot(tmp_path, monkeypatch):
+    """Kelly asked for 1; the fee round-up makes that 25% drag at 96c."""
+    b = _bot(tmp_path, monkeypatch)
+    b.dry_balance_c = 20000
+    monkeypatch.setattr(cl, "MIN_CONTRACTS", 3)
+    monkeypatch.setattr(cl, "fetch_crypto_mkts", lambda: [_mk(bid=84, ask=86)])
+    # quarter-Kelly on this signal sizes to exactly 1 lot at 86c
+    assert b.place() == 1
+    assert list(b.bets.values())[0]["count"] >= 3
+
+
+def test_floor_is_a_filter_not_an_inflator(tmp_path, monkeypatch):
+    """If the risk caps cannot fund MIN_CONTRACTS the trade is SKIPPED -
+    the floor must never push a position past the bet cap."""
+    b = _bot(tmp_path, monkeypatch)
+    b.dry_balance_c = 20000
+    monkeypatch.setattr(cl, "MIN_CONTRACTS", 3)
+    monkeypatch.setattr(cl.CryptoLive, "_bet_cap_c", lambda self: 150)  # 1 lot
+    monkeypatch.setattr(cl, "fetch_crypto_mkts", lambda: [_mk(bid=84, ask=86)])
+    assert b.place() == 0 and not b.bets
+
+
+def test_kelly_regains_control_above_the_floor(tmp_path, monkeypatch):
+    """Once the bankroll is big enough that Kelly asks for >= the floor,
+    max() stops binding and sizing is Kelly's again."""
+    b = _bot(tmp_path, monkeypatch)
+    b.dry_balance_c = 2000000
+    monkeypatch.setattr(cl, "MIN_CONTRACTS", 3)
+    monkeypatch.setattr(cl, "fetch_crypto_mkts", lambda: [_mk(bid=84, ask=86)])
+    b.place()
+    assert list(b.bets.values())[0]["count"] > 3
+
+
+def test_three_contracts_costs_the_same_fee_as_one_at_96c():
+    """The whole reason for the floor."""
+    from kalshibot.fees import fee_cents
+    assert fee_cents(96, 1, True) == fee_cents(96, 3, True) == 1
+    assert (100 - 96) * 3 - fee_cents(96, 3, True) == 11   # vs 3c on a 1-lot
