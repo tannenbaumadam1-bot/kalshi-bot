@@ -386,7 +386,32 @@ def build_data():
         if not out.get(key):
             continue
         # live marks on this book's positions (same background price cache)
-        dop = out[key].get("open") or []
+        # 8/7 KALSHI-TRUTH VALUATION for the crypto book (Adam: recurring
+        # tracker-vs-app NAV gaps): the internal book settles a position
+        # the instant the outcome is knowable, but the EXCHANGE keeps
+        # listing it until the payout posts minutes later. Valuing the
+        # internal list left every just-settled position counted nowhere
+        # (not a position, cash not yet credited) - a hole that opens
+        # EVERY HOUR now that hourlies trade. So: value and render
+        # Kalshi's own position list (the mirror), merged with internal
+        # rows for entry/name context; internal list is only a fallback
+        # when the mirror has not been written yet.
+        _internal = {(b.get("ticker") or ""): b
+                     for b in (out[key].get("open") or [])}
+        _kp = out[key].get("k_positions")
+        if _kp:
+            dop = []
+            for p in _kp:
+                row = dict(_internal.get(p.get("ticker") or "",
+                                         {"name": p.get("ticker", ""),
+                                          "entry": 0, "ots": ""}))
+                row.update({"ticker": p.get("ticker"),
+                            "side": p.get("side"),
+                            "count": p.get("count", 0)})
+                dop.append(row)
+            out[key]["open"] = dop
+        else:
+            dop = out[key].get("open") or []
         _WANT["tickers"] = (_WANT.get("tickers") or []) +             [b.get("ticker") for b in dop if b.get("ticker")]
         dprices = dict(_PRICES["by_ticker"])
         du, dpriced, dval = 0.0, 0, 0.0
