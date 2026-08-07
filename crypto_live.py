@@ -77,6 +77,8 @@ HI_STEP2_N = int(os.environ.get("CRYPTO_HI_STEP2_N", "20"))
 HI_PCT1 = float(os.environ.get("CRYPTO_HI_PCT1", "0.08"))
 HI_PCT2 = float(os.environ.get("CRYPTO_HI_PCT2", "0.10"))
 HI_BLOCK_N = int(os.environ.get("CRYPTO_HI_BLOCK_N", "8"))
+# 8/7: evidence gate for the core (80-92c) band, mirroring HI_BLOCK_N.
+CORE_BLOCK_N = int(os.environ.get("CRYPTO_CORE_BLOCK_N", "8"))
 MAX_SPREAD = int(os.environ.get("CRYPTO_MAX_SPREAD", "4"))
 MIN_VOL24 = float(os.environ.get("CRYPTO_MIN_VOL24", "500"))
 # 8/6: Kalshi now lists each hourly crypto event only ~60 min before its
@@ -208,6 +210,12 @@ class CryptoLive:
         self.bank_c = 0          # allocated bankroll, refreshed each cycle
         self.pnl_days = {}       # date -> realized $ that day (never trimmed)
         self.hi = {"w": 0, "l": 0, "pnl": 0.0}   # 93-96c probe ledger
+        # 8/7: the core band (80-92c) carried EVERY realized loss in the
+        # era (6 stops, -$7.33) while netting only +$1.16 over 49 bets.
+        # It now gets the same evidence ledger + block rule as the hi
+        # band instead of being the one unmetered lane.
+        self.core = {"w": 0, "l": 0, "pnl": 0.0}
+        self.stops = 0                  # realized stop-outs (see stop_check)
         self.load()
 
     # ---- persistence ----
@@ -220,11 +228,36 @@ class CryptoLive:
                 for k in ("bets", "pending", "history", "wins", "losses",
                           "fees_c", "realized_c", "placed", "canceled",
                           "day", "day_pnl_c", "dry_balance_c", "pnl_days",
-                          "hi"):
+                          "hi", "core", "stops"):
                     if k in d:
                         setattr(self, k, d[k])
             except Exception:
                 pass
+        # 8/7 one-time backfill of the core ledger + stop counter from
+        # the retained history, so the new gate starts with the evidence
+        # the era actually produced instead of an empty slate. Guarded by
+        # its own flag so it can never double-count on a later restart.
+        if not self.core.get("bf") and self.history:
+            core = {"w": 0, "l": 0, "pnl": 0.0, "bf": 1}
+            stops = 0
+            for h in self.history:
+                p = h.get("pnl")
+                if p is None:
+                    continue
+                if h.get("stopped"):
+                    stops += 1
+                if h.get("band", "core") != "core":
+                    continue
+                core["w" if p > 0 else "l"] += 1
+                core["pnl"] = round(core["pnl"] + float(p), 2)
+            self.core = core
+            # the old stop path never touched self.losses, so the era's
+            # headline record understated losses by exactly the number of
+            # stop-outs still visible in history. Fold them in once here;
+            # stop_check counts every stop from now on.
+            self.losses += max(0, stops - self.stops)
+            self.stops = max(self.stops, stops)
+        self.core.setdefault("bf", 1)
         # one-time backfill (history is complete this early in the era;
         # the daily ledger itself is never trimmed - 8/3 lesson)
         if not self.pnl_days and self.history:
@@ -245,7 +278,7 @@ class CryptoLive:
                  "bets": self.bets, "pending": self.pending,
                  "history": self.history[-120:],
                  "pnl_days": self.pnl_days,
-                 "hi": self.hi,
+                 "hi": self.hi, "core": self.core, "stops": self.stops,
                  "wins": self.wins, "losses": self.losses,
                  "fees_c": self.fees_c, "realized_c": self.realized_c,
                  "placed": self.placed, "canceled": self.canceled,
@@ -281,6 +314,14 @@ class CryptoLive:
                             "pct": self._hi_pct(),
                             "n1": HI_STEP1_N, "n2": HI_STEP2_N,
                             "blocked": self._hi_blocked()},
+                     "core": {"w": self.core.get("w", 0),
+                              "l": self.core.get("l", 0),
+                              "pnl": round(self.core.get("pnl", 0.0), 2),
+                              "open": sum(1 for b in self.bets.values()
+                                          if b.get("band", "core") == "core"),
+                              "min": ENTRY_MIN, "max": ENTRY_MAX,
+                              "blocked": self._core_blocked()},
+                     "stops": self.stops,
                      "sync_diffs": self.sync_diffs},
                  "open": [dict(b, ticker=tk) for tk, b in self.bets.items()],
                  "settled": list(reversed(self.history[-40:]))}
@@ -355,6 +396,13 @@ class CryptoLive:
         # weather bucket-routing rule: proven negative = no new entries
         w, l = self.hi.get("w", 0), self.hi.get("l", 0)
         return w + l >= HI_BLOCK_N and self.hi.get("pnl", 0.0) < 0
+
+    def _core_blocked(self):
+        # 8/7: same rule for the 80-92c band. Every loss the era has
+        # taken came from here; if its lifetime net turns negative on
+        # >= CORE_BLOCK_N realized outcomes the lane closes itself.
+        w, l = self.core.get("w", 0), self.core.get("l", 0)
+        return w + l >= CORE_BLOCK_N and self.core.get("pnl", 0.0) < 0
 
     def _open_cap_c(self):
         return int(self.bank_c * OPEN_PCT)
@@ -517,9 +565,19 @@ class CryptoLive:
             self.fees_c += exit_fee
             if self.client is None:
                 self.dry_balance_c += bid * b["count"] - exit_fee
-            if b.get("band") == "hi":
-                self.hi["l"] += 1
-                self.hi["pnl"] = round(self.hi["pnl"] + net / 100.0, 2)
+            # 8/7 TRUTH FIX: a stop-out is a REALIZED outcome and was
+            # never counted in self.wins/self.losses - the headline
+            # record read 125-1 while six positions had been stopped
+            # out for -$7.33. Count every realized exit by P&L sign
+            # (same convention as the weather book's nickel ledger).
+            # kelly_n reads wins+losses, so this also stops the sizing
+            # gate being fed a record that never happened.
+            self.stops += 1
+            self.wins += int(net > 0)
+            self.losses += int(net <= 0)
+            lane = self.hi if b.get("band") == "hi" else self.core
+            lane["w" if net > 0 else "l"] += 1
+            lane["pnl"] = round(lane["pnl"] + net / 100.0, 2)
             self.history.append({"name": b.get("name", tk), "tk": tk,
                                  "side": b["side"], "pside": b["pside"],
                                  "entry": b["entry"], "count": b["count"],
@@ -551,9 +609,9 @@ class CryptoLive:
             self.losses += int(not won)
             if self.client is None:
                 self.dry_balance_c += payout * b["count"]
-            if b.get("band") == "hi":
-                self.hi["w" if won else "l"] += 1
-                self.hi["pnl"] = round(self.hi["pnl"] + net / 100.0, 2)
+            lane = self.hi if b.get("band") == "hi" else self.core
+            lane["w" if won else "l"] += 1
+            lane["pnl"] = round(lane["pnl"] + net / 100.0, 2)
             self.history.append({"name": b.get("name", tk), "tk": tk,
                                  "side": b["side"], "pside": b["pside"],
                                  "entry": b["entry"], "count": b["count"],
@@ -622,8 +680,8 @@ class CryptoLive:
             if e_ask < ENTRY_MIN or e_ask > PROBE_MAX or e_bid < 1:
                 continue
             band = "hi" if e_ask > ENTRY_MAX else "core"
-            if band == "hi" and self._hi_blocked():
-                continue      # proven-negative probe: lane is closed
+            if self._hi_blocked() if band == "hi" else self._core_blocked():
+                continue      # proven-negative lane: closed
             cands.append((smid, mk, side, e_bid, e_ask, band))
         cands.sort(key=lambda c: -c[0])
         placed = 0

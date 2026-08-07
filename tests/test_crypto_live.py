@@ -324,3 +324,92 @@ def test_direct_series_fetch_parses_and_filters(tmp_path, monkeypatch):
     monkeypatch.setattr(cl, "fetch_crypto_mkts", lambda: mkts)
     assert b.place() == 1
     assert b.bets["KXBTCD-26AUG0614-T64000"]["band"] == "core"
+
+
+# --- 8/7 truth fix: stop-outs are realized outcomes -------------------
+
+def _stopped(monkeypatch, bid=12, ask=16):
+    """Force every quote to a collapsed book so stop_check fires."""
+    monkeypatch.setattr(cl.dw.DriftWide, "_quotes",
+                        lambda self, tks: {t: (bid, ask) for t in tks})
+
+    class _N:
+        def __enter__(self):
+            return None
+
+        def __exit__(self, *a):
+            return False
+    monkeypatch.setattr(cl.dcfg, "_cfg", lambda: _N())
+
+
+def test_stop_counts_as_a_loss(tmp_path, monkeypatch):
+    """The old stop path never touched wins/losses - the headline record
+    read 125-1 while six positions had been stopped out for -$7.33."""
+    b = _bot(tmp_path, monkeypatch)
+    _stopped(monkeypatch)
+    b.bets = {"KXT": {"side": "yes", "count": 3, "entry": 88, "pside": .88,
+                      "fee": 0, "band": "core", "ots": "x", "name": "t"}}
+    assert b.stop_check() == 1
+    assert (b.wins, b.losses, b.stops) == (0, 1, 1)
+    assert b.core["l"] == 1 and b.core["pnl"] < 0
+
+
+def test_stop_routes_to_its_own_band(tmp_path, monkeypatch):
+    b = _bot(tmp_path, monkeypatch)
+    _stopped(monkeypatch)
+    b.bets = {"KXH": {"side": "yes", "count": 3, "entry": 95, "pside": .95,
+                      "fee": 0, "band": "hi", "ots": "x", "name": "h"}}
+    b.stop_check()
+    assert b.hi["l"] == 1 and b.core["l"] == 0 and b.losses == 1
+
+
+def test_profitable_exit_counts_as_a_win(tmp_path, monkeypatch):
+    """Realized outcomes count by P&L sign, not by exit reason."""
+    b = _bot(tmp_path, monkeypatch)
+    _stopped(monkeypatch, bid=30, ask=32)
+    b.bets = {"KXP": {"side": "yes", "count": 3, "entry": 10, "pside": .30,
+                      "fee": 0, "band": "core", "ots": "x", "name": "p"}}
+    b.stop_check()
+    assert (b.wins, b.losses) == (1, 0) and b.core["w"] == 1
+
+
+def test_core_ledger_backfills_once_and_survives_restarts(tmp_path,
+                                                          monkeypatch):
+    b = _bot(tmp_path, monkeypatch)
+    b.wins, b.losses = 10, 1
+    b.history = [
+        {"pnl": 0.5, "band": "core"},
+        {"pnl": -0.7, "band": "core", "stopped": True},
+        {"pnl": -1.2, "band": "core", "stopped": True},
+        {"pnl": 0.3, "band": "hi"},
+        {"pnl": None, "band": "core"},          # unsettled: ignored
+    ]
+    b.core = {"w": 0, "l": 0, "pnl": 0.0}       # pre-fix state
+    b.stops = 0
+    b.load()
+    assert b.core["w"] == 1 and b.core["l"] == 2
+    assert b.core["pnl"] == -1.4                # hi row excluded
+    assert b.stops == 2
+    assert b.losses == 3                        # 1 + the 2 uncounted stops
+    for _ in range(3):                          # restart loop
+        b.save(balance_c=1)
+        b = cl.CryptoLive(None, mode="DRY")
+        assert (b.losses, b.stops) == (3, 2), "backfill double-counted"
+
+
+def test_core_band_gate_closes_a_proven_negative_lane(tmp_path, monkeypatch):
+    b = _bot(tmp_path, monkeypatch)
+    b.core = {"w": 2, "l": 6, "pnl": -3.0, "bf": 1}
+    assert b._core_blocked() is True
+    b.core = {"w": 2, "l": 6, "pnl": 1.0, "bf": 1}
+    assert b._core_blocked() is False           # negative net required
+    b.core = {"w": 0, "l": 4, "pnl": -3.0, "bf": 1}
+    assert b._core_blocked() is False           # n < CORE_BLOCK_N
+
+
+def test_blocked_core_band_places_nothing(tmp_path, monkeypatch):
+    b = _bot(tmp_path, monkeypatch)
+    b.dry_balance_c = 20000
+    b.core = {"w": 2, "l": 6, "pnl": -3.0, "bf": 1}
+    monkeypatch.setattr(cl, "fetch_crypto_mkts", lambda: [_mk()])
+    assert b.place() == 0 and not b.bets
