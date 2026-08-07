@@ -638,8 +638,8 @@ def test_weather_entry_floor_lifts_a_one_lot(tmp_path, monkeypatch):
         assert list(b.bets.values())[0]["count"] >= 3
 
 
-def test_weather_floor_never_breaches_the_bet_cap(tmp_path, monkeypatch):
-    """Filter, not inflator: if 3 lots won't fit the cap, skip."""
+def test_weather_floor_overrides_the_bet_cap(tmp_path, monkeypatch):
+    """8/7 (Adam): still trade it, at the floor, rather than skip."""
     b = _bot(tmp_path, monkeypatch)
     monkeypatch.setattr(dl, "MIN_CONTRACTS", 3)
     monkeypatch.setattr(dl, "DYN_CAPS", False)   # caps are recomputed otherwise
@@ -647,4 +647,4 @@ def test_weather_floor_never_breaches_the_bet_cap(tmp_path, monkeypatch):
     ms = [_mk(tk="KXHIGHNY-26JUL-T86", bid=88, ask=89, city="new york",
               strike=87)]
     b.place(mkts=ms)
-    assert not b.bets
+    assert b.bets and list(b.bets.values())[0]["count"] == 3

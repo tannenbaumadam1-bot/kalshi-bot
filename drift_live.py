@@ -173,11 +173,13 @@ ENTRY_FLOOR = int(os.environ.get("DRIFT_LIVE_ENTRY_FLOOR", "80"))
 # a 4c win against a true drag of 6.7%. Three contracts at 96c pay the
 # SAME 1c. Across the crypto ledger 35% of trades were 1 contract and
 # fees ate 8.4% of gross winnings; the weather book has the same shape.
-# This is a FILTER, never an inflator: if the caps cannot fund
-# MIN_CONTRACTS the trade is skipped, never sized below it. Kelly takes
-# back control on its own once the bankroll is large enough that it asks
-# for >= MIN_CONTRACTS unaided (the max() simply stops binding). Nickels
-# are exempt - their own ladder already sizes well above the floor.
+# 8/7 (Adam, revised): the floor OVERRIDES the per-bet cap - every signal
+# the book would have traded still gets traded, at >= MIN_CONTRACTS,
+# rather than being skipped for not fitting the cap. Sizes above the
+# floor still trim to the cap. Balance/reserve and the OPEN cap still
+# bind. Kelly takes back control on its own once the bankroll asks for
+# >= MIN_CONTRACTS unaided. Nickels are exempt - their own ladder
+# already sizes well above the floor.
 MIN_CONTRACTS = int(os.environ.get("DRIFT_LIVE_MIN_CONTRACTS", "3"))
 CYCLE_S = int(os.environ.get("DRIFT_LIVE_CYCLE_S", "600"))
 # 8/6: crypto sub-cycle - the crypto book scans every CRYPTO_SUB_S
@@ -1468,8 +1470,8 @@ class DriftLive:
                     if size < 1:
                         continue
                 size = max(size, MIN_CONTRACTS)   # fee-rounding floor
-                if entry * size > self.max_bet_c:
-                    continue                       # cannot fund it: skip
+                while size > MIN_CONTRACTS and entry * size > self.max_bet_c:
+                    size -= 1                      # trim ABOVE the floor only
             if self.open_cost_c() + entry * size > self.max_open_c:
                 continue
             if balance_c - entry * size < self.reserve_c:

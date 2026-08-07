@@ -137,10 +137,13 @@ MAX_PER_CYCLE = int(os.environ.get("CRYPTO_MAX_PER_CYCLE", "15"))
 # 96c the raw fee is 0.27c but you are charged 1c - 25% of a 4c win, ~4x
 # the true 6.7% drag. Three contracts at 96c pay the SAME 1c. Live proof:
 # 35% of all trades were 1 contract and fees ate 8.4% of gross winnings.
-# The floor is a FILTER, never an inflator - if the risk caps cannot fund
-# MIN_CONTRACTS the trade is skipped, never sized down below it. Kelly
-# resumes control automatically once the bankroll is large enough that it
-# asks for >= MIN_CONTRACTS on its own (max() stops binding).
+# 8/7 (Adam, revised): the floor OVERRIDES the per-bet cap. Every signal
+# the book would have traded still gets traded - at >= MIN_CONTRACTS -
+# rather than being skipped for not fitting the cap. Sizes above the
+# floor still trim to the cap; the floor itself never trims and never
+# skips. Balance/reserve and the OPEN cap still bind (those stop the book
+# overdrawing or overexposing in aggregate). Kelly resumes control
+# automatically once the bankroll asks for >= MIN_CONTRACTS unaided.
 MIN_CONTRACTS = int(os.environ.get("CRYPTO_MIN_CONTRACTS", "3"))
 REST_MAX_MIN = float(os.environ.get("CRYPTO_REST_MAX_MIN", "30"))
 # COMPOUNDING LADDER (8/3, Adam): the bankroll side already compounds -
@@ -909,8 +912,8 @@ class CryptoLive:
             if size < 1:
                 continue
             size = max(size, MIN_CONTRACTS)      # fee-rounding floor
-            if e_ask * size > cap_c:
-                continue                          # cannot fund it: skip
+            while size > MIN_CONTRACTS and e_ask * size > cap_c:
+                size -= 1                        # trim ABOVE the floor only
             if self.open_cost_c() + e_ask * size > self._open_cap_c():
                 continue
             if balance_c - e_ask * size < RESERVE_C:

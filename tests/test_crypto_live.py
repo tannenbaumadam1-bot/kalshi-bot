@@ -684,15 +684,29 @@ def test_min_contracts_floor_lifts_a_one_lot(tmp_path, monkeypatch):
     assert list(b.bets.values())[0]["count"] >= 3
 
 
-def test_floor_is_a_filter_not_an_inflator(tmp_path, monkeypatch):
-    """If the risk caps cannot fund MIN_CONTRACTS the trade is SKIPPED -
-    the floor must never push a position past the bet cap."""
+def test_floor_overrides_the_per_bet_cap(tmp_path, monkeypatch):
+    """8/7 (Adam): keep trading everything it traded before, just at >= 3
+    lots. A signal that no longer fits the per-bet cap is STILL TAKEN at
+    the floor rather than skipped."""
     b = _bot(tmp_path, monkeypatch)
     b.dry_balance_c = 20000
     monkeypatch.setattr(cl, "MIN_CONTRACTS", 3)
     monkeypatch.setattr(cl.CryptoLive, "_bet_cap_c", lambda self: 150)  # 1 lot
     monkeypatch.setattr(cl, "fetch_crypto_mkts", lambda: [_mk(bid=84, ask=86)])
-    assert b.place() == 0 and not b.bets
+    assert b.place() == 1
+    assert list(b.bets.values())[0]["count"] == 3
+
+
+def test_sizes_above_the_floor_still_trim_to_the_cap(tmp_path, monkeypatch):
+    """Only the floor is exempt - Kelly sizes above it still respect it."""
+    b = _bot(tmp_path, monkeypatch)
+    b.dry_balance_c = 2000000
+    monkeypatch.setattr(cl, "MIN_CONTRACTS", 3)
+    monkeypatch.setattr(cl.CryptoLive, "_bet_cap_c", lambda self: 860)  # 10 lots
+    monkeypatch.setattr(cl, "fetch_crypto_mkts", lambda: [_mk(bid=84, ask=86)])
+    b.place()
+    n = list(b.bets.values())[0]["count"]
+    assert 3 <= n <= 10 and 86 * n <= 860
 
 
 def test_kelly_regains_control_above_the_floor(tmp_path, monkeypatch):
