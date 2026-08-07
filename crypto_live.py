@@ -93,7 +93,7 @@ CORE_BLOCK_N = int(os.environ.get("CRYPTO_CORE_BLOCK_N", "8"))
 # the GATE reads a per-era ledger that starts fresh when the config
 # changes materially. Bump this string to re-arm the lanes; never edit
 # the lifetime numbers.
-GATE_ERA = os.environ.get("CRYPTO_GATE_ERA", "g2-nodouble-nostop")
+GATE_ERA = os.environ.get("CRYPTO_GATE_ERA", "g3-halt-deadlock-fix")
 MAX_SPREAD = int(os.environ.get("CRYPTO_MAX_SPREAD", "4"))
 MIN_VOL24 = float(os.environ.get("CRYPTO_MIN_VOL24", "500"))
 # 8/6: Kalshi now lists each hourly crypto event only ~60 min before its
