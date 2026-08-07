@@ -32,6 +32,11 @@ import datetime
 import json
 import os
 
+try:
+    from zoneinfo import ZoneInfo
+except Exception:                              # py<3.9 / missing tzdata
+    ZoneInfo = None
+
 import requests
 
 import drift_wide as dw
@@ -92,7 +97,18 @@ MIN_VOL24 = float(os.environ.get("CRYPTO_MIN_VOL24", "500"))
 HOURLY_H = float(os.environ.get("CRYPTO_HOURLY_H", "1.5"))
 MIN_VOL24_LATE = float(os.environ.get("CRYPTO_MIN_VOL24_LATE", "0"))
 STOP_C = float(os.environ.get("CRYPTO_STOP_C", "35"))
-MAX_PER_DAY = int(os.environ.get("CRYPTO_MAX_PER_DAY", "40"))
+# 8/7 (Adam-approved): the daily ORDER-COUNT cap is retired. It was not
+# a risk control - open exposure is bounded by OPEN_PCT of bank and the
+# day is stopped by the daily-loss halt - but it WAS a selection bias:
+# the counter refilled at 00:00 UTC, the 8pm-midnight ET hourlies ate all
+# 40 slots by 04:00 UTC (39/40 on both 8/6 and 8/7), and every daytime
+# market after that was invisible no matter how good. 0 = unlimited.
+MAX_PER_DAY = int(os.environ.get("CRYPTO_MAX_PER_DAY", "0"))
+# What replaces it is a per-CYCLE ceiling, which is runaway protection
+# rather than an opportunity budget: a normal cycle sees ~9 distinct
+# events, so this never binds in ordinary operation - it only stops a
+# bad feed or a bug from firing hundreds of orders in one pass.
+MAX_PER_CYCLE = int(os.environ.get("CRYPTO_MAX_PER_CYCLE", "15"))
 REST_MAX_MIN = float(os.environ.get("CRYPTO_REST_MAX_MIN", "30"))
 # COMPOUNDING LADDER (8/3, Adam): the bankroll side already compounds -
 # bank = 50% of account NAV, refreshed EVERY cycle, so every settled win
@@ -180,7 +196,25 @@ def now():
 
 
 def today():
-    return datetime.date.today().isoformat()
+    """8/7: the trading day rolls at midnight ET, not 00:00 UTC.
+
+    The droplet runs UTC, so the old day boundary landed at 8pm ET -
+    mid-session. Combined with the daily order cap that meant the budget
+    refilled every evening, was spent on the 8pm-midnight ET hourlies,
+    and every US-daytime market (Adam's 10am/11am/12pm/1pm) arrived with
+    the day already exhausted. The day-loss halt reset at 8pm too.
+    """
+    return _et_now().date().isoformat()
+
+
+def _et_now():
+    n = datetime.datetime.now(datetime.timezone.utc)
+    if ZoneInfo is not None:
+        try:
+            return n.astimezone(ZoneInfo("America/New_York"))
+        except Exception:
+            pass
+    return n - datetime.timedelta(hours=5)   # EST fallback, never crashes
 
 
 def _weather_prefixes():
@@ -322,6 +356,10 @@ class CryptoLive:
                               "min": ENTRY_MIN, "max": ENTRY_MAX,
                               "blocked": self._core_blocked()},
                      "stops": self.stops,
+                     "today_n": self._placed_today(),
+                     "max_day": MAX_PER_DAY,
+                     "max_cycle": MAX_PER_CYCLE,
+                     "day_tz": "ET",
                      "sync_diffs": self.sync_diffs},
                  "open": [dict(b, ticker=tk) for tk, b in self.bets.items()],
                  "settled": list(reversed(self.history[-40:]))}
@@ -651,7 +689,8 @@ class CryptoLive:
                         mkts = dw.find_wide_markets()
                 except Exception:
                     return 0
-        budget = MAX_PER_DAY - self._placed_today()
+        budget = (MAX_PER_DAY - self._placed_today() if MAX_PER_DAY > 0
+                  else MAX_PER_CYCLE)
         ev_keys = {b.get("event", "") for b in
                    list(self.bets.values()) + list(self.pending.values())}
         pend_tks = {o["ticker"] for o in self.pending.values()}

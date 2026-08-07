@@ -413,3 +413,71 @@ def test_blocked_core_band_places_nothing(tmp_path, monkeypatch):
     b.core = {"w": 2, "l": 6, "pnl": -3.0, "bf": 1}
     monkeypatch.setattr(cl, "fetch_crypto_mkts", lambda: [_mk()])
     assert b.place() == 0 and not b.bets
+
+
+# --- 8/7: daily order cap retired + ET trading day ---------------------
+
+def test_trading_day_rolls_at_midnight_et_not_utc(monkeypatch):
+    """00:00-04:00 UTC is still the PREVIOUS ET day. Under the old UTC
+    boundary the counter refilled at 8pm ET and the evening hourlies ate
+    the whole budget before the US daytime markets ever opened."""
+    import datetime as _dt
+
+    class _FakeDT(_dt.datetime):
+        _now = None
+
+        @classmethod
+        def now(cls, tz=None):
+            return cls._now.astimezone(tz) if tz else cls._now
+
+    monkeypatch.setattr(cl.datetime, "datetime", _FakeDT)
+
+    # 01:30 UTC on Aug 8 == 21:30 ET on Aug 7 -> still Aug 7
+    _FakeDT._now = _dt.datetime(2026, 8, 8, 1, 30, tzinfo=_dt.timezone.utc)
+    assert cl.today() == "2026-08-07"
+    # 05:30 UTC on Aug 8 == 01:30 ET on Aug 8 -> now it rolls
+    _FakeDT._now = _dt.datetime(2026, 8, 8, 5, 30, tzinfo=_dt.timezone.utc)
+    assert cl.today() == "2026-08-08"
+    # midday ET is unambiguous either way
+    _FakeDT._now = _dt.datetime(2026, 8, 7, 16, 0, tzinfo=_dt.timezone.utc)
+    assert cl.today() == "2026-08-07"
+
+
+def test_no_daily_cap_so_a_busy_morning_cannot_blind_the_afternoon(
+        tmp_path, monkeypatch):
+    """39 bets already opened today used to leave 1 slot for the rest of
+    the day. With MAX_PER_DAY=0 the day's history is irrelevant."""
+    b = _bot(tmp_path, monkeypatch)
+    b.dry_balance_c = 50000
+    b.history = [{"ots": cl.today() + "T01:00:00", "pnl": 0.1}
+                 for _ in range(39)]
+    monkeypatch.setattr(cl, "MAX_PER_DAY", 0)
+    monkeypatch.setattr(cl, "MAX_PER_CYCLE", 15)
+    mkts = [_mk(tk=f"KXBTCD-26AUG07{h:02d}-T64000",
+                ev=f"KXBTCD-26AUG07{h:02d}") for h in range(10, 16)]
+    monkeypatch.setattr(cl, "fetch_crypto_mkts", lambda: mkts)
+    assert b._placed_today() == 39
+    assert b.place() == len(mkts)          # every distinct event taken
+
+
+def test_per_cycle_ceiling_still_stops_a_runaway(tmp_path, monkeypatch):
+    b = _bot(tmp_path, monkeypatch)
+    b.dry_balance_c = 500000
+    monkeypatch.setattr(cl, "MAX_PER_DAY", 0)
+    monkeypatch.setattr(cl, "MAX_PER_CYCLE", 5)
+    mkts = [_mk(tk=f"KXBTCD-26AUG07{h:02d}-T64000",
+                ev=f"KXBTCD-26AUG07{h:02d}") for h in range(0, 40)]
+    monkeypatch.setattr(cl, "fetch_crypto_mkts", lambda: mkts)
+    assert b.place() == 5
+
+
+def test_explicit_daily_cap_is_still_honoured_if_set(tmp_path, monkeypatch):
+    """The env override has to keep working - it's the rollback path."""
+    b = _bot(tmp_path, monkeypatch)
+    b.dry_balance_c = 50000
+    monkeypatch.setattr(cl, "MAX_PER_DAY", 3)
+    b.history = [{"ots": cl.today() + "T01:00:00", "pnl": 0.1}]
+    mkts = [_mk(tk=f"KXBTCD-26AUG07{h:02d}-T64000",
+                ev=f"KXBTCD-26AUG07{h:02d}") for h in range(10, 16)]
+    monkeypatch.setattr(cl, "fetch_crypto_mkts", lambda: mkts)
+    assert b.place() == 2                  # 3 - 1 already opened today
