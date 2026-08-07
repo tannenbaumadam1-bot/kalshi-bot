@@ -725,3 +725,66 @@ def test_three_contracts_costs_the_same_fee_as_one_at_96c():
     from kalshibot.fees import fee_cents
     assert fee_cents(96, 1, True) == fee_cents(96, 3, True) == 1
     assert (100 - 96) * 3 - fee_cents(96, 3, True) == 11   # vs 3c on a 1-lot
+
+
+# --- 8/7: sync_diffs must never go stale -----------------------------
+
+class _FakeClient:
+    def __init__(self, positions): self._p = positions
+    def get_positions(self): return self._p
+    def get_resting_orders(self): return []
+    def get_fills(self, **k): return []
+    def get_balance_cents(self): return 100000
+
+
+def _pos(tk, n): return {"ticker": tk, "position_fp": str(n)}
+
+
+def test_sync_diffs_reports_zero_when_books_agree(tmp_path, monkeypatch):
+    b = _bot(tmp_path, monkeypatch)
+    b.client = _FakeClient([_pos("KXBTCD-X", -3)])       # negative = NO side
+    b.bets = {"KXBTCD-X": {"side": "no", "count": 3, "entry": 90, "fee": 0}}
+    b.mirror()
+    assert b._sync_diffs() == 0 and b.sync_bad == []
+
+
+def test_sync_diffs_names_a_real_divergence(tmp_path, monkeypatch):
+    b = _bot(tmp_path, monkeypatch)
+    b.client = _FakeClient([_pos("KXBTCD-X", -3), _pos("KXETHD-Y", 2)])
+    b.bets = {"KXBTCD-X": {"side": "no", "count": 5, "entry": 90, "fee": 0}}
+    b.mirror()
+    assert b._sync_diffs() == 2                  # wrong count + one missing
+    names = {r["tk"] for r in b.sync_bad}
+    assert names == {"KXBTCD-X", "KXETHD-Y"}
+    row = next(r for r in b.sync_bad if r["tk"] == "KXBTCD-X")
+    assert row["kalshi"] == ("no", 3) and row["book"] == ("no", 5)
+
+
+def test_sync_diffs_cannot_freeze_when_a_bet_is_malformed(tmp_path,
+                                                          monkeypatch):
+    """The actual 8/7 bug: mirror() assigned k_positions BEFORE the diff
+    count and swallowed every exception, so one bad row froze the metric
+    at a stale value while positions kept refreshing."""
+    b = _bot(tmp_path, monkeypatch)
+    b.client = _FakeClient([_pos("KXBTCD-X", -3)])
+    b.sync_diffs = 3                                   # stale value
+    b.bets = {"KXBTCD-X": {"side": "no", "count": None, "entry": 90}}
+    b.mirror()
+    assert b._sync_diffs() == 1                        # counted, not frozen
+    b.bets = {"KXBTCD-X": {"side": "no", "count": 3, "entry": 90, "fee": 0}}
+    b.mirror()
+    assert b._sync_diffs() == 0                        # and it clears
+
+
+def test_sync_diffs_is_computed_at_save_not_carried(tmp_path, monkeypatch):
+    """It must reflect the positions the payload actually publishes."""
+    import json as _json
+    b = _bot(tmp_path, monkeypatch)
+    b.client = _FakeClient([_pos("KXBTCD-X", -3)])
+    b.sync_diffs = 99                                  # poisoned
+    b.bets = {"KXBTCD-X": {"side": "no", "count": 3, "entry": 90, "fee": 0}}
+    b.mirror()
+    b.save(balance_c=1000)
+    d = _json.load(open(cl.STATE))
+    assert d["summary"]["sync_diffs"] == 0
+    assert d["summary"]["sync_bad"] == []

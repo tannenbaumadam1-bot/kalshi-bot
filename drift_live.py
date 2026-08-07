@@ -283,6 +283,7 @@ class DriftLive:
         self.day_nav0_c = None   # NAV anchor at day start (for true today-P&L)
         self.autopsy = []        # every exit, graded vs eventual settlement
         self.miss = []           # every unfilled cancel, graded vs settlement
+        self.sync_bad = []       # the actual mismatched tickers, if any
         self.exec_stats = {}     # maker/taker placed+filled, requotes
         self.k_positions = []    # Kalshi's positions, verbatim (the display)
         self.k_resting = []      # Kalshi's resting orders, verbatim
@@ -624,11 +625,21 @@ class DriftLive:
         0 = perfect mirror; anything else is displayed loudly, never hidden."""
         if self.client is None:
             return None
-        kp = {r["ticker"]: (r["side"], r["count"]) for r in self.k_positions}
-        diffs = sum(1 for tk, b in self.bets.items()
-                    if kp.get(tk) != (b.get("side"), int(b.get("count", 0))))
-        diffs += sum(1 for tk in kp if tk not in self.bets)
-        return diffs
+        def norm(side, count):
+            try:
+                return (side, int(count or 0))
+            except (TypeError, ValueError):
+                return (side, 0)
+        kp = {r.get("ticker"): norm(r.get("side"), r.get("count"))
+              for r in (self.k_positions or [])}
+        mine = {tk: norm(b.get("side"), b.get("count"))
+                for tk, b in self.bets.items()}
+        bad = sorted(tk for tk in set(kp) | set(mine)
+                     if kp.get(tk) != mine.get(tk))
+        # 8/7: name the offenders - a bare count is not actionable
+        self.sync_bad = [{"tk": tk, "kalshi": kp.get(tk), "book": mine.get(tk)}
+                         for tk in bad[:10]]
+        return len(bad)
 
     def save(self, balance_c=None):
         os.makedirs("logs", exist_ok=True)

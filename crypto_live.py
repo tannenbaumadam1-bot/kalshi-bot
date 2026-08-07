@@ -308,6 +308,7 @@ class CryptoLive:
         self.halted = False
         self.k_positions = []
         self.sync_diffs = None
+        self.sync_bad = []      # the actual mismatched tickers, if any
         self.dry_balance_c = 10000
         self.bank_c = 0          # allocated bankroll, refreshed each cycle
         self.pnl_days = {}       # date -> realized $ that day (never trimmed)
@@ -469,7 +470,8 @@ class CryptoLive:
                      "day_tz": "ET",
                      "min_ct": MIN_CONTRACTS,
                      **self._miss_summary(),
-                     "sync_diffs": self.sync_diffs},
+                     "sync_diffs": self._sync_diffs(),
+                     "sync_bad": self.sync_bad},
                  "open": [dict(b, ticker=tk) for tk, b in self.bets.items()],
                  "settled": list(reversed(self.history[-40:]))}
             json.dump(d, open(STATE, "w"))
@@ -719,15 +721,43 @@ class CryptoLive:
                            "side": "yes" if pos > 0 else "no",
                            "count": abs(pos)})
             self.k_positions = kp
-            mine = {tk: (b["side"], int(b["count"]))
-                    for tk, b in self.bets.items()}
-            diffs = sum(1 for r in kp
-                        if mine.get(r["ticker"]) != (r["side"], r["count"]))
-            diffs += sum(1 for tk in mine
-                         if tk not in {r["ticker"] for r in kp})
-            self.sync_diffs = diffs
         except Exception:
             pass
+
+    def _sync_diffs(self):
+        """How far our book diverges from Kalshi's positions.
+
+        8/7 FIX: this used to be a value STORED inside mirror(), assigned
+        AFTER self.k_positions and inside a bare `except Exception: pass`.
+        Two ways that lied: (a) anything throwing in between left the
+        counter frozen at a stale number while positions refreshed, and
+        (b) mirror() runs before settle()/place(), so the stored value was
+        always a phase behind the bets the payload then serialised. It
+        read 3 for hours while the books matched 10/10 exactly.
+
+        Now it is COMPUTED AT SAVE TIME from the same two structures the
+        payload publishes, so the number can never disagree with the data
+        shown next to it. Reads defensively - a malformed bet can no
+        longer take the whole calculation down. 0 = perfect mirror.
+        """
+        if self.client is None:
+            return None
+        def norm(side, count):
+            try:
+                return (side, int(count or 0))
+            except (TypeError, ValueError):
+                return (side, 0)
+        kp = {r.get("ticker"): norm(r.get("side"), r.get("count"))
+              for r in (self.k_positions or [])}
+        mine = {tk: norm(b.get("side"), b.get("count"))
+                for tk, b in self.bets.items()}
+        bad = sorted(tk for tk in set(kp) | set(mine)
+                     if kp.get(tk) != mine.get(tk))
+        # name the offenders, so a real divergence is diagnosable instead
+        # of being a bare count nobody can act on
+        self.sync_bad = [{"tk": tk, "kalshi": kp.get(tk), "book": mine.get(tk)}
+                         for tk in bad[:10]]
+        return len(bad)
 
     def stop_check(self):
         if not STOP_ON:
