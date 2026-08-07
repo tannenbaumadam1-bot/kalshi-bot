@@ -464,6 +464,7 @@ class CryptoLive:
                      "max_day": MAX_PER_DAY,
                      "max_cycle": MAX_PER_CYCLE,
                      "day_tz": "ET",
+                     "min_ct": MIN_CONTRACTS,
                      **self._miss_summary(),
                      "sync_diffs": self.sync_diffs},
                  "open": [dict(b, ticker=tk) for tk, b in self.bets.items()],

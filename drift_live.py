@@ -695,6 +695,7 @@ class DriftLive:
                           "halt": round(self.max_day_loss_c / 100.0, 2),
                           "dyn": DYN_CAPS, "floor": ENTRY_FLOOR,
                           "chase": CHASE_MAX_E, "rest_h": REST_MAX_H,
+                          "min_ct": MIN_CONTRACTS,
                           "bet_pct": getattr(self, "bet_pct_now", BET_PCT)},
                  **self._autopsy_summary(),
                  **self._miss_summary(),
