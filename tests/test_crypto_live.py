@@ -73,12 +73,17 @@ def test_15_minute_series_excluded(tmp_path, monkeypatch):
 def test_one_bet_per_event(tmp_path, monkeypatch):
     b = _bot(tmp_path, monkeypatch)
     b.dry_balance_c = 20000
-    ms = [_mk(tk="A1", ev="EV1", bid=84, ask=86),
-          _mk(tk="A2", ev="EV1", bid=85, ask=87)]
-    assert b.place(mkts=ms) == 1                      # ladder = one opinion
+    # 8/7: dedup is per (coin, settlement hour) - a strike ladder on one
+    # coin/hour is still ONE opinion however many event tickers it spans
+    ms = [_mk(tk="KXBTC-26AUG0317-B64000", ev="KXBTC-26AUG0317",
+              bid=84, ask=86),
+          _mk(tk="KXBTCD-26AUG0317-T63999", ev="KXBTCD-26AUG0317",
+              bid=85, ask=87)]
+    assert b.place(mkts=ms) == 1
 
 
 def test_stop_35_no_trail(tmp_path, monkeypatch):
+    monkeypatch.setattr(cl, "STOP_ON", True)
     b = _bot(tmp_path, monkeypatch)
     b.dry_balance_c = 20000
     b.place(mkts=[_mk()])
@@ -139,6 +144,7 @@ def test_bank_compounds_with_account_nav(tmp_path, monkeypatch):
 
 
 def test_daily_pnl_ledger_never_trims(tmp_path, monkeypatch):
+    monkeypatch.setattr(cl, "STOP_ON", True)
     # 8/3: weekly/monthly perf derives from pnl_days, which must survive
     # the history[-120:] trim - one float per date, forever
     b = _bot(tmp_path, monkeypatch)
@@ -217,20 +223,26 @@ def test_hi_ladder_steps_on_evidence(tmp_path, monkeypatch):
     b.refresh_bank(b.balance_c())
     assert b._hi_pct() == cl.BET_PCT_BOOST            # 0 settled: base 6%
     b.hi = {"w": 9, "l": 0, "pnl": 0.55}
+    b.hi_g = dict({"w": 9, "l": 0, "pnl": 0.55})
     assert b._hi_pct() == cl.BET_PCT_BOOST            # 9 settled: not yet
     b.hi = {"w": 10, "l": 0, "pnl": 0.6}
+    b.hi_g = dict({"w": 10, "l": 0, "pnl": 0.6})
     assert b._hi_pct() == cl.HI_PCT1                  # 10 net+: 8%
     assert b._hi_cap_c() == int(b.bank_c * cl.HI_PCT1)
     b.hi = {"w": 19, "l": 1, "pnl": 0.7}
+    b.hi_g = dict({"w": 19, "l": 1, "pnl": 0.7})
     assert b._hi_pct() == cl.HI_PCT2                  # 20 net+: full 10%
     b.hi = {"w": 19, "l": 1, "pnl": -0.10}
+    b.hi_g = dict({"w": 19, "l": 1, "pnl": -0.10})
     assert b._hi_pct() == cl.BET_PCT_BOOST            # net<=0: raise revoked
     b.hi = {"w": 20, "l": 0, "pnl": 0.0}
+    b.hi_g = dict({"w": 20, "l": 0, "pnl": 0.0})
     assert b._hi_pct() == cl.BET_PCT_BOOST            # zero net is not proof
     # ladder never sizes BELOW base: at >=$300 NAV base is 3%, steps hold
     b.dry_balance_c = 40000
     b.refresh_bank(b.balance_c())
     b.hi = {"w": 10, "l": 0, "pnl": 0.6}
+    b.hi_g = dict({"w": 10, "l": 0, "pnl": 0.6})
     assert b._hi_pct() == cl.HI_PCT1
     # core band is untouched by the hi ledger
     assert b._bet_pct() == cl.BET_PCT
@@ -242,11 +254,13 @@ def test_hi_block_closes_lane_when_proven_negative(tmp_path, monkeypatch):
     b = _bot(tmp_path, monkeypatch)
     b.dry_balance_c = 20000
     b.hi = {"w": 3, "l": 5, "pnl": -1.20}
+    b.hi_g = dict({"w": 3, "l": 5, "pnl": -1.20})
     assert b._hi_blocked()
     assert b.place(mkts=[_mk(tk="HB1", ev="EHB1", bid=93, ask=95)]) == 0
     assert b.place(mkts=[_mk(tk="CB1", ev="ECB1", bid=84, ask=86)]) == 1
     # not blocked while n<8 even if temporarily negative (still learning)
     b.hi = {"w": 2, "l": 3, "pnl": -0.60}
+    b.hi_g = dict({"w": 2, "l": 3, "pnl": -0.60})
     assert not b._hi_blocked()
     assert b.place(mkts=[_mk(tk="HB2", ev="EHB2", bid=93, ask=95)]) == 1
     # ladder state is published for the tracker
@@ -329,7 +343,9 @@ def test_direct_series_fetch_parses_and_filters(tmp_path, monkeypatch):
 # --- 8/7 truth fix: stop-outs are realized outcomes -------------------
 
 def _stopped(monkeypatch, bid=12, ask=16):
-    """Force every quote to a collapsed book so stop_check fires."""
+    """Force every quote to a collapsed book so stop_check fires.
+    8/7: the stop is retired by default, so these tests opt back in."""
+    monkeypatch.setattr(cl, "STOP_ON", True)
     monkeypatch.setattr(cl.dw.DriftWide, "_quotes",
                         lambda self, tks: {t: (bid, ask) for t in tks})
 
@@ -400,10 +416,13 @@ def test_core_ledger_backfills_once_and_survives_restarts(tmp_path,
 def test_core_band_gate_closes_a_proven_negative_lane(tmp_path, monkeypatch):
     b = _bot(tmp_path, monkeypatch)
     b.core = {"w": 2, "l": 6, "pnl": -3.0, "bf": 1}
+    b.core_g = dict({"w": 2, "l": 6, "pnl": -3.0, "bf": 1})
     assert b._core_blocked() is True
     b.core = {"w": 2, "l": 6, "pnl": 1.0, "bf": 1}
+    b.core_g = dict({"w": 2, "l": 6, "pnl": 1.0, "bf": 1})
     assert b._core_blocked() is False           # negative net required
     b.core = {"w": 0, "l": 4, "pnl": -3.0, "bf": 1}
+    b.core_g = dict({"w": 0, "l": 4, "pnl": -3.0, "bf": 1})
     assert b._core_blocked() is False           # n < CORE_BLOCK_N
 
 
@@ -411,6 +430,7 @@ def test_blocked_core_band_places_nothing(tmp_path, monkeypatch):
     b = _bot(tmp_path, monkeypatch)
     b.dry_balance_c = 20000
     b.core = {"w": 2, "l": 6, "pnl": -3.0, "bf": 1}
+    b.core_g = dict({"w": 2, "l": 6, "pnl": -3.0, "bf": 1})
     monkeypatch.setattr(cl, "fetch_crypto_mkts", lambda: [_mk()])
     assert b.place() == 0 and not b.bets
 
@@ -516,3 +536,92 @@ def test_crypto_miss_ledger_survives_a_restart(tmp_path, monkeypatch):
     b.save(balance_c=1)
     b2 = cl.CryptoLive(None, mode="DRY")
     assert len(b2.miss) == 1 and b2.miss[0]["why"] == "order_vanished"
+
+
+# --- 8/7: the doubling bug, the retired stop, the gate era ------------
+
+def test_band_and_threshold_markets_share_one_underlying_key():
+    """The 8/7 loss: KXETH (bands) and KXETHD (thresholds) are separate
+    EVENTS but the same coin at the same instant."""
+    assert (cl.underlying_key("KXETH-26AUG0713-B1907")
+            == cl.underlying_key("KXETHD-26AUG0713-T1909.99")
+            == ("ETH", "26AUG0713"))
+    assert (cl.underlying_key("KXSOLE-26AUG0713-B74.375")
+            == cl.underlying_key("KXSOLD-26AUG0713-T73.7499"))
+    assert (cl.underlying_key("KXDOGE-26AUG0713-B0.072")
+            == cl.underlying_key("KXDOGED-26AUG0713-T0.0699999"))
+    # different HOURS on one coin stay independent
+    assert (cl.underlying_key("KXXRPD-26AUG0713-T1.0199")
+            != cl.underlying_key("KXXRPD-26AUG0717-T1.0199"))
+    # an unknown series never silently merges with a known one
+    assert cl.underlying_key("KXNEWCOIN-26AUG0713-T1")[0] != "BTC"
+
+
+def test_only_one_bet_per_coin_hour(tmp_path, monkeypatch):
+    """Replays the exact 8/7 pairs: the book must take ONE of each."""
+    b = _bot(tmp_path, monkeypatch)
+    b.dry_balance_c = 50000
+    mkts = [_mk(tk="KXETH-26AUG0713-B1907", ev="KXETH-26AUG0713"),
+            _mk(tk="KXETHD-26AUG0713-T1909.99", ev="KXETHD-26AUG0713"),
+            _mk(tk="KXXRP-26AUG0713-B1.02", ev="KXXRP-26AUG0713"),
+            _mk(tk="KXXRPD-26AUG0713-T1.0199", ev="KXXRPD-26AUG0713"),
+            _mk(tk="KXXRPD-26AUG0717-T1.0199", ev="KXXRPD-26AUG0717")]
+    monkeypatch.setattr(cl, "fetch_crypto_mkts", lambda: mkts)
+    assert b.place() == 3               # ETH 1pm, XRP 1pm, XRP 5pm
+    held = list(b.bets) + [o["ticker"] for o in b.pending.values()]
+    keys = {cl.underlying_key(t) for t in held}
+    assert keys == {("ETH", "26AUG0713"), ("XRP", "26AUG0713"),
+                    ("XRP", "26AUG0717")}
+
+
+def test_existing_position_blocks_the_other_market_on_that_coin(
+        tmp_path, monkeypatch):
+    b = _bot(tmp_path, monkeypatch)
+    b.dry_balance_c = 50000
+    b.bets = {"KXETH-26AUG0713-B1907": {"side": "no", "entry": 96,
+                                        "count": 3, "pside": .96,
+                                        "band": "hi", "fee": 0}}
+    monkeypatch.setattr(cl, "fetch_crypto_mkts",
+                        lambda: [_mk(tk="KXETHD-26AUG0713-T1909.99",
+                                     ev="KXETHD-26AUG0713")])
+    assert b.place() == 0
+
+
+def test_stop_is_retired_by_default(tmp_path, monkeypatch):
+    """96c -> 1c gave no protection; 5pm legs were cut with hours left."""
+    b = _bot(tmp_path, monkeypatch)
+    b.bets = {"KXT": {"side": "yes", "count": 3, "entry": 96, "pside": .96,
+                      "fee": 0, "band": "hi", "ots": "x", "name": "t"}}
+    monkeypatch.setattr(cl.dw.DriftWide, "_quotes",
+                        lambda self, tks: {t: (1, 3) for t in tks})
+    assert b.stop_check() == 0          # collapsed book, still held
+    assert "KXT" in b.bets and b.losses == 0
+
+
+def test_gate_era_rearms_lanes_without_touching_the_lifetime_record(
+        tmp_path, monkeypatch):
+    b = _bot(tmp_path, monkeypatch)
+    b.hi = {"w": 46, "l": 3, "pnl": -4.31}
+    b.hi_g = {"w": 46, "l": 3, "pnl": -4.31}
+    b.core = {"w": 74, "l": 10, "pnl": -0.03, "bf": 1}
+    b.core_g = {"w": 74, "l": 10, "pnl": -0.03}
+    b.gate_era = "g1-old"
+    b.halted = True
+    assert b._hi_blocked() and b._core_blocked()
+    b.save(balance_c=1)
+    b2 = cl.CryptoLive(None, mode="DRY")          # reload = era bump
+    assert b2.gate_era == cl.GATE_ERA
+    assert not b2._hi_blocked() and not b2._core_blocked()
+    assert not b2.halted                          # book reopened
+    assert b2.hi == {"w": 46, "l": 3, "pnl": -4.31}   # lifetime intact
+    assert b2.core["w"] == 74 and b2.core["pnl"] == -0.03
+
+
+def test_realized_outcome_books_to_lifetime_and_gate_ledgers(
+        tmp_path, monkeypatch):
+    b = _bot(tmp_path, monkeypatch)
+    b._lane_add("hi", -290, False)
+    assert b.hi["l"] == 1 and b.hi_g["l"] == 1
+    assert b.hi["pnl"] == b.hi_g["pnl"] == -2.9
+    b._lane_add("core", 30, True)
+    assert b.core["w"] == 1 and b.core_g["w"] == 1

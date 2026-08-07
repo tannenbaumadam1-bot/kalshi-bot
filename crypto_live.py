@@ -84,6 +84,16 @@ HI_PCT2 = float(os.environ.get("CRYPTO_HI_PCT2", "0.10"))
 HI_BLOCK_N = int(os.environ.get("CRYPTO_HI_BLOCK_N", "8"))
 # 8/7: evidence gate for the core (80-92c) band, mirroring HI_BLOCK_N.
 CORE_BLOCK_N = int(os.environ.get("CRYPTO_CORE_BLOCK_N", "8"))
+# 8/7 GATE ERA. Both lanes blocked themselves on 8/7 (hi -$4.31, core
+# -$0.03) - correctly, on the evidence they had. But that evidence was
+# produced by a book that doubled every position across the band and
+# threshold markets of the same coin, and that stopped out at 1-2c. Both
+# defects are fixed, so the old rows describe a system that no longer
+# exists. The LIFETIME ledger is never reset (it is the honest record);
+# the GATE reads a per-era ledger that starts fresh when the config
+# changes materially. Bump this string to re-arm the lanes; never edit
+# the lifetime numbers.
+GATE_ERA = os.environ.get("CRYPTO_GATE_ERA", "g2-nodouble-nostop")
 MAX_SPREAD = int(os.environ.get("CRYPTO_MAX_SPREAD", "4"))
 MIN_VOL24 = float(os.environ.get("CRYPTO_MIN_VOL24", "500"))
 # 8/6: Kalshi now lists each hourly crypto event only ~60 min before its
@@ -97,6 +107,19 @@ MIN_VOL24 = float(os.environ.get("CRYPTO_MIN_VOL24", "500"))
 HOURLY_H = float(os.environ.get("CRYPTO_HOURLY_H", "1.5"))
 MIN_VOL24_LATE = float(os.environ.get("CRYPTO_MIN_VOL24_LATE", "0"))
 STOP_C = float(os.environ.get("CRYPTO_STOP_C", "35"))
+# 8/7 (Adam-approved): the crypto stop is RETIRED. The 8/7 autopsy shows
+# it did nothing where it mattered and real harm where it didn't:
+#   ETH  entry 96c -> stopped at  1c   (no protection: 96 -> 1 between
+#   BTC  entry 93c -> stopped at  2c    two 3-minute polls)
+#   XRP  entry 82c -> stopped at 32c   (5pm market, HOURS left to run)
+#   SOL  entry 84c -> stopped at 31c   (same)
+# An hourly binary resolves inside the poll interval, so a price-level
+# stop cannot exit a collapsing position - it just realises the loss and
+# pays a taker fee to do it. On the longer-dated legs it did the weather
+# book's documented wobble-tax: converted a recoverable dip into a
+# locked-in loss. Hold to settlement and accept the binary.
+# CRYPTO_STOP_ON=1 restores the old behaviour.
+STOP_ON = os.environ.get("CRYPTO_STOP_ON", "0") == "1"
 # 8/7 (Adam-approved): the daily ORDER-COUNT cap is retired. It was not
 # a risk control - open exposure is bounded by OPEN_PCT of bank and the
 # day is stopped by the daily-loss halt - but it WAS a selection bias:
@@ -150,6 +173,38 @@ CRYPTO_SERIES = [s.strip() for s in os.environ.get(
     "KXBTCD,KXBTC,KXETHD,KXETH,KXSOLD,KXSOLE,KXXRPD,KXXRP,"
     "KXDOGED,KXDOGE,KXHYPED,KXHYPE").split(",") if s.strip()]
 CRYPTO_MAX_H = float(os.environ.get("CRYPTO_MAX_H", "24"))
+
+# 8/7 THE DOUBLING BUG. Kalshi lists every coin-hour as TWO events - the
+# range-band market (KXETH-26AUG0713) and the threshold market
+# (KXETHD-26AUG0713). The old one-bet-per-EVENT rule saw two different
+# tickers and let both through, but they resolve off the SAME print at
+# the SAME instant, so a single directional view got taken twice at full
+# size. On 8/7 the book held 13 positions across only 7 underlyings:
+#   ETH 1pm  NO @96c on "$1,905-1,909.99"  -> needs ETH >= $1,910
+#   ETH 1pm  YES @96c on "$1,910 or above" -> needs ETH >= $1,910
+# ETH settled ~$1,906 and both died together. Same on XRP. Those doubled
+# pairs were -$10.21 of a -$15.56 hour.
+# Dedup is now by (underlying, settlement hour), never by event ticker.
+_COIN = {"KXBTC": "BTC", "KXBTCD": "BTC", "KXETH": "ETH", "KXETHD": "ETH",
+         "KXSOL": "SOL", "KXSOLD": "SOL", "KXSOLE": "SOL",
+         "KXXRP": "XRP", "KXXRPD": "XRP", "KXDOGE": "DOGE",
+         "KXDOGED": "DOGE", "KXHYPE": "HYPE", "KXHYPED": "HYPE"}
+
+
+def underlying_key(tk):
+    """(coin, settlement-hour) - the real unit of correlated risk.
+
+    KXETH-26AUG0713-B1907  and  KXETHD-26AUG0713-T1909.99
+    both -> ("ETH", "26AUG0713"). Unknown series fall back to the raw
+    series code so a new listing is never silently merged with another.
+    """
+    parts = (tk or "").split("-")
+    series = parts[0] if parts else ""
+    coin = _COIN.get(series)
+    if coin is None:                      # unseen series: strip one D/E
+        base = series[2:] if series.startswith("KX") else series
+        coin = base[:-1] if base[-1:] in ("D", "E") and len(base) > 3 else base
+    return coin, (parts[1] if len(parts) > 1 else "")
 
 
 def fetch_crypto_mkts():
@@ -250,6 +305,10 @@ class CryptoLive:
         # band instead of being the one unmetered lane.
         self.core = {"w": 0, "l": 0, "pnl": 0.0}
         self.stops = 0                  # realized stop-outs (see stop_check)
+        # gate ledgers: same shape as hi/core but scoped to GATE_ERA
+        self.hi_g = {"w": 0, "l": 0, "pnl": 0.0}
+        self.core_g = {"w": 0, "l": 0, "pnl": 0.0}
+        self.gate_era = GATE_ERA
         # 8/7: the crypto book had NO miss ledger at all - an order that
         # died unfilled just incremented `canceled` and was forgotten, so
         # the fastest-growing book was the one flying blind on execution.
@@ -268,7 +327,8 @@ class CryptoLive:
                 for k in ("bets", "pending", "history", "wins", "losses",
                           "fees_c", "realized_c", "placed", "canceled",
                           "day", "day_pnl_c", "dry_balance_c", "pnl_days",
-                          "hi", "core", "stops", "miss"):
+                          "hi", "core", "stops", "miss",
+                          "hi_g", "core_g", "gate_era"):
                     if k in d:
                         setattr(self, k, d[k])
             except Exception:
@@ -298,6 +358,18 @@ class CryptoLive:
             self.losses += max(0, stops - self.stops)
             self.stops = max(self.stops, stops)
         self.core.setdefault("bf", 1)
+        # 8/7: config changed materially (doubling bug + stop retired), so
+        # the gate starts a fresh era and the lanes re-arm. The lifetime
+        # hi/core ledgers above are untouched - they stay the honest
+        # record. Clearing `halted` here reopens the book in the same
+        # move; the daily-loss halt re-arms immediately from day_pnl_c on
+        # the next cycle, so this is a reopen, not a disabled control.
+        if self.gate_era != GATE_ERA:
+            self.hi_g = {"w": 0, "l": 0, "pnl": 0.0}
+            self.core_g = {"w": 0, "l": 0, "pnl": 0.0}
+            self.gate_era = GATE_ERA
+            self.day_pnl_c = 0.0
+            self.halted = False
         # one-time backfill (history is complete this early in the era;
         # the daily ledger itself is never trimmed - 8/3 lesson)
         if not self.pnl_days and self.history:
@@ -319,6 +391,8 @@ class CryptoLive:
                  "history": self.history[-120:],
                  "pnl_days": self.pnl_days,
                  "hi": self.hi, "core": self.core, "stops": self.stops,
+                 "hi_g": self.hi_g, "core_g": self.core_g,
+                 "gate_era": self.gate_era,
                  "miss": self.miss[-200:],
                  "wins": self.wins, "losses": self.losses,
                  "fees_c": self.fees_c, "realized_c": self.realized_c,
@@ -354,14 +428,22 @@ class CryptoLive:
                             "max": PROBE_MAX,
                             "pct": self._hi_pct(),
                             "n1": HI_STEP1_N, "n2": HI_STEP2_N,
-                            "blocked": self._hi_blocked()},
+                            "blocked": self._hi_blocked(),
+                            "gw": self.hi_g.get("w", 0),
+                            "gl": self.hi_g.get("l", 0),
+                            "gpnl": round(self.hi_g.get("pnl", 0.0), 2)},
                      "core": {"w": self.core.get("w", 0),
                               "l": self.core.get("l", 0),
                               "pnl": round(self.core.get("pnl", 0.0), 2),
                               "open": sum(1 for b in self.bets.values()
                                           if b.get("band", "core") == "core"),
                               "min": ENTRY_MIN, "max": ENTRY_MAX,
-                              "blocked": self._core_blocked()},
+                              "blocked": self._core_blocked(),
+                              "gw": self.core_g.get("w", 0),
+                              "gl": self.core_g.get("l", 0),
+                              "gpnl": round(self.core_g.get("pnl", 0.0), 2)},
+                     "gate_era": self.gate_era,
+                     "stop_on": STOP_ON,
                      "stops": self.stops,
                      "today_n": self._placed_today(),
                      "max_day": MAX_PER_DAY,
@@ -426,8 +508,8 @@ class CryptoLive:
     def _hi_pct(self):
         # 8/5 evidence ladder for the 93-96c bucket; never below base,
         # never raised unless the bucket's lifetime net is positive
-        w, l = self.hi.get("w", 0), self.hi.get("l", 0)
-        if self.hi.get("pnl", 0.0) <= 0:
+        w, l = self.hi_g.get("w", 0), self.hi_g.get("l", 0)
+        if self.hi_g.get("pnl", 0.0) <= 0:
             return self._bet_pct()
         if w + l >= HI_STEP2_N:
             return max(self._bet_pct(), HI_PCT2)
@@ -440,15 +522,25 @@ class CryptoLive:
 
     def _hi_blocked(self):
         # weather bucket-routing rule: proven negative = no new entries
-        w, l = self.hi.get("w", 0), self.hi.get("l", 0)
-        return w + l >= HI_BLOCK_N and self.hi.get("pnl", 0.0) < 0
+        w, l = self.hi_g.get("w", 0), self.hi_g.get("l", 0)
+        return w + l >= HI_BLOCK_N and self.hi_g.get("pnl", 0.0) < 0
+
+    def _lane_add(self, band, net_c, won):
+        """Book a realized outcome to the lifetime ledger AND the gate
+        ledger. Lifetime is the honest record and is never reset; the
+        gate ledger restarts whenever GATE_ERA changes."""
+        hi = (band == "hi")
+        for lane in ((self.hi if hi else self.core),
+                     (self.hi_g if hi else self.core_g)):
+            lane["w" if won else "l"] += 1
+            lane["pnl"] = round(lane.get("pnl", 0.0) + net_c / 100.0, 2)
 
     def _core_blocked(self):
         # 8/7: same rule for the 80-92c band. Every loss the era has
         # taken came from here; if its lifetime net turns negative on
         # >= CORE_BLOCK_N realized outcomes the lane closes itself.
-        w, l = self.core.get("w", 0), self.core.get("l", 0)
-        return w + l >= CORE_BLOCK_N and self.core.get("pnl", 0.0) < 0
+        w, l = self.core_g.get("w", 0), self.core_g.get("l", 0)
+        return w + l >= CORE_BLOCK_N and self.core_g.get("pnl", 0.0) < 0
 
     def _open_cap_c(self):
         return int(self.bank_c * OPEN_PCT)
@@ -618,6 +710,8 @@ class CryptoLive:
             pass
 
     def stop_check(self):
+        if not STOP_ON:
+            return 0          # 8/7: retired - see STOP_ON
         if not self.bets:
             return 0
         quotes = {}
@@ -664,9 +758,7 @@ class CryptoLive:
             self.stops += 1
             self.wins += int(net > 0)
             self.losses += int(net <= 0)
-            lane = self.hi if b.get("band") == "hi" else self.core
-            lane["w" if net > 0 else "l"] += 1
-            lane["pnl"] = round(lane["pnl"] + net / 100.0, 2)
+            self._lane_add(b.get("band"), net, net > 0)
             self.history.append({"name": b.get("name", tk), "tk": tk,
                                  "side": b["side"], "pside": b["pside"],
                                  "entry": b["entry"], "count": b["count"],
@@ -698,9 +790,7 @@ class CryptoLive:
             self.losses += int(not won)
             if self.client is None:
                 self.dry_balance_c += payout * b["count"]
-            lane = self.hi if b.get("band") == "hi" else self.core
-            lane["w" if won else "l"] += 1
-            lane["pnl"] = round(lane["pnl"] + net / 100.0, 2)
+            self._lane_add(b.get("band"), net, won)
             self.history.append({"name": b.get("name", tk), "tk": tk,
                                  "side": b["side"], "pside": b["pside"],
                                  "entry": b["entry"], "count": b["count"],
@@ -742,8 +832,12 @@ class CryptoLive:
                     return 0
         budget = (MAX_PER_DAY - self._placed_today() if MAX_PER_DAY > 0
                   else MAX_PER_CYCLE)
-        ev_keys = {b.get("event", "") for b in
-                   list(self.bets.values()) + list(self.pending.values())}
+        # one opinion per UNDERLYING per settlement hour - not per event
+        # ticker, which let the band market and the threshold market on
+        # the same coin/hour both through (see underlying_key).
+        u_keys = {underlying_key(t) for t in
+                  list(self.bets) + [o["ticker"] for o in
+                                     self.pending.values()]}
         pend_tks = {o["ticker"] for o in self.pending.values()}
         cands = []
         for mk in mkts:
@@ -758,7 +852,8 @@ class CryptoLive:
                          else MIN_VOL24)
             if float(mk.get("vol", 0) or 0) < vol_floor:
                 continue
-            if tk in self.bets or tk in pend_tks or mk["event"] in ev_keys:
+            if (tk in self.bets or tk in pend_tks
+                    or underlying_key(tk) in u_keys):
                 continue
             mid = (bid + ask) / 2.0
             if mid >= 80:
@@ -778,9 +873,9 @@ class CryptoLive:
         for smid, mk, side, e_bid, e_ask, band in cands:
             if placed >= budget:
                 break
-            if mk["event"] in ev_keys:
-                continue
             tk = mk["ticker"]
+            if underlying_key(tk) in u_keys:
+                continue
             pside = smid / 100.0
             # Kelly at the BID (the signal), cost at the ASK (the toll)
             b_odds = (100 - e_bid) / e_bid
@@ -815,7 +910,7 @@ class CryptoLive:
                  "band": band,
                  "filled_seen": 0, "ots": now(), "era": ERA}
             self.pending[oid] = o
-            ev_keys.add(mk["event"])     # a strike ladder is ONE opinion
+            u_keys.add(underlying_key(tk))   # coin+hour is ONE opinion
             self.placed += 1
             placed += 1
             balance_c -= e_ask * size
