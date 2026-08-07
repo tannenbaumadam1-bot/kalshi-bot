@@ -788,3 +788,54 @@ def test_sync_diffs_is_computed_at_save_not_carried(tmp_path, monkeypatch):
     d = _json.load(open(cl.STATE))
     assert d["summary"]["sync_diffs"] == 0
     assert d["summary"]["sync_bad"] == []
+
+
+# --- 8/7: settled positions must never come back ---------------------
+
+def test_settled_position_is_not_resurrected_by_a_late_fill(tmp_path,
+                                                            monkeypatch):
+    """The 8/7 bug: a market settled at 19:02 was back in the open book
+    at 19:26. A leftover pending order promoted to a fill AFTER settle()
+    had deleted the bet and booked the P&L."""
+    b = _bot(tmp_path, monkeypatch)
+    b.history = [{"tk": "KXDOGED-X", "pnl": 0.11, "outcome": 1,
+                  "ts": "2026-08-07T19:02:00"}]
+    o = {"ticker": "KXDOGED-X", "side": "no", "entry": 94, "count": 2,
+         "pside": .94, "name": "doge", "band": "core", "ots": "x"}
+    b._promote("oid1", o, 2)
+    assert "KXDOGED-X" not in b.bets          # refused
+    assert b.realized_c == 0                  # and nothing double-booked
+
+
+def test_promote_still_tops_up_a_live_position(tmp_path, monkeypatch):
+    """The guard must only block RESURRECTION, not normal partial fills."""
+    b = _bot(tmp_path, monkeypatch)
+    b.bets = {"KXBTCD-X": {"side": "no", "entry": 90, "count": 2, "fee": 1,
+                           "pside": .9, "name": "btc", "band": "core"}}
+    o = {"ticker": "KXBTCD-X", "side": "no", "entry": 90, "count": 2,
+         "pside": .9, "name": "btc", "band": "core", "ots": "x"}
+    b._promote("oid2", o, 2)
+    assert b.bets["KXBTCD-X"]["count"] == 4
+
+
+def test_sweep_removes_ghosts_without_booking_pnl(tmp_path, monkeypatch):
+    b = _bot(tmp_path, monkeypatch)
+    b.history = [{"tk": "KXXRP-X", "pnl": 0.15, "outcome": 1, "ts": "t"}]
+    b.bets = {"KXXRP-X": {"side": "no", "entry": 84, "count": 1, "fee": 1,
+                          "pside": .84, "name": "xrp", "band": "core"},
+              "KXETH-LIVE": {"side": "no", "entry": 90, "count": 3, "fee": 1,
+                             "pside": .9, "name": "eth", "band": "core"}}
+    r0 = b.realized_c
+    assert b._sweep_phantoms() == 1
+    assert "KXXRP-X" not in b.bets and "KXETH-LIVE" in b.bets
+    assert b.realized_c == r0                 # no P&L moved
+
+
+def test_sync_diffs_ignores_kalshi_settlement_lag(tmp_path, monkeypatch):
+    """Kalshi keeps reporting a market for minutes after it settles."""
+    b = _bot(tmp_path, monkeypatch)
+    b.client = _FakeClient([_pos("KXDOGED-X", -2), _pos("KXBTCD-Y", -3)])
+    b.history = [{"tk": "KXDOGED-X", "pnl": 0.11, "outcome": 1, "ts": "t"}]
+    b.bets = {"KXBTCD-Y": {"side": "no", "count": 3, "entry": 90, "fee": 0}}
+    b.mirror()
+    assert b._sync_diffs() == 0 and b.sync_bad == []

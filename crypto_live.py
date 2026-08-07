@@ -678,7 +678,38 @@ class CryptoLive:
                                        for r in graded), 2),
                 "miss_why": why}
 
+    def _settled_tks(self):
+        """Tickers this era has already closed out. A Kalshi market
+        settles exactly once, so any of these is dead - nothing may
+        re-open a position in it."""
+        return {h.get("tk") for h in self.history if h.get("tk")}
+
+    def _sweep_phantoms(self):
+        """Drop bets whose market has already been settled and booked.
+
+        8/7: a position that settled at 19:02 was back in the open book
+        at 19:26. check_orders() promotes a vanished order to a fill -
+        and when the fills API is unavailable it ASSUMES the whole order
+        filled - so a leftover pending order on an already-settled ticker
+        resurrected the bet AFTER settle() had deleted it and booked the
+        P&L. Left alone the ghost would settle a SECOND time and
+        double-count, besides inflating open cost and NAV.
+
+        Removed silently and with no P&L: the real outcome was already
+        booked when the market settled the first time.
+        """
+        dead = [tk for tk in list(self.bets) if tk in self._settled_tks()]
+        for tk in dead:
+            b = self.bets.pop(tk)
+            self._log([now(), "PHANTOM", self.mode, tk,
+                       b.get("name", "")[:60], b.get("side", ""), "",
+                       b.get("entry", ""), b.get("count", ""), "", "", ""])
+        return len(dead)
+
     def _promote(self, oid, o, filled):
+        tk0 = o.get("ticker")
+        if tk0 not in self.bets and tk0 in self._settled_tks():
+            return              # already settled: never resurrect it
         fee = fee_cents(o["entry"], filled, taker=True)
         self.fees_c += fee
         tk = o["ticker"]
@@ -751,8 +782,12 @@ class CryptoLive:
               for r in (self.k_positions or [])}
         mine = {tk: norm(b.get("side"), b.get("count"))
                 for tk, b in self.bets.items()}
+        # Kalshi's positions API keeps reporting a market for a few
+        # minutes after it settles, so anything this era has already
+        # booked is expected to differ and is not a divergence.
+        done = self._settled_tks()
         bad = sorted(tk for tk in set(kp) | set(mine)
-                     if kp.get(tk) != mine.get(tk))
+                     if kp.get(tk) != mine.get(tk) and tk not in done)
         # name the offenders, so a real divergence is diagnosable instead
         # of being a bare count nobody can act on
         self.sync_bad = [{"tk": tk, "kalshi": kp.get(tk), "book": mine.get(tk)}
@@ -981,6 +1016,7 @@ class CryptoLive:
     def step(self):
         self._roll_day()
         self.check_orders()
+        self._sweep_phantoms()      # drop already-settled ghosts
         self.mirror()
         self.settle()
         self.stop_check()
