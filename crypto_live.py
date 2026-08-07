@@ -309,6 +309,9 @@ class CryptoLive:
         self.hi_g = {"w": 0, "l": 0, "pnl": 0.0}
         self.core_g = {"w": 0, "l": 0, "pnl": 0.0}
         self.gate_era = GATE_ERA
+        # day-loss budget is measured from here, so a mid-day config
+        # change gets a fresh budget without rewriting the day ledger
+        self.halt_base_c = 0.0
         # 8/7: the crypto book had NO miss ledger at all - an order that
         # died unfilled just incremented `canceled` and was forgotten, so
         # the fastest-growing book was the one flying blind on execution.
@@ -328,7 +331,7 @@ class CryptoLive:
                           "fees_c", "realized_c", "placed", "canceled",
                           "day", "day_pnl_c", "dry_balance_c", "pnl_days",
                           "hi", "core", "stops", "miss",
-                          "hi_g", "core_g", "gate_era"):
+                          "hi_g", "core_g", "gate_era", "halt_base_c"):
                     if k in d:
                         setattr(self, k, d[k])
             except Exception:
@@ -368,7 +371,8 @@ class CryptoLive:
             self.hi_g = {"w": 0, "l": 0, "pnl": 0.0}
             self.core_g = {"w": 0, "l": 0, "pnl": 0.0}
             self.gate_era = GATE_ERA
-            self.day_pnl_c = 0.0
+            # keep the true day ledger; just rebase the risk budget
+            self.halt_base_c = self.day_pnl_c
             self.halted = False
         # one-time backfill (history is complete this early in the era;
         # the daily ledger itself is never trimmed - 8/3 lesson)
@@ -393,6 +397,7 @@ class CryptoLive:
                  "hi": self.hi, "core": self.core, "stops": self.stops,
                  "hi_g": self.hi_g, "core_g": self.core_g,
                  "gate_era": self.gate_era,
+                 "halt_base_c": self.halt_base_c,
                  "miss": self.miss[-200:],
                  "wins": self.wins, "losses": self.losses,
                  "fees_c": self.fees_c, "realized_c": self.realized_c,
@@ -560,6 +565,7 @@ class CryptoLive:
         if today() != self.day:
             self.day = today()
             self.day_pnl_c = 0.0
+            self.halt_base_c = 0.0
             self.halted = False
 
     def check_orders(self):
@@ -814,14 +820,20 @@ class CryptoLive:
         return n
 
     def place(self, mkts=None):
-        if self.day_pnl_c <= -self._halt_c():
-            self.halted = True
-            return 0
+        # 8/7 DEADLOCK FIX: the halt used to be checked BEFORE the bank
+        # was refreshed. On a fresh process bank_c is 0, so _halt_c()
+        # returned its $2 floor instead of 10% of bank, the book halted
+        # on a trivial daily loss, and place() returned before ever
+        # calling refresh_bank - so bank stayed 0 and the halt could
+        # never lift for the rest of the day. Bank first, then halt.
         try:
             balance_c = self.balance_c()
         except Exception:
             return 0
         self.refresh_bank(balance_c)
+        if self.day_pnl_c - self.halt_base_c <= -self._halt_c():
+            self.halted = True
+            return 0
         if mkts is None:
             mkts = fetch_crypto_mkts()      # 8/6: direct, no sweep lottery
             if not mkts:

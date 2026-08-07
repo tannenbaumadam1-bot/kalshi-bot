@@ -625,3 +625,47 @@ def test_realized_outcome_books_to_lifetime_and_gate_ledgers(
     assert b.hi["pnl"] == b.hi_g["pnl"] == -2.9
     b._lane_add("core", 30, True)
     assert b.core["w"] == 1 and b.core_g["w"] == 1
+
+
+def test_bank_refreshes_before_the_halt_is_evaluated(tmp_path, monkeypatch):
+    """The deadlock: on a fresh process bank_c is 0, so _halt_c() fell
+    back to its $2 floor, the book halted on a trivial daily loss, and
+    place() returned BEFORE refresh_bank - so bank stayed 0 and the halt
+    could never lift for the rest of the day."""
+    b = _bot(tmp_path, monkeypatch, peer_cost=2000)
+    b.dry_balance_c = 20000
+    b.bank_c = 0
+    b.day_pnl_c = -300.0                      # -$3: over the $2 floor
+    monkeypatch.setattr(cl, "fetch_crypto_mkts", lambda: [_mk()])
+    assert b.place() == 1                     # bank refreshed -> not halted
+    assert b.bank_c > 0 and not b.halted
+    assert b._halt_c() > 200                  # real cap, not the floor
+
+
+def test_halt_still_fires_on_a_real_daily_loss(tmp_path, monkeypatch):
+    b = _bot(tmp_path, monkeypatch, peer_cost=2000)
+    b.dry_balance_c = 20000
+    monkeypatch.setattr(cl, "fetch_crypto_mkts", lambda: [_mk()])
+    b.place()                                 # establishes bank
+    b.day_pnl_c = -(b._halt_c() + 1)
+    assert b.place() == 0 and b.halted
+
+
+def test_era_change_rebases_the_day_budget_without_erasing_day_pnl(
+        tmp_path, monkeypatch):
+    b = _bot(tmp_path, monkeypatch)
+    b.day_pnl_c = -944.0                      # today's real -$9.44
+    b.gate_era = "g1-old"
+    b.halted = True
+    b.save(balance_c=1)
+    b2 = cl.CryptoLive(None, mode="DRY")
+    assert b2.day_pnl_c == -944.0             # true day ledger preserved
+    assert b2.halt_base_c == -944.0           # budget rebased from here
+    assert not b2.halted                      # book reopened
+
+
+def test_day_roll_clears_the_rebase(tmp_path, monkeypatch):
+    b = _bot(tmp_path, monkeypatch)
+    b.halt_base_c, b.day_pnl_c, b.day = -900.0, -900.0, "1999-01-01"
+    b._roll_day()
+    assert b.halt_base_c == 0.0 and b.day_pnl_c == 0.0 and not b.halted
