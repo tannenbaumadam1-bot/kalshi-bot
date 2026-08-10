@@ -51,6 +51,13 @@ PEER_STATE = os.environ.get("CRYPTO_PEER_STATE",
                             os.path.join("logs", "drift_live_state.json"))
 ERA = "clive1"
 CRYPTO_ON = os.environ.get("DRIFT_LIVE_CRYPTO", "1") == "1"
+# 8/10 (Adam: "pause the crypto bot, it is clearly not working"): the
+# book is PAUSED, in wind-down. No new entries, no arb pairs, no shadow
+# notes - but check_orders/settle/mirror keep running so the open
+# positions settle out honestly and the Kalshi-truth sync stays exact.
+# The lifetime ledgers are untouched (the record is the record). Flip
+# CRYPTO_PAUSED=0 to resume.
+PAUSED = os.environ.get("CRYPTO_PAUSED", "1") == "1"
 ALLOC = float(os.environ.get("CRYPTO_ALLOC", "0.5"))
 BET_PCT = float(os.environ.get("CRYPTO_BET_PCT", "0.03"))
 # 8/4 Adam: small-account boost - 6% per bet until ACCOUNT NAV reaches
@@ -552,6 +559,7 @@ class CryptoLive:
                               "sw": self.core_g.get("sw", 0),
                               "sl": self.core_g.get("sl", 0),
                               "spnl": round(self.core_g.get("spnl", 0.0), 2)},
+                     "paused": PAUSED,
                      "arb": {"on": ARB_ON,
                              "w": self.arb.get("w", 0),
                              "l": self.arb.get("l", 0),
@@ -1305,6 +1313,8 @@ class CryptoLive:
         except Exception:
             return 0
         self.refresh_bank(balance_c)
+        if PAUSED:
+            return 0        # wind-down: no new positions of any kind
         if self.day_pnl_c - self.halt_base_c <= -self._halt_c():
             self.halted = True
             return 0

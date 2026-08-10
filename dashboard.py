@@ -870,7 +870,7 @@ async function load(){
     const todayPct=(todayTrue!=null&&S.day_nav0>0)?(todayTrue/S.day_nav0*100):null;
     $('rmtiles').innerHTML=[
       tile('Weather book P&L',(L.pnl_weather!=null)?('<span class="'+C(L.pnl_weather)+'">'+M(L.pnl_weather)+'</span>'):NA,'era dlive1'+((L.pnl_weather!=null&&base2>0)?' &middot; '+P(L.pnl_weather/base2*100)+' of deposits':'')),
-      tile('Crypto book P&L',(L.pnl_crypto!=null)?('<span class="'+C(L.pnl_crypto)+'">'+M(L.pnl_crypto)+'</span>'):NA,'era clive1'+((L.pnl_crypto!=null&&base2>0)?' &middot; '+P(L.pnl_crypto/base2*100)+' of deposits':'')),
+      tile('Crypto book P&L',(L.pnl_crypto!=null)?('<span class="'+C(L.pnl_crypto)+'">'+M(L.pnl_crypto)+'</span>'):NA,'era clive1'+(cS.paused?' &middot; <span style="color:var(--amb)">PAUSED</span> (winding down)':'')+((L.pnl_crypto!=null&&base2>0)?' &middot; '+P(L.pnl_crypto/base2*100)+' of deposits':'')),
       tile('Account balance',bal!=null?F(bal):NA,'cash, live from Kalshi'),
       tile("Today's return",(todayTrue!=null)?('<span class="'+C(todayTrue)+'">'+(todayPct!=null?P(todayPct):M(todayTrue))+'</span>'):'<span class=mut>anchoring&hellip;</span>',(todayTrue!=null)?('<span class="'+C(todayTrue)+'">'+M(todayTrue)+'</span> &middot; NAV vs day start '+F(S.day_nav0)):'account, NAV vs day start'),
       tile('Fees (total)',F((S.k_fees||0)+(cS.fees||0)),'both books, lifetime'),
@@ -940,7 +940,10 @@ async function load(){
       +'<td class=num><span class="'+C(b.pnl)+'">'+M(b.pnl)+'</span></td></tr>');});
     $('rmreal').innerHTML=rl.join('')||'<tr><td colspan=8 class=empty>Nothing realized yet &mdash; first settlements land tomorrow morning.</td></tr>';
   }
-  if(d.clive&&d.clive.summary){const K2=d.clive,S3=K2.summary||{};
+  // 8/10 (Adam): crypto book PAUSED and off the tracker - the panel
+  // hides while paused; the ledgers, NAV accounting and the hero
+  // attribution stay (the record is the record, only the display goes)
+  if(d.clive&&d.clive.summary&&!d.clive.summary.paused){const K2=d.clive,S3=K2.summary||{};
     document.getElementById('clivewrap').style.display='block';
     const cLive=(S3.mode==='LIVE');
     $('clmode').innerHTML='<span class=chip style="background:'+(cLive?'rgba(244,105,95,.15);color:var(--red)':'rgba(125,144,173,.13);color:var(--mut)')+'">'+(S3.mode||'?')+'</span>'

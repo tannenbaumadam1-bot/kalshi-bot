@@ -17,6 +17,8 @@ def _mk(tk="KXBTCD-26AUG0317-T64000", ev="KXBTCD-26AUG0317", bid=84, ask=86,
 
 
 def _bot(tmp_path, monkeypatch, peer_cost=0.0):
+    # 8/10: the live book is PAUSED (Adam); tests exercise the machinery
+    monkeypatch.setattr(cl, "PAUSED", False)
     monkeypatch.setattr(cl, "STATE", str(tmp_path / "c.json"))
     monkeypatch.setattr(cl, "BETS", str(tmp_path / "c.csv"))
     peer = tmp_path / "peer.json"
@@ -118,10 +120,16 @@ def test_weather_caps_use_alloc_and_peer(tmp_path, monkeypatch):
     b = dl.DriftLive(None, mode="DRY")
     b.dry_balance_c = 8000                            # cash $80 + crypto $20
     b._refresh_caps(b.balance_c())
-    # account NAV $100, weather alloc 50% -> caps on $50
-    assert b.max_bet_c == 300                         # 6% boost of $50
-    assert b.max_open_c == 3000                       # 60% of $50
-    assert b.max_day_loss_c == 500                    # 10% of $50
+    # 8/10 (crypto paused): weather alloc is 100% - caps on full $100
+    # NAV, which still counts the winding-down crypto positions' cost
+    assert dl.WX_ALLOC == 1.0
+    assert b.max_bet_c == 600                         # 6% boost of $100
+    assert b.max_open_c == 6000                       # 60% of $100
+    assert b.max_day_loss_c == 1000                   # 10% of $100
+    # the 50/50 era math still holds under the env rollback
+    monkeypatch.setattr(dl, "WX_ALLOC", 0.5)
+    b._refresh_caps(b.balance_c())
+    assert b.max_bet_c == 300 and b.max_open_c == 3000
 
 def test_kelly_ladder_compounds_on_evidence(tmp_path, monkeypatch):
     # gate lowered 100 -> 25 on 8/4 (Adam override at 34 settled 33W/1L);
@@ -186,12 +194,13 @@ def test_bet_pct_boost_reverts_at_300_nav(tmp_path, monkeypatch):
     monkeypatch.setattr(dl2, "BETS", str(tmp_path / "w.csv"))
     monkeypatch.setattr(dl2, "CRYPTO_STATE_PATH", str(tmp_path / "none.json"))
     w = dl2.DriftLive(None, mode="DRY")
+    # 8/10: weather alloc is 100% while crypto is paused
     w.dry_balance_c = 29900
     w._refresh_caps(w.balance_c())
-    assert w.max_bet_c == int(29900 * 0.5 * 0.06)
+    assert w.max_bet_c == int(29900 * dl2.WX_ALLOC * 0.06)
     w.dry_balance_c = 30000
     w._refresh_caps(w.balance_c())
-    assert w.max_bet_c == int(30000 * 0.5 * 0.03)
+    assert w.max_bet_c == int(30000 * dl2.WX_ALLOC * 0.03)
 
 
 def test_hi_band_probe_ledger(tmp_path, monkeypatch):
@@ -869,6 +878,19 @@ def _arb_mkts(bid_lo=84, ask_lo=86, bid_hi=90, ask_hi=92):
                 bid=bid_lo, ask=ask_lo),
             _mk(tk="KXBTCD-26AUG0317-T65000", ev="KXBTCD-26AUG0317",
                 bid=bid_hi, ask=ask_hi)]
+
+
+def test_paused_book_places_nothing(tmp_path, monkeypatch):
+    # 8/10 (Adam): paused = wind-down. No entries, no arb pairs, no
+    # shadow notes - but the default env flag is ON so the live droplet
+    # stops trading the moment this deploys.
+    assert os.environ.get("CRYPTO_PAUSED", "1") == "1"
+    b = _bot(tmp_path, monkeypatch)
+    monkeypatch.setattr(cl, "PAUSED", True)
+    b.dry_balance_c = 20000
+    assert b.place(mkts=[_mk()]) == 0
+    assert b.place(mkts=_arb_mkts()) == 0
+    assert not b.bets and not b.pending and not b.arb_pairs and not b.shadow
 
 
 def test_t_strike_parser():

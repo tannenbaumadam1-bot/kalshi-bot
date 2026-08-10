@@ -217,7 +217,11 @@ ERA = "dlive1"
 # Without the fence, reconcile_positions would ADOPT the crypto book's
 # positions and stop-sell them. Capital: this book's bankroll =
 # WX_ALLOC x account NAV (balance + BOTH books' position cost).
-WX_ALLOC = float(os.environ.get("DRIFT_WX_ALLOC", "0.5"))
+# 8/10 (Adam): crypto book PAUSED - weather gets the whole bankroll.
+# Every %-of-NAV cap (bet, open, halt, nickel pos/lane) now computes on
+# 100% of account NAV instead of half, so weather positions roughly
+# double at today's NAV. Restore 0.5 when/if crypto earns its way back.
+WX_ALLOC = float(os.environ.get("DRIFT_WX_ALLOC", "1.0"))
 CRYPTO_STATE_PATH = os.path.join("logs", "crypto_live_state.json")
 
 
