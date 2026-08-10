@@ -30,6 +30,7 @@ from __future__ import annotations
 import csv
 import datetime
 import json
+import math
 import os
 
 try:
@@ -61,7 +62,13 @@ OPEN_PCT = float(os.environ.get("CRYPTO_OPEN_PCT", "0.60"))
 HALT_PCT = float(os.environ.get("CRYPTO_HALT_PCT", "0.10"))
 RESERVE_C = int(os.environ.get("CRYPTO_RESERVE_C", "200"))
 ENTRY_MIN = int(os.environ.get("CRYPTO_ENTRY_MIN", "80"))
-ENTRY_MAX = int(os.environ.get("CRYPTO_ENTRY_MAX", "92"))
+# 8/10 (Adam-approved): entry band narrowed to 80-88c. The gate era
+# settled the hi-band question with clean data: 161-9 (94.7% wins) and
+# STILL -$4.69, because breakeven at 95-96c after fees is ~95.7%. The
+# 8/7 audit found the edge lives at cheap entries (80-85c: +11.4pts
+# over breakeven, 4.9:1 payoff) and shrinks monotonically as price
+# rises. So the book now buys only where the ledger says the edge is.
+ENTRY_MAX = int(os.environ.get("CRYPTO_ENTRY_MAX", "88"))
 # 8/4 HIGH-BAND PROBE (Adam: "take advantage of convergence to certainty,
 # ship at half kelly"): entries 93-96c allowed as a SEPARATELY TRACKED
 # bucket - weather's nickel lane playbook. Our shadow calibration has
@@ -69,7 +76,13 @@ ENTRY_MAX = int(os.environ.get("CRYPTO_ENTRY_MAX", "92"))
 # (the audition never traded there) and the payoff is +4-7c vs ~-60c
 # after a stop, so this bucket keeps its own W/L ledger and earns (or
 # loses) its lane on evidence, in public, on the tracker.
-PROBE_MAX = int(os.environ.get("CRYPTO_PROBE_MAX", "96"))
+# 8/10: PROBE_MAX pulled down to ENTRY_MAX - the 93-96c hi band is
+# STRUCTURALLY RETIRED (no entries above 88c at all), not just gated.
+# Its lifetime ledger (207-12, -$9.00) stays on the tracker as the
+# honest record. The paper-shadow book (below) keeps watching the band
+# with zero dollars, so if the market regime ever changes the evidence
+# will say so without costing anything.
+PROBE_MAX = int(os.environ.get("CRYPTO_PROBE_MAX", "88"))
 # 8/5 HI-BAND SIZE LADDER (Adam: "press the crypto nickel" - weather's
 # earn-the-raise playbook, automated): the 93-96c bucket sizes at the
 # base per-bet cap until it PROVES itself, then steps up on its own -
@@ -93,7 +106,16 @@ CORE_BLOCK_N = int(os.environ.get("CRYPTO_CORE_BLOCK_N", "8"))
 # the GATE reads a per-era ledger that starts fresh when the config
 # changes materially. Bump this string to re-arm the lanes; never edit
 # the lifetime numbers.
-GATE_ERA = os.environ.get("CRYPTO_GATE_ERA", "g3-halt-deadlock-fix")
+# g4 (8/10, Adam-approved): band narrowed to 80-88c, gate criterion
+# moved from "pnl<0 at n>=8" to Wilson-bound-vs-breakeven (see
+# _lane_blocked), and blocked lanes now run a paper-shadow book that
+# can re-arm them on evidence. The core lane re-arms here: its g3 block
+# (9-1, -$0.22) hinged on a single loss at n=10 - statistically noise.
+GATE_ERA = os.environ.get("CRYPTO_GATE_ERA", "g4-core80-88-wilson")
+# a blocked lane's shadow book needs this many settled paper outcomes,
+# with the Wilson LOWER bound clearing the lane's own fee-adjusted
+# breakeven, before the lane re-arms with real money
+SHADOW_UNBLOCK_N = int(os.environ.get("CRYPTO_SHADOW_UNBLOCK_N", "30"))
 MAX_SPREAD = int(os.environ.get("CRYPTO_MAX_SPREAD", "4"))
 MIN_VOL24 = float(os.environ.get("CRYPTO_MIN_VOL24", "500"))
 # 8/6: Kalshi now lists each hourly crypto event only ~60 min before its
@@ -259,6 +281,17 @@ def fetch_crypto_mkts():
     return out
 
 
+def _wilson(w, n, z=1.0):
+    """Wilson score interval for a binomial win rate (8/10 gate math)."""
+    if n <= 0:
+        return 0.0, 1.0
+    ph = w / n
+    d = 1.0 + z * z / n
+    c = (ph + z * z / (2 * n)) / d
+    r = (z / d) * math.sqrt(ph * (1 - ph) / n + z * z / (4 * n * n))
+    return max(0.0, c - r), min(1.0, c + r)
+
+
 def now():
     return datetime.datetime.now().isoformat(timespec="seconds")
 
@@ -326,6 +359,16 @@ class CryptoLive:
         # day-loss budget is measured from here, so a mid-day config
         # change gets a fresh budget without rewriting the day ledger
         self.halt_base_c = 0.0
+        # 8/10: paper-shadow book for BLOCKED lanes - same signals, zero
+        # dollars. A blocked lane keeps gathering settlement evidence
+        # here, and settle() re-arms it if the shadow record clears its
+        # breakeven (Wilson lower bound, n >= SHADOW_UNBLOCK_N). Blocks
+        # stop being one-way doors without risking a cent to find out.
+        self.shadow = {}
+        # settlement receivable (8/10): NAV no longer dips while the
+        # exchange's cash credit lags our settlement detection
+        self.recv = []
+        self.recv_bal_c = None
         # 8/7: the crypto book had NO miss ledger at all - an order that
         # died unfilled just incremented `canceled` and was forgotten, so
         # the fastest-growing book was the one flying blind on execution.
@@ -344,7 +387,8 @@ class CryptoLive:
                 for k in ("bets", "pending", "history", "wins", "losses",
                           "fees_c", "realized_c", "placed", "canceled",
                           "day", "day_pnl_c", "dry_balance_c", "pnl_days",
-                          "hi", "core", "stops", "miss",
+                          "hi", "core", "stops", "miss", "shadow",
+                          "recv", "recv_bal_c",
                           "hi_g", "core_g", "gate_era", "halt_base_c"):
                     if k in d:
                         setattr(self, k, d[k])
@@ -382,8 +426,9 @@ class CryptoLive:
         # move; the daily-loss halt re-arms immediately from day_pnl_c on
         # the next cycle, so this is a reopen, not a disabled control.
         if self.gate_era != GATE_ERA:
-            self.hi_g = {"w": 0, "l": 0, "pnl": 0.0}
-            self.core_g = {"w": 0, "l": 0, "pnl": 0.0}
+            self.hi_g = {"w": 0, "l": 0, "pnl": 0.0, "ben": 0.0}
+            self.core_g = {"w": 0, "l": 0, "pnl": 0.0, "ben": 0.0}
+            self.shadow = {}
             self.gate_era = GATE_ERA
             # keep the true day ledger; just rebase the risk budget
             self.halt_base_c = self.day_pnl_c
@@ -404,11 +449,15 @@ class CryptoLive:
     def save(self, balance_c=None):
         try:
             os.makedirs("logs", exist_ok=True)
+            recv_c = self._recv_c(balance_c)   # consume/expire pre-save
             d = {"updated": now(), "era": ERA, "mode": self.mode,
                  "bets": self.bets, "pending": self.pending,
                  "history": self.history[-120:],
                  "pnl_days": self.pnl_days,
                  "hi": self.hi, "core": self.core, "stops": self.stops,
+                 "shadow": self.shadow,
+                 "recv_c": recv_c,
+                 "recv": self.recv, "recv_bal_c": self.recv_bal_c,
                  "hi_g": self.hi_g, "core_g": self.core_g,
                  "gate_era": self.gate_era,
                  "halt_base_c": self.halt_base_c,
@@ -450,7 +499,10 @@ class CryptoLive:
                             "blocked": self._hi_blocked(),
                             "gw": self.hi_g.get("w", 0),
                             "gl": self.hi_g.get("l", 0),
-                            "gpnl": round(self.hi_g.get("pnl", 0.0), 2)},
+                            "gpnl": round(self.hi_g.get("pnl", 0.0), 2),
+                            "sw": self.hi_g.get("sw", 0),
+                            "sl": self.hi_g.get("sl", 0),
+                            "spnl": round(self.hi_g.get("spnl", 0.0), 2)},
                      "core": {"w": self.core.get("w", 0),
                               "l": self.core.get("l", 0),
                               "pnl": round(self.core.get("pnl", 0.0), 2),
@@ -460,7 +512,10 @@ class CryptoLive:
                               "blocked": self._core_blocked(),
                               "gw": self.core_g.get("w", 0),
                               "gl": self.core_g.get("l", 0),
-                              "gpnl": round(self.core_g.get("pnl", 0.0), 2)},
+                              "gpnl": round(self.core_g.get("pnl", 0.0), 2),
+                              "sw": self.core_g.get("sw", 0),
+                              "sl": self.core_g.get("sl", 0),
+                              "spnl": round(self.core_g.get("spnl", 0.0), 2)},
                      "gate_era": self.gate_era,
                      "stop_on": STOP_ON,
                      "stops": self.stops,
@@ -541,27 +596,89 @@ class CryptoLive:
     def _hi_cap_c(self):
         return max(150, int(self.bank_c * self._hi_pct()))
 
-    def _hi_blocked(self):
-        # weather bucket-routing rule: proven negative = no new entries
-        w, l = self.hi_g.get("w", 0), self.hi_g.get("l", 0)
-        return w + l >= HI_BLOCK_N and self.hi_g.get("pnl", 0.0) < 0
+    def _lane_blocked(self, lane, min_n):
+        """8/10 gate redesign (Adam-approved). The old rule - pnl<0 at
+        n>=8 - killed the core lane on a single loss at n=10 (noise)
+        while win-rate gates elsewhere passed lanes that lost money.
+        New rule: block when the evidence says LOSER with confidence,
+        i.e. the Wilson UPPER bound (z=1) of the lane's win rate sits
+        below its own fee-adjusted breakeven - even the optimistic read
+        loses. Dollar backstop: a large sample (5x min_n) that is still
+        net-negative blocks regardless. Legacy ledgers with no breakeven
+        data keep the old rule. The daily-loss halt remains the fast
+        brake for acute bleeding; this is the slow statistical one."""
+        w, l = lane.get("w", 0), lane.get("l", 0)
+        n = w + l
+        if n < min_n:
+            return False
+        ben = lane.get("ben")
+        if not ben:
+            return lane.get("pnl", 0.0) < 0          # legacy rows
+        _, ub = _wilson(w, n)
+        if ub < ben / n:
+            return True
+        return n >= 5 * min_n and lane.get("pnl", 0.0) < 0
 
-    def _lane_add(self, band, net_c, won):
+    def _hi_blocked(self):
+        return self._lane_blocked(self.hi_g, HI_BLOCK_N)
+
+    def _core_blocked(self):
+        return self._lane_blocked(self.core_g, CORE_BLOCK_N)
+
+    def _lane_add(self, band, net_c, won, be=None):
         """Book a realized outcome to the lifetime ledger AND the gate
         ledger. Lifetime is the honest record and is never reset; the
-        gate ledger restarts whenever GATE_ERA changes."""
+        gate ledger restarts whenever GATE_ERA changes. `be` is the
+        bet's fee-adjusted breakeven win probability - the gate compares
+        the lane's Wilson interval against the average of these."""
         hi = (band == "hi")
         for lane in ((self.hi if hi else self.core),
                      (self.hi_g if hi else self.core_g)):
             lane["w" if won else "l"] += 1
             lane["pnl"] = round(lane.get("pnl", 0.0) + net_c / 100.0, 2)
+            if be is not None:
+                lane["ben"] = round(lane.get("ben", 0.0) + be, 4)
 
-    def _core_blocked(self):
-        # 8/7: same rule for the 80-92c band. Every loss the era has
-        # taken came from here; if its lifetime net turns negative on
-        # >= CORE_BLOCK_N realized outcomes the lane closes itself.
-        w, l = self.core_g.get("w", 0), self.core_g.get("l", 0)
-        return w + l >= CORE_BLOCK_N and self.core_g.get("pnl", 0.0) < 0
+    # ---- settlement receivable (8/10, same fix as the weather book):
+    # bridges the minutes between our settlement detection and the
+    # exchange's cash credit. Consumed as the balance rises; hard-expired
+    # at 15 minutes so it can never overstate NAV for long. ----
+    def _recv_add(self, amount_c):
+        self.recv.append([now(), int(amount_c)])
+
+    def _recv_c(self, balance_c=None):
+        if balance_c is not None:
+            prev = self.recv_bal_c
+            self.recv_bal_c = balance_c
+            if prev is not None and balance_c > prev and self.recv:
+                gain = balance_c - prev
+                keep = []
+                for ts, amt in self.recv:
+                    if gain >= amt:
+                        gain -= amt
+                        continue
+                    keep.append([ts, amt - gain])
+                    gain = 0
+                self.recv = keep
+        cut = (datetime.datetime.now()
+               - datetime.timedelta(minutes=15)).isoformat(timespec="seconds")
+        self.recv = [r for r in self.recv if str(r[0]) > cut]
+        return int(sum(r[1] for r in self.recv))
+
+    def _shadow_note(self, tk, side, e_ask, band, smid):
+        """Paper-shadow a blocked lane's refused entry (8/10): records
+        the trade it WOULD have made, sized at the 3-lot floor, settled
+        virtually in settle(). Zero dollars at risk."""
+        if tk in self.shadow or len(self.shadow) >= 300:
+            return
+        uk = underlying_key(tk)
+        if any(underlying_key(t) == uk for t in self.shadow):
+            return
+        fee = fee_cents(e_ask, MIN_CONTRACTS, taker=True)
+        self.shadow[tk] = {"side": side, "entry": int(e_ask),
+                           "count": MIN_CONTRACTS, "fee": fee,
+                           "band": band, "pside": round(smid / 100.0, 3),
+                           "ots": now()}
 
     def _open_cap_c(self):
         return int(self.bank_c * OPEN_PCT)
@@ -843,7 +960,9 @@ class CryptoLive:
             self.stops += 1
             self.wins += int(net > 0)
             self.losses += int(net <= 0)
-            self._lane_add(b.get("band"), net, net > 0)
+            self._lane_add(b.get("band"), net, net > 0,
+                           be=(b["entry"] + b.get("fee", 0)
+                               / max(1, b["count"])) / 100.0)
             self.history.append({"name": b.get("name", tk), "tk": tk,
                                  "side": b["side"], "pside": b["pside"],
                                  "entry": b["entry"], "count": b["count"],
@@ -875,7 +994,11 @@ class CryptoLive:
             self.losses += int(not won)
             if self.client is None:
                 self.dry_balance_c += payout * b["count"]
-            self._lane_add(b.get("band"), net, won)
+            elif won:
+                self._recv_add(payout * b["count"])
+            self._lane_add(b.get("band"), net, won,
+                           be=(b["entry"] + b.get("fee", 0)
+                               / max(1, b["count"])) / 100.0)
             self.history.append({"name": b.get("name", tk), "tk": tk,
                                  "side": b["side"], "pside": b["pside"],
                                  "entry": b["entry"], "count": b["count"],
@@ -889,6 +1012,48 @@ class CryptoLive:
                        round(b["pside"], 3), b["entry"], b["count"],
                        1 if won else 0, round(net / 100.0, 2), ""])
             del self.bets[tk]
+        self._settle_shadow()
+
+    def _settle_shadow(self):
+        """Resolve the paper-shadow book and re-arm any blocked lane
+        whose shadow record has EARNED it (8/10). Shadow outcomes land
+        in the gate ledger's s* counters, never in the money ledgers."""
+        for tk, sb in list(self.shadow.items()):
+            res = fetch_result(tk)
+            if res is None:
+                ots = (sb.get("ots") or "")[:10]
+                cut = (datetime.date.today()
+                       - datetime.timedelta(days=2)).isoformat()
+                if ots and ots < cut:
+                    del self.shadow[tk]      # unresolvable: expire
+                continue
+            won = (res == sb["side"])
+            net = (((100 if won else 0) - sb["entry"]) * sb["count"]
+                   - sb["fee"])
+            lane = self.hi_g if sb.get("band") == "hi" else self.core_g
+            k = "sw" if won else "sl"
+            lane[k] = lane.get(k, 0) + 1
+            lane["spnl"] = round(lane.get("spnl", 0.0) + net / 100.0, 2)
+            lane["sben"] = round(
+                lane.get("sben", 0.0)
+                + (sb["entry"] + sb["fee"] / sb["count"]) / 100.0, 4)
+            del self.shadow[tk]
+        # re-arm: a blocked lane whose SHADOW record clears its own
+        # breakeven with room (Wilson lower bound, n >= SHADOW_UNBLOCK_N)
+        # earns a fresh gate ledger - evidence, not a manual override.
+        for name, lane, min_n in (("hi", self.hi_g, HI_BLOCK_N),
+                                  ("core", self.core_g, CORE_BLOCK_N)):
+            sw, sl = lane.get("sw", 0), lane.get("sl", 0)
+            sn = sw + sl
+            if sn < SHADOW_UNBLOCK_N or not self._lane_blocked(lane, min_n):
+                continue
+            lb, _ = _wilson(sw, sn)
+            if lb >= lane.get("sben", 0.0) / sn:
+                self._log([now(), "REARM", self.mode, name, "shadow",
+                           "", "", "", "", sn, "",
+                           round(lane.get("spnl", 0.0), 2)])
+                lane.clear()
+                lane.update({"w": 0, "l": 0, "pnl": 0.0, "ben": 0.0})
 
     def _placed_today(self):
         t = today()
@@ -953,11 +1118,19 @@ class CryptoLive:
                 side, e_bid, e_ask, smid = "no", 100 - ask, 100 - bid, 100 - mid
             else:
                 continue
-            if e_ask < ENTRY_MIN or e_ask > PROBE_MAX or e_bid < 1:
+            if e_bid < 1 or e_ask < ENTRY_MIN:
+                continue
+            if e_ask > PROBE_MAX:
+                # retired hi band (89-96c): paper-shadow only, so the
+                # evidence keeps accumulating at zero cost (8/10)
+                if e_ask <= 96:
+                    self._shadow_note(tk, side, e_ask, "hi", smid)
                 continue
             band = "hi" if e_ask > ENTRY_MAX else "core"
             if self._hi_blocked() if band == "hi" else self._core_blocked():
-                continue      # proven-negative lane: closed
+                # proven-negative lane: closed for money, open for paper
+                self._shadow_note(tk, side, e_ask, band, smid)
+                continue
             cands.append((smid, mk, side, e_bid, e_ask, band))
         cands.sort(key=lambda c: -c[0])
         placed = 0

@@ -44,12 +44,15 @@ def test_taker_entry_band_and_dry_fill(tmp_path, monkeypatch):
     bet = b.bets["KXBTCD-26AUG0317-T64000"]
     assert bet["entry"] == 86 and bet["era"] == "clive1"
     assert b.fees_c > 0
-    # ask above the 92c core ceiling: now the 93-96c PROBE band (8/4),
-    # tagged and ledgered separately
-    assert b.place(mkts=[_mk(tk="T2", ev="E2", bid=92, ask=94)]) == 1
-    assert b.bets["T2"]["band"] == "hi"
-    # above the 96c probe ceiling: refused - no payoff left
+    # ask above the 88c ceiling (8/10): the hi band is structurally
+    # retired - no real order, but the signal lands in the paper-shadow
+    # book so the evidence keeps accumulating at zero cost
+    assert b.place(mkts=[_mk(tk="T2", ev="E2", bid=92, ask=94)]) == 0
+    assert "T2" not in b.bets
+    assert b.shadow["T2"]["band"] == "hi" and b.shadow["T2"]["entry"] == 94
+    # above the 96c old probe ceiling: refused outright, not even shadowed
     assert b.place(mkts=[_mk(tk="T2b", ev="E2b", bid=96, ask=98)]) == 0
+    assert "T2b" not in b.shadow
     # ask below the 80c floor (mid 20-zone NO side is fine, but sub-80 no)
     assert b.place(mkts=[_mk(tk="T3", ev="E3", bid=74, ask=76)]) == 0
     # spread wider than 4c: SKIPPED, never joined (taker-first mandate)
@@ -192,27 +195,33 @@ def test_bet_pct_boost_reverts_at_300_nav(tmp_path, monkeypatch):
 
 
 def test_hi_band_probe_ledger(tmp_path, monkeypatch):
-    # 8/4 crypto nickel probe: 93-96c entries keep their own W/L ledger
-    # (weather-nickel playbook) so the lane earns promotion on evidence
+    # 8/10: the hi band is structurally retired - its signals go to the
+    # PAPER-SHADOW book, settle virtually into the gate ledger's s*
+    # counters, and never touch the money ledgers
     b = _bot(tmp_path, monkeypatch)
     b.dry_balance_c = 20000
-    assert b.place(mkts=[_mk(tk="H1", ev="EH1", bid=93, ask=95)]) == 1
-    assert b.bets["H1"]["band"] == "hi"
+    assert b.place(mkts=[_mk(tk="H1", ev="EH1", bid=93, ask=95)]) == 0
+    assert b.shadow["H1"]["band"] == "hi"
     assert b.place(mkts=[_mk(tk="C1", ev="EC1", bid=84, ask=86)]) == 1
     assert b.bets["C1"]["band"] == "core"
-    # hi-band win folds into the probe ledger; core win does not
-    import weather_paper as wp
     monkeypatch.setattr(cl, "fetch_result", lambda tk: "yes")
-    b.bets["H1"]["side"] = "yes"
+    b.shadow["H1"]["side"] = "yes"
     b.bets["C1"]["side"] = "yes"
+    realized_before = b.realized_c
     b.settle()
-    assert b.hi["w"] == 1 and b.hi["l"] == 0
-    assert b.hi["pnl"] > 0
-    assert b.history[-1]["band"] in ("hi", "core")
-    # probe ledger survives a save/load round-trip
+    # shadow win lands ONLY in the gate ledger's shadow counters
+    assert b.hi_g.get("sw") == 1 and b.hi_g.get("sl", 0) == 0
+    assert b.hi_g.get("spnl", 0) > 0
+    assert b.hi["w"] == 0                       # money ledger untouched
+    assert "H1" not in b.shadow                 # resolved and cleared
+    # the core win is real money and carries its breakeven for the gate
+    assert b.core["w"] == 1 and b.core_g.get("ben", 0) > 0
+    assert b.realized_c > realized_before
+    # shadow + gate ledgers survive a save/load round-trip
+    b.place(mkts=[_mk(tk="H2", ev="EH2", bid=93, ask=95)])
     b.save()
     b2 = cl.CryptoLive(None, mode="DRY")
-    assert b2.hi["w"] == 1
+    assert b2.hi_g.get("sw") == 1 and "H2" in b2.shadow
 
 
 def test_hi_ladder_steps_on_evidence(tmp_path, monkeypatch):
@@ -249,25 +258,35 @@ def test_hi_ladder_steps_on_evidence(tmp_path, monkeypatch):
 
 
 def test_hi_block_closes_lane_when_proven_negative(tmp_path, monkeypatch):
-    # 8/5: >=8 settled and net<0 = proven negative -> no NEW hi entries,
-    # core entries unaffected (weather bucket-routing rule)
+    # 8/10 Wilson gate: a lane closes when even the OPTIMISTIC read of
+    # its win rate (Wilson upper bound, z=1) sits below its own
+    # fee-adjusted breakeven - or when a big sample is $-negative.
     b = _bot(tmp_path, monkeypatch)
     b.dry_balance_c = 20000
-    b.hi = {"w": 3, "l": 5, "pnl": -1.20}
-    b.hi_g = dict({"w": 3, "l": 5, "pnl": -1.20})
+    # legacy ledger (no breakeven data): old pnl<0-at-n>=8 rule holds
+    b.core_g = {"w": 3, "l": 5, "pnl": -1.20}
+    assert b._core_blocked()
+    assert b.place(mkts=[_mk(tk="CB1", ev="ECB1", bid=84, ask=86)]) == 0
+    assert "CB1" in b.shadow                    # blocked lane shadows
+    # the g3 injustice, replayed: 9-1 slightly $-negative at avg
+    # breakeven 87% - Wilson UB ~0.92 clears it, so the lane STAYS OPEN
+    b.core_g = {"w": 9, "l": 1, "pnl": -0.22, "ben": 8.7}
+    assert not b._core_blocked()
+    assert b.place(mkts=[_mk(tk="CB2", ev="ECB2", bid=84, ask=86)]) == 1
+    # pure Wilson block: UB ~0.67 far under an 86% breakeven, n<40
+    b.core_g = {"w": 10, "l": 8, "pnl": -2.0, "ben": 15.5}
+    assert b._core_blocked()
+    # dollar backstop: the real g3 hi lane - 161-9 looks fine to Wilson
+    # (UB ~0.962 vs be 0.957) but a 170-bet sample that is still
+    # $-negative blocks regardless
+    b.hi_g = {"w": 161, "l": 9, "pnl": -4.69, "ben": 162.69}
     assert b._hi_blocked()
-    assert b.place(mkts=[_mk(tk="HB1", ev="EHB1", bid=93, ask=95)]) == 0
-    assert b.place(mkts=[_mk(tk="CB1", ev="ECB1", bid=84, ask=86)]) == 1
-    # not blocked while n<8 even if temporarily negative (still learning)
-    b.hi = {"w": 2, "l": 3, "pnl": -0.60}
-    b.hi_g = dict({"w": 2, "l": 3, "pnl": -0.60})
-    assert not b._hi_blocked()
-    assert b.place(mkts=[_mk(tk="HB2", ev="EHB2", bid=93, ask=95)]) == 1
-    # ladder state is published for the tracker
+    # gate state is published for the tracker
+    b.core_g = {"w": 2, "l": 3, "pnl": -0.60, "ben": 4.3}
     b.save()
     d = json.load(open(cl.STATE))
     hi = d["summary"]["hi"]
-    assert hi["pct"] == b._hi_pct() and hi["blocked"] is False
+    assert hi["blocked"] is True and d["summary"]["core"]["blocked"] is False
     assert hi["n1"] == cl.HI_STEP1_N and hi["n2"] == cl.HI_STEP2_N
 
 
@@ -314,7 +333,7 @@ def test_direct_series_fetch_parses_and_filters(tmp_path, monkeypatch):
             {"ticker": "KXBTCD-26AUG0614-T64000", "event_ticker":
              "KXBTCD-26AUG0614", "title": "Bitcoin price",
              "yes_sub_title": "$64,000 or above", "close_time": soon,
-             "yes_bid_dollars": "0.90", "yes_ask_dollars": "0.91",
+             "yes_bid_dollars": "0.84", "yes_ask_dollars": "0.86",
              "volume_24h_fp": "0"},
             {"ticker": "KXBTCD-26AUG0817-T64000", "event_ticker":
              "KXBTCD-26AUG0817", "title": "too far out",
@@ -330,7 +349,7 @@ def test_direct_series_fetch_parses_and_filters(tmp_path, monkeypatch):
     assert calls == cl.CRYPTO_SERIES          # every series asked, by name
     assert [m["ticker"] for m in mkts] == ["KXBTCD-26AUG0614-T64000"]
     m = mkts[0]
-    assert m["yes_bid"] == 90 and m["yes_ask"] == 91
+    assert m["yes_bid"] == 84 and m["yes_ask"] == 86
     assert m["event"] == "KXBTCD-26AUG0614" and 0 < m["hrs"] < 1
     # and the young zero-volume hourly TRADES end to end via place(None)
     b = _bot(tmp_path, monkeypatch)
