@@ -201,7 +201,12 @@ ENTRY_FLOOR = int(os.environ.get("DRIFT_LIVE_ENTRY_FLOOR", "80"))
 # bind. Kelly takes back control on its own once the bankroll asks for
 # >= MIN_CONTRACTS unaided. Nickels are exempt - their own ladder
 # already sizes well above the floor.
-MIN_CONTRACTS = int(os.environ.get("DRIFT_LIVE_MIN_CONTRACTS", "3"))
+# 8/10 (Adam: "make all the weather positions a minimum of 5 contracts,
+# the strategy is working"): floor raised 3 -> 5. Same override
+# semantics as 8/7 - the floor beats the per-bet cap; balance/reserve
+# and the OPEN cap still bind. The nickel lane's own trim floor rises
+# to match (it was allowed to trim to 1).
+MIN_CONTRACTS = int(os.environ.get("DRIFT_LIVE_MIN_CONTRACTS", "5"))
 CYCLE_S = int(os.environ.get("DRIFT_LIVE_CYCLE_S", "600"))
 # 8/6: crypto sub-cycle - the crypto book scans every CRYPTO_SUB_S
 # seconds inside the drift book's CYCLE_S nap (hourly markets are too
@@ -1538,10 +1543,12 @@ class DriftLive:
                                 for b in list(self.bets.values())
                                 + list(self.pending.values())
                                 if b.get("trig") == "nickel")
-                while size > 1 and entry * size > pos_cap_c:
-                    size -= 1
-                if (entry * size > pos_cap_c
-                        or lane_cost + entry * size > int(nav_c * NICKEL_LANE_PCT)):
+                while size > MIN_CONTRACTS and entry * size > pos_cap_c:
+                    size -= 1               # 8/10: trim floor = 5, not 1
+                # 8/10: the 5-lot floor overrides the single-position
+                # cap (same semantics as the level lanes since 8/7);
+                # the LANE aggregate cap still binds and skips.
+                if lane_cost + entry * size > int(nav_c * NICKEL_LANE_PCT):
                     continue
             else:
                 if gate_mode == "probe":

@@ -229,13 +229,15 @@ def test_taker_falls_back_to_maker_when_toll_too_big(tmp_path, monkeypatch):
 
 def test_nickel_pos_cap_trims_to_nav(tmp_path, monkeypatch):
     monkeypatch.setattr(dl, 'WX_ALLOC', 1.0)   # cap math, pre-split
-    # 7/29: no single nickel may cost more than 10% of NAV
+    # 7/29 pos cap trims the ladder; 8/10 the 5-lot floor overrides it
+    # (Adam: every weather position >= 5 contracts) - only the LANE
+    # aggregate cap may skip a nickel now
     b = _bot(tmp_path, monkeypatch)
     b.dry_balance_c = 3000                    # NAV $30 -> pos cap $3.00
     assert b.place(mkts=[_mk(bid=95, ask=97)]) == 1
     bet = next(iter(b.bets.values()))
-    assert bet["trig"] == "nickel" and bet["count"] == 3   # 10 -> 3
-    assert bet["entry"] * bet["count"] <= 300
+    assert bet["trig"] == "nickel" and bet["count"] == 5   # 10 -> floor 5
+    assert bet["entry"] * bet["count"] <= int(3000 * dl.NICKEL_LANE_PCT)
 
 
 def test_nickel_lane_cap_blocks_fourth(tmp_path, monkeypatch):

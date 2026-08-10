@@ -312,8 +312,17 @@ def build_data():
         # REAL-MONEY section detail: THE MIRROR - Kalshi's own positions and
         # resting orders (written verbatim by the executor each cycle) are
         # what renders; the bot's internal book is only a fallback.
-        dop = ([dict(b) for b in (lv.get("k_positions") or [])]
-               or [dict(b, ticker=tk) for tk, b in (lv.get("bets") or {}).items()])
+        # 8/10 reconcile fix: a mirror row the book has ALREADY SETTLED
+        # is cash in flight, not a position - its dollars live in recv_c
+        # until the exchange credits them. Valuing it here double-counted
+        # every just-settled winner for the few minutes Kalshi keeps
+        # listing it after settlement.
+        _wdone = {h.get("tk") for h in (lv.get("history") or [])}
+        _wbets = lv.get("bets") or {}
+        dop = ([dict(b) for b in (lv.get("k_positions") or [])
+                if not ((b.get("ticker") in _wdone)
+                        and (b.get("ticker") not in _wbets))]
+               or [dict(b, ticker=tk) for tk, b in _wbets.items()])
         rest = ([dict(o) for o in (lv.get("k_resting") or [])]
                 or [dict(o) for o in (lv.get("pending") or {}).values()])
         _WANT["tickers"] = (_WANT.get("tickers") or []) +             [b.get("ticker") for b in dop if b.get("ticker")]
@@ -406,10 +415,19 @@ def build_data():
         _internal = {(b.get("ticker") or ""): b
                      for b in (out[key].get("open") or [])}
         _kp = out[key].get("k_positions")
+        # 8/10 reconcile fix (found live: two just-settled winners showed
+        # as entry-0 "positions" worth $5.55 WHILE their $6.00 payout also
+        # sat in recv_c - a transient double count every settlement hour).
+        # A mirror row the book already settled is cash in flight, not a
+        # position: skip it; recv_c carries its value until the credit.
+        _cdone = {h.get("tk") for h in (out[key].get("history") or [])}
         if _kp:
             dop = []
             for p in _kp:
-                row = dict(_internal.get(p.get("ticker") or "",
+                _tk = p.get("ticker") or ""
+                if _tk in _cdone and _tk not in _internal:
+                    continue
+                row = dict(_internal.get(_tk,
                                          {"name": p.get("ticker", ""),
                                           "entry": 0, "ots": ""}))
                 row.update({"ticker": p.get("ticker"),
