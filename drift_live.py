@@ -106,7 +106,15 @@ REQUOTE_MAX = int(os.environ.get("DRIFT_LIVE_REQUOTE_MAX", "2"))
 # 1-2c toll instead of missing the winner entirely.
 TAKER_ON = os.environ.get("DRIFT_LIVE_TAKER", "1") == "1"
 TAKER_MIN_SMID = float(os.environ.get("DRIFT_LIVE_TAKER_SMID", "84"))
-TAKER_MAX_SPREAD = int(os.environ.get("DRIFT_LIVE_TAKER_SPREAD", "4"))
+TAKER_MAX_SPREAD = int(os.environ.get("DRIFT_LIVE_TAKER_SPREAD", "6"))
+# 8/10 TAKER-FIRST (Adam: "stop the misses, even if it means market
+# orders over limit orders - at our NAV the spread doesn't matter").
+# The 8/10 autopsy: 78 missed weather orders, 78/78 WOULD HAVE WON,
+# $36.72 forfeited - double what the crypto book ever lost. Every
+# level/climb entry now tries the ask FIRST (fenced by the band ceiling
+# and TAKER_MAX_SPREAD, widened 4->6); the maker join is the fallback,
+# not the default. Nickels keep resting - their edge IS the limit price.
+TAKER_FIRST = os.environ.get("DRIFT_LIVE_TAKER_FIRST", "1") == "1"
 # 7/28 widening (Adam-approved): miss-autopsy day one - 9/9 canceled
 # unfilled orders would have WON, $3.44 forfeited to patience. Was 88/2.
 # Live disaster stop (7/28, Adam-approved): exit autopsy says 5/6 stops
@@ -114,6 +122,15 @@ TAKER_MAX_SPREAD = int(os.environ.get("DRIFT_LIVE_TAKER_SPREAD", "4"))
 # recovered) - weather favorites routinely dip through 50c and settle
 # green. Only a true collapse (<35c) gets cut now. Paper brain keeps 50.
 STOP_C = float(os.environ.get("DRIFT_LIVE_STOP_C", "35"))
+# 8/10 (Adam-approved, mirrors the crypto stop retirement): the weather
+# disaster stop is RETIRED. Exit autopsy over 48 graded exits: 14 would
+# have WON at settlement and the policy netted -$1.91 - the same
+# wobble-tax every earlier exit rule paid. A binary that truly collapses
+# between 3-minute polls can't be protected by a price stop anyway
+# (8/8 Austin: 84c entry sold at 4c). Hold to settlement; the daily-loss
+# halt and the NAV %-caps remain the risk controls.
+# DRIFT_LIVE_STOP_ON=1 restores the old behaviour.
+WSTOP_ON = os.environ.get("DRIFT_LIVE_STOP_ON", "0") == "1"
 # --- Bucket routing (7/25): capital flows ONLY to trigger x entry-band
 # cells that aren't proven losers on the live ledger. ---
 BUCKET_GATE_ON = os.environ.get("DRIFT_LIVE_BUCKET_GATE", "1") == "1"
@@ -134,7 +151,11 @@ KELLY_PROVEN_N = int(os.environ.get("DRIFT_LIVE_KELLY_PROVEN_N", "10"))
 # lane (filled + resting) stays under NICKEL_LANE_PCT - same trades,
 # sized to survive the bad week. Ladder (10->15->20) unchanged.
 NICKEL_POS_PCT = float(os.environ.get("DRIFT_LIVE_NICKEL_POS_PCT", "0.10"))
-NICKEL_LANE_PCT = float(os.environ.get("DRIFT_LIVE_NICKEL_LANE_PCT", "0.30"))
+# 8/10 (Adam-approved): lane cap tightened 30% -> 25% of NAV. The lane
+# is 26-0 (+$12.86) but its payoff is ~1:6 against - survival math says
+# the streak doesn't yet prove the win rate the price implies, so the
+# lane's blast radius shrinks while the evidence accumulates.
+NICKEL_LANE_PCT = float(os.environ.get("DRIFT_LIVE_NICKEL_LANE_PCT", "0.25"))
 # Cross-on-expiry (7/30, Adam-approved): miss-autopsy hit 20/20 - EVERY
 # unfilled cancel went on to WIN, $10.90 forfeited vs +$3.09 era profit.
 # When a maker join goes stale (2h) and the signal still holds (side-mid
@@ -288,6 +309,13 @@ class DriftLive:
         self.k_positions = []    # Kalshi's positions, verbatim (the display)
         self.k_resting = []      # Kalshi's resting orders, verbatim
         self.dry_balance_c = 10000
+        # 8/10 settlement receivable: we detect a win minutes before the
+        # exchange credits the cash, so NAV briefly under-read by the
+        # position's whole payout. The credit now sits here (consumed as
+        # the balance rises, hard-expired at 15 min) and marked_nav adds
+        # it - the dip class is closed.
+        self.recv = []           # [[ts, amount_c], ...]
+        self.recv_bal_c = None   # last balance seen by _recv_c
         self.load()
 
     # ---- persistence ----
@@ -302,7 +330,7 @@ class DriftLive:
                           "canceled", "day", "day_pnl_c", "history",
                           "settled_tks", "k_settlements", "k_exit_realized_c",
                           "day_nav0_c", "autopsy", "miss", "exec_stats",
-                          "k_cum", "pnl_days",
+                          "k_cum", "pnl_days", "recv", "recv_bal_c",
                           "k_positions", "k_resting", "dry_balance_c"):
                     if k in d:
                         setattr(self, k, d[k])
@@ -600,7 +628,9 @@ class DriftLive:
         graded = [r for r in self.miss if r.get("res") is not None]
         why = {}
         for r in self.miss:
-            k = r.get("why") or "unknown"
+            # rows from before the 8/7 instrumentation have no why key
+            # at all - label them honestly instead of "unknown" (8/10)
+            k = (r.get("why") or "unknown") if "why" in r else "pre_8/7_rows"
             a = why.setdefault(k, {"n": 0, "cost": 0.0})
             a["n"] += 1
             a["cost"] = round(a["cost"] + (r.get("cross_pnl") or 0), 2)
@@ -645,8 +675,11 @@ class DriftLive:
         os.makedirs("logs", exist_ok=True)
         mode_gate, gate_n = self._gate()
         real_w, real_l = self._real_record()
+        recv_c = self._recv_c(balance_c)     # consume/expire BEFORE saving
         d = {"updated": now(), "mode": self.mode,
              "balance_c": balance_c,
+             "recv": self.recv, "recv_bal_c": self.recv_bal_c,
+             "recv_c": recv_c,
              "bets": self.bets, "pending": self.pending,
              "last_mid": self.last_mid, "last_vol": self.last_vol,
              "realized_c": self.realized_c, "fees_c": self.fees_c,
@@ -979,6 +1012,33 @@ class DriftLive:
         oc += sum(o["entry"] * o["count"] for o in self.pending.values())
         return oc
 
+    # ---- settlement receivable (8/10): bridges the minutes between our
+    # settlement detection and the exchange's cash credit so NAV never
+    # dips by a winner's payout. Consumed as the balance rises; anything
+    # unconsumed hard-expires at 15 minutes so it can never overstate
+    # NAV for long. ----
+    def _recv_add(self, amount_c):
+        self.recv.append([now(), int(amount_c)])
+
+    def _recv_c(self, balance_c=None):
+        if balance_c is not None:
+            prev = self.recv_bal_c
+            self.recv_bal_c = balance_c
+            if prev is not None and balance_c > prev and self.recv:
+                gain = balance_c - prev
+                keep = []
+                for ts, amt in self.recv:
+                    if gain >= amt:
+                        gain -= amt
+                        continue
+                    keep.append([ts, amt - gain])
+                    gain = 0
+                self.recv = keep
+        cut = (datetime.datetime.now()
+               - datetime.timedelta(minutes=15)).isoformat(timespec="seconds")
+        self.recv = [r for r in self.recv if str(r[0]) > cut]
+        return int(sum(r[1] for r in self.recv))
+
     def balance_c(self):
         if self.client is None:
             return self.dry_balance_c
@@ -1064,8 +1124,22 @@ class DriftLive:
                     self._promote_fill(oid, o, filled)
                 if filled == 0 and seen == 0:
                     self.canceled += 1
-                self._log_miss(o, o["count"] - seen - filled,
-                               why="order_vanished")
+                unfilled_v = o["count"] - seen - filled
+                # 8/10 (Adam: "stop the misses"): a vanished order is
+                # re-entered at the ask RIGHT NOW instead of being
+                # forfeited - signal, caps and balance are all
+                # re-checked inside _cross_expiring. Since the 8/7
+                # instrumentation EVERY vanished order (15/15 weather,
+                # 9/9 crypto) settled as a winner we didn't hold.
+                if (unfilled_v > 0 and CROSS_EXPIRY
+                        and self._cross_expiring(o, unfilled_v)):
+                    self.exec_stats["revanish"] = (
+                        self.exec_stats.get("revanish", 0) + 1)
+                else:
+                    self._log_miss(o, unfilled_v,
+                                   why="vanished_" + (getattr(
+                                       self, "_cross_why", "") or "cross_off"),
+                                   ask=getattr(self, "_cross_ask", 0))
                 del self.pending[oid]
                 continue
             # still resting: promote any PARTIAL fills so stops/settles
@@ -1222,6 +1296,8 @@ class DriftLive:
                 self.dry_balance_c += payout * b["count"]
             self.wins += int(won)
             self.losses += int(not won)
+            if won and self.client is not None:
+                self._recv_add(100 * b["count"])
             self.settled_tks.append(tk)
             self.settled_tks = self.settled_tks[-300:]
             self.history.append({"tk": tk, "city": b["city"], "strike": b["strike"],
@@ -1239,6 +1315,10 @@ class DriftLive:
 
     # ---- momentum stop + trailing exit (taker sells, same rules as paper) ----
     def stop_check(self, quotes=None):
+        # stop retired 8/10 (see WSTOP_ON); trails were already off. The
+        # peak tracking below is harmless bookkeeping either way.
+        if not (WSTOP_ON or TRAIL_ON or NICKEL_TRAIL):
+            return 0
         if not self.bets:
             return 0
         if quotes is None:
@@ -1258,7 +1338,7 @@ class DriftLive:
             trail_ok = NICKEL_TRAIL if b.get("trig") == "nickel" else TRAIL_ON
             fade = (smid >= STOP_C and peak - smid >= dp.FADE_DROP_C
                     and trail_ok)
-            if smid >= STOP_C and not fade:
+            if not fade and (smid >= STOP_C or not WSTOP_ON):
                 continue
             bid = yb if b["side"] == "yes" else 100 - ya
             if bid <= 0:
@@ -1418,7 +1498,7 @@ class DriftLive:
                 # mids keep the original gate
                 proven_lane = (self._kelly_frac(bstats, trig, entry)
                                > KELLY_BASE)
-                if smid >= TAKER_MIN_SMID or proven_lane:
+                if TAKER_FIRST or smid >= TAKER_MIN_SMID or proven_lane:
                     ask_side = (mk["yes_ask"] if side == "yes"
                                 else 100 - mk["yes_bid"])
                     if (0 < ask_side - entry <= TAKER_MAX_SPREAD

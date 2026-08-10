@@ -39,7 +39,10 @@ def test_level_entry_dry_fills(tmp_path, monkeypatch):
     # DRY: resting order promoted to a position instantly
     assert not b.pending and len(b.bets) == 1
     bet = next(iter(b.bets.values()))
-    assert bet["side"] == "yes" and bet["entry"] == 82
+    # 8/10 taker-first: every level entry crosses to the ask (78/78
+    # misses would have won; the spread toll is cheaper than the miss)
+    assert bet["side"] == "yes" and bet["entry"] == 85
+    assert b.exec_stats.get("filled_taker") == 1
     assert bet["era"] == "dlive1" and bet["trig"] == "level"
     assert bet["entry"] * bet["count"] <= b.max_bet_c
     assert b.dry_balance_c < 10000
@@ -88,6 +91,7 @@ def test_nickel_size_steps_on_proof(tmp_path, monkeypatch):
 
 def test_pyramid_add_on_runner(tmp_path, monkeypatch):
     monkeypatch.setattr(dl, "MIN_CONTRACTS", 1)  # not what this tests
+    monkeypatch.setattr(dl, "TAKER_FIRST", False)  # nor is execution
     b3 = _bot(tmp_path, monkeypatch)
     b3.place(mkts=[_mk(bid=80, ask=83)])         # level entry at 80
     tk3 = next(iter(b3.bets))
@@ -150,12 +154,19 @@ def test_trail_off_by_default_holds_to_settlement(tmp_path, monkeypatch):
     # 46c now HOLDS; only a true collapse below STOP_C=35 gets cut
     assert b.stop_check(quotes={"T1": (44, 48)}) == 0
     assert "T1" in b.bets
-    assert b.stop_check(quotes={"T1": (30, 34)}) == 1     # disaster stop
+    # 8/10: the disaster stop is retired too (autopsy: exits netted
+    # -$1.91; a collapse between polls can't be stopped anyway). HOLD.
+    assert b.stop_check(quotes={"T1": (30, 34)}) == 0
+    assert "T1" in b.bets
+    # env rollback path still works
+    monkeypatch.setattr(dl, "WSTOP_ON", True)
+    assert b.stop_check(quotes={"T1": (30, 34)}) == 1
     assert b.history[-1]["stopped"] is True
 
 
 def test_stop_and_trail_when_reenabled(tmp_path, monkeypatch):
     monkeypatch.setattr(dl, "TRAIL_ON", True)
+    monkeypatch.setattr(dl, "WSTOP_ON", True)
     b = _bot(tmp_path, monkeypatch)
     b.bets = {"T1": _lvl_bet()}
     assert b.stop_check(quotes={"T1": (80, 84)}) == 0     # healthy: hold
@@ -228,15 +239,16 @@ def test_nickel_pos_cap_trims_to_nav(tmp_path, monkeypatch):
 
 
 def test_nickel_lane_cap_blocks_fourth(tmp_path, monkeypatch):
-    # lane (filled + resting) capped at 30% of NAV
+    # lane (filled + resting) capped at 25% of NAV (8/10: was 30% -
+    # survival math says the 26-0 streak doesn't yet prove the price)
     b = _bot(tmp_path, monkeypatch)
-    b.dry_balance_c = 10000                   # lane cap $30 -> three 10-lots
+    b.dry_balance_c = 10000                   # lane cap $25 -> two 10-lots
     ms = [_mk(tk=f"KXHIGHNY-26JUL-N{i}", bid=95, ask=97, city=f"c{i}",
               strike=i) for i in range(7)]
     b.place(mkts=ms)
     nk = [x for x in b.bets.values() if x["trig"] == "nickel"]
-    assert len(nk) == 3                       # 3 x $9.50 fits, 4th would break
-    assert sum(x["entry"] * x["count"] for x in nk) <= 3000
+    assert len(nk) == 2                       # 2 x $9.50 fits, 3rd would break
+    assert sum(x["entry"] * x["count"] for x in nk) <= 2500
 
 
 def _stale_order(tk="T1", entry=80, count=2, trig="level"):
@@ -295,9 +307,11 @@ def test_cross_expiring_respects_caps(tmp_path, monkeypatch):
 
 
 def test_execution_defaults_widened():
-    # 7/28 (miss-autopsy 9/9 would-won): taker gate widened, stop deepened
-    assert dl.TAKER_MIN_SMID == 84 and dl.TAKER_MAX_SPREAD == 4
-    assert dl.STOP_C == 35
+    # 8/10 (miss-autopsy 78/78 would-won, $36.72): TAKER-FIRST is the
+    # default and the spread fence widened 4 -> 6; the stop is retired
+    assert dl.TAKER_FIRST is True
+    assert dl.TAKER_MIN_SMID == 84 and dl.TAKER_MAX_SPREAD == 6
+    assert dl.STOP_C == 35 and dl.WSTOP_ON is False
     assert dl.ENTRY_FLOOR == 80          # 7/31: sub-80c entries killed
     # 8/4 pursuit escalation (52/52 misses would have won, $26.72):
     assert dl.REST_MAX_H == 0.5          # cross at 30 min, not 45
@@ -326,12 +340,19 @@ def test_taker_first_on_proven_lane(tmp_path, monkeypatch):
     bet = next(iter(b.bets.values()))
     assert bet["entry"] == 84                   # crossed, didn't queue
     assert b.exec_stats.get("filled_taker") == 1
-    # same setup, unproven lane, smid below gate -> still a maker join
+    # 8/10 taker-first: even an unproven lane below the smid gate
+    # crosses now - the maker join is only a fallback (TAKER_FIRST=0)
     monkeypatch.setattr(dl, "KELLY_PROVEN_N", 999)
     b2 = _bot(tmp_path, monkeypatch)
     b2.history = _proven_hist(entry=82)
     assert b2.place(mkts=[_mk(bid=82, ask=84)]) == 1
-    assert next(iter(b2.bets.values()))["entry"] == 82  # joined the bid
+    assert next(iter(b2.bets.values()))["entry"] == 84  # crossed anyway
+    # with taker-first off, the old maker join comes back
+    monkeypatch.setattr(dl, "TAKER_FIRST", False)
+    b3 = _bot(tmp_path, monkeypatch)
+    b3.history = _proven_hist(entry=82)
+    assert b3.place(mkts=[_mk(bid=82, ask=84)]) == 1
+    assert next(iter(b3.bets.values()))["entry"] == 82  # joined the bid
 
 
 def test_dynamic_caps_track_nav(tmp_path, monkeypatch):
@@ -648,3 +669,18 @@ def test_weather_floor_overrides_the_bet_cap(tmp_path, monkeypatch):
               strike=87)]
     b.place(mkts=ms)
     assert b.bets and list(b.bets.values())[0]["count"] == 3
+
+
+def test_settlement_receivable_bridges_nav(tmp_path, monkeypatch):
+    # 8/10: a detected win's payout sits in the receivable until the
+    # exchange's balance credit lands (consumed on balance rise,
+    # hard-expired at 15 min) so marked NAV never dips at settlement
+    b = _bot(tmp_path, monkeypatch)
+    b._recv_add(300)
+    assert b._recv_c() == 300                   # no balance info: held
+    assert b._recv_c(balance_c=5000) == 300     # first sighting anchors
+    assert b._recv_c(balance_c=5200) == 100     # +200 credit consumed
+    assert b._recv_c(balance_c=5300) == 0       # fully consumed
+    b._recv_add(500)
+    b.recv[-1][0] = "2000-01-01T00:00:00"       # ancient: hard-expired
+    assert b._recv_c() == 0
