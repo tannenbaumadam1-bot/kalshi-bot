@@ -913,9 +913,10 @@ def test_arb_pair_places_on_violation(tmp_path, monkeypatch):
     assert n_["side"] == "no" and n_["entry"] == 10 and n_["band"] == "arb"
     assert pair["n"] == cl.ARB_CONTRACTS
     # locked profit: gap*n - both fees, at least 1c/contract
-    fees = (cl.fee_cents(86, 3, taker=True)
-            + cl.fee_cents(10, 3, taker=True))
-    assert pair["net_c"] == 4 * 3 - fees and pair["net_c"] >= 3
+    _n = cl.ARB_CONTRACTS
+    fees = (cl.fee_cents(86, _n, taker=True)
+            + cl.fee_cents(10, _n, taker=True))
+    assert pair["net_c"] == 4 * _n - fees and pair["net_c"] >= _n
     # the coin+hour is now ONE opinion: no directional bet may join it
     assert b.place(mkts=_arb_mkts()) == 0 and len(b.bets) == 2
     # reconcile marks the double-filled pair as on

@@ -137,7 +137,8 @@ ARB_ON = os.environ.get("CRYPTO_ARB_ON", "1") == "1"
 # minimum locked profit per contract AFTER both taker fees
 ARB_MIN_NET_C = float(os.environ.get("CRYPTO_ARB_MIN_NET_C", "1"))
 ARB_MAX_PAIRS = int(os.environ.get("CRYPTO_ARB_MAX_PAIRS", "3"))
-ARB_CONTRACTS = int(os.environ.get("CRYPTO_ARB_CONTRACTS", "3"))
+# 8/10 (Adam): 5-contract minimum across ALL strategies
+ARB_CONTRACTS = int(os.environ.get("CRYPTO_ARB_CONTRACTS", "5"))
 MAX_SPREAD = int(os.environ.get("CRYPTO_MAX_SPREAD", "4"))
 MIN_VOL24 = float(os.environ.get("CRYPTO_MIN_VOL24", "500"))
 # 8/6: Kalshi now lists each hourly crypto event only ~60 min before its
@@ -188,7 +189,9 @@ MAX_PER_CYCLE = int(os.environ.get("CRYPTO_MAX_PER_CYCLE", "15"))
 # skips. Balance/reserve and the OPEN cap still bind (those stop the book
 # overdrawing or overexposing in aggregate). Kelly resumes control
 # automatically once the bankroll asks for >= MIN_CONTRACTS unaided.
-MIN_CONTRACTS = int(os.environ.get("CRYPTO_MIN_CONTRACTS", "3"))
+# 8/10 (Adam): 5-contract minimum across ALL strategies (book is
+# paused; this applies the moment it ever resumes)
+MIN_CONTRACTS = int(os.environ.get("CRYPTO_MIN_CONTRACTS", "5"))
 REST_MAX_MIN = float(os.environ.get("CRYPTO_REST_MAX_MIN", "30"))
 # COMPOUNDING LADDER (8/3, Adam): the bankroll side already compounds -
 # bank = 50% of account NAV, refreshed EVERY cycle, so every settled win
