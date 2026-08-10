@@ -686,3 +686,87 @@ def test_settlement_receivable_bridges_nav(tmp_path, monkeypatch):
     b._recv_add(500)
     b.recv[-1][0] = "2000-01-01T00:00:00"       # ancient: hard-expired
     assert b._recv_c() == 0
+
+
+# ---- 8/10 two-sided book: premium offer side ----
+
+def test_offer_defaults():
+    assert dl.QUOTE_ON is True
+    assert dl.SELL_MIN_C == 97 and dl.NICKEL_SELL_MIN_C == 98
+    assert dl.SELL_CAP_C == 99
+
+
+def test_premium_offers_quote_all_inventory(tmp_path, monkeypatch):
+    b = _bot(tmp_path, monkeypatch)
+    b.place(mkts=[_mk(bid=82, ask=85)])         # level, taker fill at 85
+    b.quote_offers()
+    tk = next(iter(b.bets))
+    off = b.offers[tk]
+    # level entry 85: min(99, max(97, 91)) = 97, full position size
+    assert off["px"] == 97 and off["count"] == b.bets[tk]["count"]
+    # nickel entry 95: min(99, max(98, 101)) = 99
+    monkeypatch.setattr(dl, 'WX_ALLOC', 1.0)
+    b2 = _bot(tmp_path, monkeypatch)
+    b2.place(mkts=[_mk(bid=95, ask=97)])
+    b2.quote_offers()
+    tk2 = next(iter(b2.bets))
+    assert b2.bets[tk2]["trig"] == "nickel"
+    assert b2.offers[tk2]["px"] == 99
+    # idempotent: re-running does not duplicate or resize
+    n_off = dict(b.offers)
+    b.quote_offers()
+    assert b.offers == n_off
+
+
+def test_offer_fill_books_premium_and_recycles(tmp_path, monkeypatch):
+    b = _bot(tmp_path, monkeypatch)
+    b.place(mkts=[_mk(bid=82, ask=85)])
+    tk = next(iter(b.bets))
+    n = b.bets[tk]["count"]
+    r0, day0 = b.realized_c, b.day_pnl_c
+    b.quote_offers()
+    oid = b.offers[tk]["oid"]
+    # someone lifts the whole offer at 97c
+    b._check_offers(set(), {oid: n})
+    assert tk not in b.bets and tk not in b.offers
+    assert b.realized_c > r0 and b.day_pnl_c > day0
+    h = b.history[-1]
+    assert h.get("sold") is True and h["exit_px"] == 97 and h["pnl"] > 0
+    # roughly (97-85)*n minus entry+sell fees, in dollars
+    assert h["pnl"] >= (97 - 85) * n / 100.0 - 0.15
+
+
+def test_offer_partial_fill_shrinks_and_requotes(tmp_path, monkeypatch):
+    b = _bot(tmp_path, monkeypatch)
+    b.place(mkts=[_mk(bid=82, ask=85)])
+    tk = next(iter(b.bets))
+    n = b.bets[tk]["count"]
+    assert n >= 5                                # 8/10 floor
+    b.quote_offers()
+    oid = b.offers[tk]["oid"]
+    b._check_offers(set(), {oid: 2})             # 2 of n lifted
+    assert b.bets[tk]["count"] == n - 2
+    assert tk not in b.offers                    # cleared for requote
+    b.quote_offers()
+    assert b.offers[tk]["count"] == n - 2        # fresh quote, new size
+    # position settles before the quote lifts: stale offer dropped
+    del b.bets[tk]
+    b.quote_offers()
+    assert tk not in b.offers
+
+
+def test_offer_never_below_cost_or_when_off(tmp_path, monkeypatch):
+    b = _bot(tmp_path, monkeypatch)
+    b.bets["T1"] = _lvl_bet()
+    b.bets["T1"]["entry"] = 98                   # deep entry: 99 quote ok
+    b.quote_offers()
+    assert b.offers["T1"]["px"] == 99            # still above cost
+    b.bets["T2"] = _lvl_bet()
+    b.bets["T2"]["entry"] = 99                   # nothing above cost <= 99
+    b.quote_offers()
+    assert "T2" not in b.offers
+    monkeypatch.setattr(dl, "QUOTE_ON", False)
+    b3 = _bot(tmp_path, monkeypatch)
+    b3.bets["T3"] = _lvl_bet()
+    b3.quote_offers()
+    assert not b3.offers

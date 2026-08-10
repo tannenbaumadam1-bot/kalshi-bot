@@ -207,6 +207,22 @@ ENTRY_FLOOR = int(os.environ.get("DRIFT_LIVE_ENTRY_FLOOR", "80"))
 # and the OPEN cap still bind. The nickel lane's own trim floor rises
 # to match (it was allowed to trim to 1).
 MIN_CONTRACTS = int(os.environ.get("DRIFT_LIVE_MIN_CONTRACTS", "5"))
+# --- 8/10 TWO-SIDED QUOTING (Adam-approved): the taker-first entries
+# are the BID side of a market-making book; this is the OFFER side.
+# Every filled position rests a maker SELL at a premium price -
+# min(99, max(SELL_MIN, entry + SELL_MARKUP)), nickels floored at
+# NICKEL_SELL_MIN. Anyone lifting it pays us more than settlement EV
+# at typical entry psides, AND the capital comes back the same day
+# instead of waiting for tomorrow's 11:00 settlement - so it can be
+# re-deployed into the next signal (recycling > per-trade edge).
+# Both floors sit above the 97c entry/chase ceiling, so a fill is
+# always a realized profit by construction (net of the maker fee).
+# This is NOT the retired stop/trail: we never sell below entry.
+QUOTE_ON = os.environ.get("DRIFT_LIVE_QUOTES", "1") == "1"
+SELL_MIN_C = int(os.environ.get("DRIFT_LIVE_SELL_MIN", "97"))
+NICKEL_SELL_MIN_C = int(os.environ.get("DRIFT_LIVE_NICKEL_SELL_MIN", "98"))
+SELL_MARKUP_C = int(os.environ.get("DRIFT_LIVE_SELL_MARKUP", "6"))
+SELL_CAP_C = 99
 CYCLE_S = int(os.environ.get("DRIFT_LIVE_CYCLE_S", "600"))
 # 8/6: crypto sub-cycle - the crypto book scans every CRYPTO_SUB_S
 # seconds inside the drift book's CYCLE_S nap (hourly markets are too
@@ -325,6 +341,9 @@ class DriftLive:
         # it - the dip class is closed.
         self.recv = []           # [[ts, amount_c], ...]
         self.recv_bal_c = None   # last balance seen by _recv_c
+        # 8/10 two-sided book: resting premium SELL quotes, one per held
+        # position - tk -> {oid, px, count, ots}
+        self.offers = {}
         self.load()
 
     # ---- persistence ----
@@ -340,6 +359,7 @@ class DriftLive:
                           "settled_tks", "k_settlements", "k_exit_realized_c",
                           "day_nav0_c", "autopsy", "miss", "exec_stats",
                           "k_cum", "pnl_days", "recv", "recv_bal_c",
+                          "offers",
                           "k_positions", "k_resting", "dry_balance_c"):
                     if k in d:
                         setattr(self, k, d[k])
@@ -700,6 +720,7 @@ class DriftLive:
              "settled_tks": self.settled_tks[-300:],
              "k_settlements": self.k_settlements[:300],
              "k_cum": self.k_cum,
+             "offers": self.offers,
              "pnl_days": self.pnl_days,
              "k_exit_realized_c": self.k_exit_realized_c,
              "autopsy": self.autopsy[-200:],
@@ -731,6 +752,13 @@ class DriftLive:
                                       if self.k_cum.get("seeded")
                                       else sum(s["pnl"] for s in self.k_settlements))
                                      + self.k_exit_realized_c / 100.0, 2),
+                 "quotes": {"on": QUOTE_ON,
+                            "resting": len(self.offers),
+                            "sold": self.exec_stats.get("offers_sold", 0),
+                            "sold_net": round(self.exec_stats.get(
+                                "offers_sold_net_c", 0) / 100.0, 2),
+                            "min": SELL_MIN_C,
+                            "nickel_min": NICKEL_SELL_MIN_C},
                  "day_nav0": (round(self.day_nav0_c / 100.0, 2)
                               if self.day_nav0_c is not None else None),
                  "has_kalshi_truth": bool(self.k_settlements) or self.k_exit_realized_c != 0,
@@ -1085,7 +1113,7 @@ class DriftLive:
         7/23: a create-order response parse fallback left synthetic ids ->
         every order looked canceled one cycle later while the real orders
         kept resting and filling unmanaged)."""
-        if not self.pending:
+        if not self.pending and not self.offers:
             return
         resting_ids = set()
         resting_by_tk = {}
@@ -1098,8 +1126,12 @@ class DriftLive:
                     resting_by_tk.setdefault(ro.get("ticker"), []).append(roid)
             except Exception:
                 return                      # can't verify -> touch nothing
-            # heal synthetic/mismatched oids by ticker before lifecycle checks
-            owned = {oid for oid in self.pending}
+            # heal synthetic/mismatched oids by ticker before lifecycle
+            # checks. 8/10: our own SELL quotes rest on tickers we hold -
+            # they must never be adopted as buy-order ids, so they count
+            # as owned here.
+            owned = ({oid for oid in self.pending}
+                     | {o.get("oid") for o in self.offers.values()})
             for oid, o in list(self.pending.items()):
                 if oid in resting_ids:
                     continue
@@ -1181,6 +1213,106 @@ class DriftLive:
                            o["hl"], o["side"], round(o["pside"], 3),
                            o["entry"], o["count"], "", "", oid])
                 del self.pending[oid]
+        if self.client is not None:
+            self._check_offers(resting_ids, fills_by_oid)
+
+    # ---- 8/10 two-sided book: the OFFER side --------------------------
+    def quote_offers(self):
+        """Rest a premium maker SELL against every held position. The
+        entries (taker-first) are the bid side; this completes the book.
+        A lifted offer = realized profit above entry AND same-day capital
+        recycling. Never quotes below entry; the retired stop/trail
+        machinery is untouched."""
+        if not QUOTE_ON:
+            return
+        # cleanup/resize pass: settled positions drop their quote;
+        # resized positions (partial sell, pyramid add) requote fresh
+        for tk, off in list(self.offers.items()):
+            b = self.bets.get(tk)
+            if b is not None and int(b.get("count", 0)) == int(off.get("count", 0)):
+                continue
+            if self.client is not None:
+                try:
+                    self.client.cancel_order(off.get("oid"))
+                except Exception:
+                    pass        # settled markets kill their orders anyway
+            del self.offers[tk]
+        for tk, b in list(self.bets.items()):
+            if tk in self.offers or int(b.get("count", 0)) < 1:
+                continue
+            floor = (NICKEL_SELL_MIN_C if b.get("trig") == "nickel"
+                     else SELL_MIN_C)
+            px = min(SELL_CAP_C, max(floor, int(b["entry"]) + SELL_MARKUP_C))
+            if px <= int(b["entry"]):
+                continue        # never quote at or below cost
+            oid = f"of-{self.placed + 1}"
+            if self.client is not None:
+                try:
+                    resp = self.client.create_order(
+                        tk, action="sell", side=b["side"],
+                        count=int(b["count"]), price_cents=px)
+                    ro = resp.get("order") or {}
+                    oid = (ro.get("order_id") or ro.get("id")
+                           or resp.get("order_id") or resp.get("id") or oid)
+                except Exception:
+                    continue
+            self.offers[tk] = {"oid": oid, "px": px,
+                               "count": int(b["count"]), "ots": now()}
+            self.placed += 1
+            self.exec_stats["offers_placed"] = (
+                self.exec_stats.get("offers_placed", 0) + 1)
+            self._log([now(), "OFFER", self.mode, b["city"], b["strike"],
+                       b["hl"], b["side"], round(b.get("pside", 0), 3),
+                       px, b["count"], "", "", oid])
+
+    def _check_offers(self, resting_ids, fills_by_oid):
+        """Book lifted offers: realized premium, position reduced or
+        closed, cash freed for the next signal."""
+        for tk, off in list(self.offers.items()):
+            b = self.bets.get(tk)
+            oid = off.get("oid")
+            if b is None:
+                del self.offers[tk]         # settled first: quote is dead
+                continue
+            if oid in resting_ids:
+                continue                    # still quoted
+            sold = 0
+            if fills_by_oid is not None:
+                sold = min(int(b["count"]), int(fills_by_oid.get(oid, 0)))
+            del self.offers[tk]             # gone either way; requote later
+            if sold <= 0:
+                continue                    # canceled externally, not lifted
+            px = int(off.get("px", 0))
+            fee_share = int(round(b.get("fee", 0) * sold / max(1, b["count"])))
+            sell_fee = fee_cents(px, sold, taker=False)
+            net = (px - b["entry"]) * sold - fee_share - sell_fee
+            self.realized_c += net
+            self._day_add(net)
+            self.day_pnl_c += net
+            self.fees_c += sell_fee
+            self.exec_stats["offers_sold"] = (
+                self.exec_stats.get("offers_sold", 0) + 1)
+            self.exec_stats["offers_sold_net_c"] = round(
+                self.exec_stats.get("offers_sold_net_c", 0) + net, 1)
+            self.history.append({"tk": tk, "city": b["city"],
+                                 "strike": b["strike"],
+                                 "kind": b.get("kind", "ge"),
+                                 "cap": b.get("cap"), "hl": b["hl"],
+                                 "side": b["side"], "trig": b.get("trig"),
+                                 "pside": round(b.get("pside", 0), 3),
+                                 "entry": b["entry"], "count": sold,
+                                 "outcome": None, "exited": True,
+                                 "sold": True, "exit_px": px,
+                                 "pnl": round(net / 100, 2), "ts": now(),
+                                 "ots": b.get("ots", ""), "era": ERA})
+            self._log([now(), "SOLD", self.mode, b["city"], b["strike"],
+                       b["hl"], b["side"], round(b.get("pside", 0), 3),
+                       px, sold, "", round(net / 100, 2), oid])
+            if sold >= int(b["count"]):
+                del self.bets[tk]
+            else:
+                b["count"] = int(b["count"]) - sold
+                b["fee"] = max(0, b.get("fee", 0) - fee_share)
 
     # ---- position reconciliation: Kalshi is the source of truth ----
     def _tk_meta(self, tk):
@@ -1750,6 +1882,7 @@ class DriftLive:
         self.miss_check()            # grade unfilled cancels vs settlement
         self.stop_check()
         self.place()
+        self.quote_offers()          # 8/10: the offer side of the book
         try:
             bal = self.balance_c()
         except Exception:
