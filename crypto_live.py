@@ -116,6 +116,21 @@ GATE_ERA = os.environ.get("CRYPTO_GATE_ERA", "g4-core80-88-wilson")
 # with the Wilson LOWER bound clearing the lane's own fee-adjusted
 # breakeven, before the lane re-arms with real money
 SHADOW_UNBLOCK_N = int(os.environ.get("CRYPTO_SHADOW_UNBLOCK_N", "30"))
+# ---- 8/10 LADDER-COHERENCE ARB LANE (Adam-approved, real money) ----
+# Two threshold markets on the same coin+hour must obey arithmetic:
+# P(above lower strike) >= P(above higher strike). When separate order
+# books cross that line by more than both taker fees, buy YES at the
+# lower strike's ask AND NO at the higher strike's bid. Every outcome
+# then pays at least 100c/contract (between the strikes pays 200), so
+# the violation is banked AT ENTRY - no forecast anywhere, this lane
+# trades arithmetic, not opinions. Settles within the hour: recycled
+# capital. The only real risk is legging (one fill without the other);
+# arb_reconcile() unwinds orphans immediately.
+ARB_ON = os.environ.get("CRYPTO_ARB_ON", "1") == "1"
+# minimum locked profit per contract AFTER both taker fees
+ARB_MIN_NET_C = float(os.environ.get("CRYPTO_ARB_MIN_NET_C", "1"))
+ARB_MAX_PAIRS = int(os.environ.get("CRYPTO_ARB_MAX_PAIRS", "3"))
+ARB_CONTRACTS = int(os.environ.get("CRYPTO_ARB_CONTRACTS", "3"))
 MAX_SPREAD = int(os.environ.get("CRYPTO_MAX_SPREAD", "4"))
 MIN_VOL24 = float(os.environ.get("CRYPTO_MIN_VOL24", "500"))
 # 8/6: Kalshi now lists each hourly crypto event only ~60 min before its
@@ -281,6 +296,19 @@ def fetch_crypto_mkts():
     return out
 
 
+def _t_strike(tk):
+    """KXBTCD-26AUG1017-T66499.99 -> 66499.99; None for non-threshold
+    tickers (band markets have B-suffixes and are not cumulative, so
+    the monotonicity rule doesn't apply to them)."""
+    last = (tk or "").rsplit("-", 1)[-1]
+    if not last.startswith("T"):
+        return None
+    try:
+        return float(last[1:])
+    except ValueError:
+        return None
+
+
 def _wilson(w, n, z=1.0):
     """Wilson score interval for a binomial win rate (8/10 gate math)."""
     if n <= 0:
@@ -359,6 +387,13 @@ class CryptoLive:
         # day-loss budget is measured from here, so a mid-day config
         # change gets a fresh budget without rewriting the day ledger
         self.halt_base_c = 0.0
+        # 8/10 ladder-coherence arb lane: its own ledger (never mixed
+        # into core/hi - arithmetic profits must not launder a
+        # forecasting lane's evidence) + live pair tracking for the
+        # legging unwind
+        self.arb = {"w": 0, "l": 0, "pnl": 0.0, "pairs": 0,
+                    "scratches": 0, "best_gap_c": None}
+        self.arb_pairs = {}
         # 8/10: paper-shadow book for BLOCKED lanes - same signals, zero
         # dollars. A blocked lane keeps gathering settlement evidence
         # here, and settle() re-arms it if the shadow record clears its
@@ -388,7 +423,7 @@ class CryptoLive:
                           "fees_c", "realized_c", "placed", "canceled",
                           "day", "day_pnl_c", "dry_balance_c", "pnl_days",
                           "hi", "core", "stops", "miss", "shadow",
-                          "recv", "recv_bal_c",
+                          "recv", "recv_bal_c", "arb", "arb_pairs",
                           "hi_g", "core_g", "gate_era", "halt_base_c"):
                     if k in d:
                         setattr(self, k, d[k])
@@ -456,6 +491,7 @@ class CryptoLive:
                  "pnl_days": self.pnl_days,
                  "hi": self.hi, "core": self.core, "stops": self.stops,
                  "shadow": self.shadow,
+                 "arb": self.arb, "arb_pairs": self.arb_pairs,
                  "recv_c": recv_c,
                  "recv": self.recv, "recv_bal_c": self.recv_bal_c,
                  "hi_g": self.hi_g, "core_g": self.core_g,
@@ -516,6 +552,17 @@ class CryptoLive:
                               "sw": self.core_g.get("sw", 0),
                               "sl": self.core_g.get("sl", 0),
                               "spnl": round(self.core_g.get("spnl", 0.0), 2)},
+                     "arb": {"on": ARB_ON,
+                             "w": self.arb.get("w", 0),
+                             "l": self.arb.get("l", 0),
+                             "pnl": round(self.arb.get("pnl", 0.0), 2),
+                             "pairs": self.arb.get("pairs", 0),
+                             "open_pairs": len(self.arb_pairs),
+                             "scratches": self.arb.get("scratches", 0),
+                             "best_gap_c": self.arb.get("best_gap_c"),
+                             "min_net_c": ARB_MIN_NET_C,
+                             "max_pairs": ARB_MAX_PAIRS,
+                             "size": ARB_CONTRACTS},
                      "gate_era": self.gate_era,
                      "stop_on": STOP_ON,
                      "stops": self.stops,
@@ -631,6 +678,13 @@ class CryptoLive:
         gate ledger restarts whenever GATE_ERA changes. `be` is the
         bet's fee-adjusted breakeven win probability - the gate compares
         the lane's Wilson interval against the average of these."""
+        if band == "arb":
+            # arithmetic lane: its own ledger, never the forecast gates
+            k = "w" if won else "l"
+            self.arb[k] = self.arb.get(k, 0) + 1
+            self.arb["pnl"] = round(self.arb.get("pnl", 0.0)
+                                    + net_c / 100.0, 2)
+            return
         hi = (band == "hi")
         for lane in ((self.hi if hi else self.core),
                      (self.hi_g if hi else self.core_g)):
@@ -679,6 +733,181 @@ class CryptoLive:
                            "count": MIN_CONTRACTS, "fee": fee,
                            "band": band, "pside": round(smid / 100.0, 3),
                            "ots": now()}
+
+    # ---- 8/10 ladder-coherence arb lane -------------------------------
+    def arb_scan(self, mkts, balance_c):
+        """Scan same-event threshold ladders for monotonicity
+        violations big enough to clear both taker fees, and buy the
+        contradiction: YES at the lower strike's ask + NO at the higher
+        strike's bid. Minimum payout is 100c/contract in EVERY outcome
+        (both strikes between pays 200), so the profit is locked at
+        entry. Returns the updated working balance."""
+        if not ARB_ON or not mkts:
+            return balance_c
+        open_pairs = sum(1 for p in self.arb_pairs.values()
+                         if p.get("status") in ("pending", "on"))
+        u_keys = {underlying_key(t) for t in
+                  list(self.bets) + [o["ticker"]
+                                     for o in self.pending.values()]}
+        best_gap, n = None, max(1, ARB_CONTRACTS)
+        byev = {}
+        for mk in mkts:
+            s = _t_strike(mk["ticker"])
+            if s is None or _is_15m(mk["ticker"], mk.get("name", "")):
+                continue
+            if (mk["yes_bid"] or 0) <= 0 or (mk["yes_ask"] or 0) <= 0:
+                continue
+            byev.setdefault(mk["event"], []).append((s, mk))
+        for ev, rows in sorted(byev.items()):
+            if open_pairs >= ARB_MAX_PAIRS:
+                break
+            if len(rows) < 2:
+                continue
+            if underlying_key(rows[0][1]["ticker"]) in u_keys:
+                continue        # this coin+hour already has an opinion
+            rows.sort(key=lambda r: r[0])
+            best = None
+            for i in range(len(rows)):
+                for j in range(i + 1, len(rows)):
+                    lo, hi = rows[i][1], rows[j][1]
+                    gap = hi["yes_bid"] - lo["yes_ask"]
+                    if best_gap is None or gap > best_gap:
+                        best_gap = gap
+                    if gap <= 0:
+                        continue
+                    yes_px, no_px = lo["yes_ask"], 100 - hi["yes_bid"]
+                    if yes_px <= 0 or no_px <= 0:
+                        continue
+                    fees = (fee_cents(yes_px, n, taker=True)
+                            + fee_cents(no_px, n, taker=True))
+                    net_c = gap * n - fees
+                    if net_c < ARB_MIN_NET_C * n:
+                        continue
+                    if best is None or net_c > best[0]:
+                        best = (net_c, lo, hi, yes_px, no_px)
+            if best is None:
+                continue
+            net_c, lo, hi, yes_px, no_px = best
+            cost = (yes_px + no_px) * n
+            if self.open_cost_c() + cost > self._open_cap_c():
+                continue
+            if balance_c - cost < RESERVE_C:
+                continue
+            pid = f"arb-{self.placed + 1}"
+            legs = []
+            for tk, side, px, mk in ((lo["ticker"], "yes", yes_px, lo),
+                                     (hi["ticker"], "no", no_px, hi)):
+                oid = f"{pid}-{side}"
+                if self.client is not None:
+                    try:
+                        resp = self.client.create_order(
+                            tk, action="buy", side=side, count=n,
+                            price_cents=px)
+                        ro = resp.get("order") or {}
+                        oid = (ro.get("order_id") or ro.get("id")
+                               or resp.get("order_id")
+                               or resp.get("id") or oid)
+                    except Exception:
+                        break   # legs placed so far: reconcile unwinds
+                o = {"ticker": tk, "side": side, "entry": px, "count": n,
+                     "pside": px / 100.0, "name": mk.get("name", tk),
+                     "event": mk["event"], "peak": px, "exec": "taker",
+                     "band": "arb", "pid": pid,
+                     "filled_seen": 0, "ots": now(), "era": ERA}
+                self.pending[oid] = o
+                legs.append(oid)
+                self.placed += 1
+                balance_c -= px * n
+                self._log([now(), "ARB", self.mode, tk,
+                           mk.get("name", "")[:60], side, "", px, n,
+                           "", round(net_c / 100.0, 2), pid])
+                print(f"  {self.mode} ARB {pid}: {side.upper()} {n}x "
+                      f"{tk} @ {px}c (locked {net_c / 100.0:.2f})")
+                if self.client is None:
+                    self.dry_balance_c -= px * n
+                    self._promote(oid, o, n)
+                    del self.pending[oid]
+            if not legs:
+                continue        # first leg rejected: nothing at risk
+            self.arb_pairs[pid] = {"t_yes": lo["ticker"],
+                                   "t_no": hi["ticker"], "n": n,
+                                   "net_c": round(net_c, 1),
+                                   "ots": now(), "status": "pending"}
+            self.arb["pairs"] = self.arb.get("pairs", 0) + 1
+            u_keys.add(underlying_key(lo["ticker"]))
+            open_pairs += 1
+        self.arb["best_gap_c"] = best_gap
+        return balance_c
+
+    def arb_reconcile(self):
+        """A pair with one leg filled and the other dead is not an arb -
+        it's an accidental directional bet. Unwind the live leg at the
+        bid immediately, book the scratch to the arb ledger, move on.
+        Pairs whose legs both filled are marked 'on' (they hold to
+        settlement, where every outcome pays); fully departed pairs are
+        cleaned up."""
+        for pid, p in list(self.arb_pairs.items()):
+            tks = (p["t_yes"], p["t_no"])
+            live = [tk for tk in tks if tk in self.bets
+                    and self.bets[tk].get("pid") == pid]
+            if any(o.get("pid") == pid for o in self.pending.values()):
+                continue                    # legs still working
+            if len(live) == 2:
+                p["status"] = "on"
+                continue
+            if not live:
+                del self.arb_pairs[pid]     # settled (or never filled)
+                continue
+            if p.get("status") == "on":
+                continue    # sibling settled first; this one settles too
+            tk = live[0]                    # orphan: unwind now
+            b = self.bets[tk]
+            try:
+                q = dw.DriftWide._quotes(self, [tk]).get(tk)
+            except Exception:
+                q = None
+            if not q:
+                p["status"] = "on"          # can't quote: hold to settle
+                continue
+            yb, ya = q
+            bid = yb if b["side"] == "yes" else ((100 - ya) if ya else 0)
+            if not bid or bid <= 0:
+                p["status"] = "on"
+                continue
+            if self.client is not None:
+                try:
+                    self.client.create_order(tk, action="sell",
+                                             side=b["side"],
+                                             count=b["count"],
+                                             price_cents=bid)
+                except Exception:
+                    continue                # retry next cycle
+            exit_fee = fee_cents(bid, b["count"], taker=True)
+            net = ((bid - b["entry"]) * b["count"]
+                   - b.get("fee", 0) - exit_fee)
+            self.realized_c += net
+            self._day_add(net)
+            self.day_pnl_c += net
+            self.fees_c += exit_fee
+            self.wins += int(net > 0)
+            self.losses += int(net <= 0)
+            self.arb["scratches"] = self.arb.get("scratches", 0) + 1
+            self._lane_add("arb", net, net > 0)
+            if self.client is None:
+                self.dry_balance_c += bid * b["count"] - exit_fee
+            self.history.append({"name": b.get("name", tk), "tk": tk,
+                                 "side": b["side"], "pside": b["pside"],
+                                 "entry": b["entry"], "count": b["count"],
+                                 "outcome": None, "stopped": True,
+                                 "band": "arb",
+                                 "pnl": round(net / 100.0, 2),
+                                 "ts": now(), "ots": b.get("ots", ""),
+                                 "era": ERA})
+            self._log([now(), "UNWIND", self.mode, tk,
+                       b.get("name", "")[:60], b["side"], "", bid,
+                       b["count"], "", round(net / 100.0, 2), pid])
+            del self.bets[tk]
+            del self.arb_pairs[pid]
 
     def _open_cap_c(self):
         return int(self.bank_c * OPEN_PCT)
@@ -844,6 +1073,7 @@ class CryptoLive:
                              "event": o.get("event", ""),
                              "peak": o.get("peak", o["entry"]),
                              "band": o.get("band", "core"),
+                             "pid": o.get("pid", ""),
                              "ots": o.get("ots", now()), "era": ERA}
         self._log([now(), "FILL", self.mode, tk, o.get("name", "")[:60],
                    o["side"], round(o["pside"], 3), o["entry"], filled,
@@ -1088,6 +1318,10 @@ class CryptoLive:
                     return 0
         budget = (MAX_PER_DAY - self._placed_today() if MAX_PER_DAY > 0
                   else MAX_PER_CYCLE)
+        # 8/10: arithmetic first - locked-at-entry arb pairs get capital
+        # priority over forecast-band candidates (surer money, and the
+        # dedupe below then keeps directional bets off those coin-hours)
+        balance_c = self.arb_scan(mkts, balance_c)
         # one opinion per UNDERLYING per settlement hour - not per event
         # ticker, which let the band market and the threshold market on
         # the same coin/hour both through (see underlying_key).
@@ -1192,6 +1426,7 @@ class CryptoLive:
         self._sweep_phantoms()      # drop already-settled ghosts
         self.mirror()
         self.settle()
+        self.arb_reconcile()       # orphaned arb legs: unwind, not hope
         self.stop_check()
         self.miss_check()          # grade unfilled deaths vs settlement
         self.place()

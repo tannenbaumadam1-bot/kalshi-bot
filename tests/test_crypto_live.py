@@ -858,3 +858,108 @@ def test_sync_diffs_ignores_kalshi_settlement_lag(tmp_path, monkeypatch):
     b.bets = {"KXBTCD-Y": {"side": "no", "count": 3, "entry": 90, "fee": 0}}
     b.mirror()
     assert b._sync_diffs() == 0 and b.sync_bad == []
+
+
+# ---- 8/10 ladder-coherence arb lane ----
+
+def _arb_mkts(bid_lo=84, ask_lo=86, bid_hi=90, ask_hi=92):
+    # two THRESHOLD strikes on the same coin+hour; a violation exists
+    # whenever bid_hi > ask_lo (P(>65k) priced above P(>64k))
+    return [_mk(tk="KXBTCD-26AUG0317-T64000", ev="KXBTCD-26AUG0317",
+                bid=bid_lo, ask=ask_lo),
+            _mk(tk="KXBTCD-26AUG0317-T65000", ev="KXBTCD-26AUG0317",
+                bid=bid_hi, ask=ask_hi)]
+
+
+def test_t_strike_parser():
+    assert cl._t_strike("KXBTCD-26AUG1017-T66499.99") == 66499.99
+    assert cl._t_strike("KXBTC-26AUG1017-B64950") is None
+    assert cl._t_strike("") is None
+
+
+def test_arb_pair_places_on_violation(tmp_path, monkeypatch):
+    b = _bot(tmp_path, monkeypatch)
+    b.dry_balance_c = 20000
+    # gap = 90 - 86 = 4c/contract; on 3 lots that clears both taker
+    # fees with >= 1c/contract to spare -> pair fires
+    assert b.place(mkts=_arb_mkts()) == 0     # directional count is 0
+    assert len(b.arb_pairs) == 1
+    pair = next(iter(b.arb_pairs.values()))
+    y = b.bets["KXBTCD-26AUG0317-T64000"]
+    n_ = b.bets["KXBTCD-26AUG0317-T65000"]
+    assert y["side"] == "yes" and y["entry"] == 86 and y["band"] == "arb"
+    assert n_["side"] == "no" and n_["entry"] == 10 and n_["band"] == "arb"
+    assert pair["n"] == cl.ARB_CONTRACTS
+    # locked profit: gap*n - both fees, at least 1c/contract
+    fees = (cl.fee_cents(86, 3, taker=True)
+            + cl.fee_cents(10, 3, taker=True))
+    assert pair["net_c"] == 4 * 3 - fees and pair["net_c"] >= 3
+    # the coin+hour is now ONE opinion: no directional bet may join it
+    assert b.place(mkts=_arb_mkts()) == 0 and len(b.bets) == 2
+    # reconcile marks the double-filled pair as on
+    b.arb_reconcile()
+    assert b.arb_pairs and next(iter(b.arb_pairs.values()))["status"] == "on"
+
+
+def test_arb_no_violation_just_records_gap(tmp_path, monkeypatch):
+    b = _bot(tmp_path, monkeypatch)
+    b.dry_balance_c = 20000
+    # coherent ladder: higher strike cheaper, no trade
+    b.place(mkts=_arb_mkts(bid_lo=90, ask_lo=92, bid_hi=84, ask_hi=86))
+    assert not b.arb_pairs
+    assert b.arb["best_gap_c"] == 84 - 92          # visibility: alive
+    # tiny violation that fees eat: still no trade
+    b2 = _bot(tmp_path, monkeypatch)
+    b2.dry_balance_c = 20000
+    b2.place(mkts=_arb_mkts(bid_lo=84, ask_lo=86, bid_hi=87, ask_hi=89))
+    assert not b2.arb_pairs and b2.arb["best_gap_c"] == 1
+
+
+def test_arb_settles_into_own_ledger(tmp_path, monkeypatch):
+    b = _bot(tmp_path, monkeypatch)
+    b.dry_balance_c = 20000
+    b.place(mkts=_arb_mkts())
+    core_before = dict(b.core)
+    # settle BETWEEN the strikes: both legs win (payout 200c/contract)
+    res = {"KXBTCD-26AUG0317-T64000": "yes",
+           "KXBTCD-26AUG0317-T65000": "no"}
+    monkeypatch.setattr(cl, "fetch_result", lambda tk: res.get(tk))
+    b.settle()
+    b.arb_reconcile()
+    assert b.arb["w"] == 2 and b.arb["l"] == 0 and b.arb["pnl"] > 0
+    assert b.core == core_before          # forecast gates untouched
+    assert not b.arb_pairs                # pair cleaned up
+    # state round-trips
+    b.save()
+    b2 = cl.CryptoLive(None, mode="DRY")
+    assert b2.arb["w"] == 2 and b2.arb["pairs"] == 1
+
+
+def test_arb_orphan_unwinds_immediately(tmp_path, monkeypatch):
+    b = _bot(tmp_path, monkeypatch)
+    b.dry_balance_c = 20000
+    b.place(mkts=_arb_mkts())
+    # simulate the NO leg dying unfilled: remove it from the book
+    del b.bets["KXBTCD-26AUG0317-T65000"]
+    pid = next(iter(b.arb_pairs))
+    b.arb_pairs[pid]["status"] = "pending"      # never went two-sided
+    monkeypatch.setattr(cl.dw.DriftWide, "_quotes",
+                        lambda self, tks: {t: (85, 87) for t in tks})
+    b.arb_reconcile()
+    assert "KXBTCD-26AUG0317-T64000" not in b.bets   # sold at the bid
+    assert not b.arb_pairs
+    assert b.arb["scratches"] == 1
+    assert b.history[-1]["band"] == "arb"
+
+
+def test_arb_respects_pair_cap(tmp_path, monkeypatch):
+    monkeypatch.setattr(cl, "ARB_MAX_PAIRS", 1)
+    b = _bot(tmp_path, monkeypatch)
+    b.dry_balance_c = 50000
+    two_events = _arb_mkts() + [
+        _mk(tk="KXETHD-26AUG0317-T1900", ev="KXETHD-26AUG0317",
+            bid=84, ask=86),
+        _mk(tk="KXETHD-26AUG0317-T1950", ev="KXETHD-26AUG0317",
+            bid=90, ask=92)]
+    b.place(mkts=two_events)
+    assert len(b.arb_pairs) == 1                # cap holds

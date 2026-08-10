@@ -945,12 +945,13 @@ async function load(){
     const cLive=(S3.mode==='LIVE');
     $('clmode').innerHTML='<span class=chip style="background:'+(cLive?'rgba(244,105,95,.15);color:var(--red)':'rgba(125,144,173,.13);color:var(--mut)')+'">'+(S3.mode||'?')+'</span>'
       +(S3.halted?' <span class=chip style="background:rgba(244,105,95,.25);color:var(--red)">DAY HALTED</span>':'')
-      +' <span class=mut style="font-size:11px">era clive1 &middot; taker-first &middot; '+Math.round((S3.alloc||0.5)*100)+'% of NAV &middot; band 80-92&cent; &middot; 35&cent; stop &middot; no trail</span>';
+      +' <span class=mut style="font-size:11px">era clive1 &middot; taker-first &middot; '+Math.round((S3.alloc||0.5)*100)+'% of NAV &middot; band 80-88&cent; &middot; ladder-arb lane &middot; no stop, no trail</span>';
     const cc=S3.caps||{};
     $('cltiles').innerHTML=[
       tile('Book bankroll',F(S3.bank||0),'50% of NAV, compounds every cycle &middot; '+((S3.kelly||0.25)>=0.5?'&frac12;-Kelly (PROVEN, n='+(S3.kelly_n||0)+')':'&frac14;-Kelly ('+(S3.kelly_n||0)+'/'+(S3.kelly_gate||100)+' to upgrade)')+' &middot; '+F(cc.bet||0)+'/bet'),
       tile('Realized (after fees)',(S3.realized!=null)?('<span class="'+C(S3.realized)+'">'+M(S3.realized)+'</span>'):'&ndash;','fees '+F(S3.fees||0)+' &middot; settle/stop ledger'),
       tile('Record',(S3.wins||0)+'W / '+(S3.losses||0)+'L',(S3.open||0)+' open &middot; '+(S3.resting||0)+' resting &middot; '+(S3.placed||0)+' placed'),
+      (S3.arb&&S3.arb.on?tile('Ladder arb',((S3.arb.pairs||0)?((S3.arb.pairs||0)+' pairs &middot; <span class="'+C(S3.arb.pnl)+'">'+M(S3.arb.pnl||0)+'</span>'):'<span class=mut>scanning&hellip;</span>'),(S3.arb.open_pairs||0)+' open &middot; best gap '+(S3.arb.best_gap_c!=null?S3.arb.best_gap_c+'&cent;':'&ndash;')+' &middot; needs '+(S3.arb.min_net_c||1)+'&cent;/ct net &middot; arithmetic, not opinions'):''),
       (S3.hi?tile('93-96&cent; probe',S3.hi.blocked?'<span class=neg>BLOCKED</span> &middot; '+(S3.hi.w||0)+'W / '+(S3.hi.l||0)+'L':(((S3.hi.w||0)+(S3.hi.l||0))?((S3.hi.w||0)+'W / '+(S3.hi.l||0)+'L &middot; <span class="'+C(S3.hi.pnl)+'">'+M(S3.hi.pnl||0)+'</span>'):'<span class=mut>no settles yet</span>'),(S3.hi.open||0)+' open &middot; ladder '+Math.round((S3.hi.pct||0.06)*100)+'%/bet (8% @'+(S3.hi.n1||10)+', 10% @'+(S3.hi.n2||20)+' net+)'):''),
       tile("Today's P&L",(S3.day_pnl!=null)?('<span class="'+C(S3.day_pnl)+'">'+M(S3.day_pnl)+'</span>'):'&ndash;','halts at -'+F(cc.halt||0)),
       tile('Mirror sync',(S3.sync_diffs==null)?'<span class=mut>syncing&hellip;</span>':(S3.sync_diffs===0?'<span class=pos>1:1 WITH KALSHI</span>':'<span class=neg>'+S3.sync_diffs+' DIFFS</span>'),'crypto book vs exchange positions (crypto universe)')
