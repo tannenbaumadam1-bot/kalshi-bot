@@ -281,7 +281,10 @@ def build_data():
         run += float(b.get("pnl", 0) or 0)
         curve.append(round(run, 2))
     out["curve"] = curve
-    out["kpi"] = compute_kpis(out)
+    # 8/10: the legacy paper-book KPI block retired - it has served
+    # nothing but nulls since the paper books were archived 7/30. The
+    # key stays (empty) so old JS null-guards keep working.
+    out["kpi"] = {}
     out["shadow"] = _shadow_report()
     # weather step errors (written by weather_paper.step; absent = healthy)
     err_path = os.path.join("logs", "weather_err.txt")
@@ -360,7 +363,11 @@ def build_data():
             # Kalshi's balance still includes cash committed to resting buy
             # orders (verified live 7/23: bal $100.09 with $59.81 resting),
             # so NAV = balance + FILLED position value only.
-            out[key]["marked_nav"] = round(lv["balance_c"] / 100.0 + dval, 2)
+            # + settlement receivable (8/10): wins we detected whose
+            # cash credit hasn't landed yet - closes the NAV dip
+            out[key]["marked_nav"] = round(lv["balance_c"] / 100.0 + dval
+                                           + float(lv.get("recv_c") or 0)
+                                           / 100.0, 2)
             # THE scoreboard (Adam 7/23: "kalshi should always be our source
             # of proof"): true P&L = Kalshi-derived NAV minus net deposits.
             baseline = float(os.environ.get("DRIFT_LIVE_BASELINE_D", "100.09"))
@@ -451,7 +458,9 @@ def build_data():
         if isinstance(dsum, dict):
             if dpriced:
                 dsum["unrealized"] = round(du, 2)
-            dsum["marked_nav"] = round(float(dsum.get("cash") or 0) + dval, 2)
+            dsum["marked_nav"] = round(float(dsum.get("cash") or 0) + dval
+                                       + float(out[key].get("recv_c") or 0)
+                                       / 100.0, 2)
     # 8/3 TWO LIVE BOOKS: the hero is the ACCOUNT - balance + weather
     # positions + crypto positions, all marked. dlive's own block only
     # counted its (now weather-fenced) universe.
@@ -465,7 +474,9 @@ def build_data():
                            for b in rows or [])
             acct = round(_freshest_balance_c(dv, cv) / 100.0
                          + _val(dv.get("open"))
-                         + _val(cv.get("open")), 2)
+                         + _val(cv.get("open"))
+                         + (float(dv.get("recv_c") or 0)
+                            + float(cv.get("recv_c") or 0)) / 100.0, 2)
             dv["marked_nav"] = acct
             dv["pnl_true"] = round(acct - float(dv.get("baseline") or 100.09), 2)
             # 8/3 P&L ATTRIBUTION (Adam: total AND by strategy): crypto
@@ -862,7 +873,11 @@ async function load(){
       tile('Crypto book P&L',(L.pnl_crypto!=null)?('<span class="'+C(L.pnl_crypto)+'">'+M(L.pnl_crypto)+'</span>'):NA,'era clive1'+((L.pnl_crypto!=null&&base2>0)?' &middot; '+P(L.pnl_crypto/base2*100)+' of deposits':'')),
       tile('Account balance',bal!=null?F(bal):NA,'cash, live from Kalshi'),
       tile("Today's return",(todayTrue!=null)?('<span class="'+C(todayTrue)+'">'+(todayPct!=null?P(todayPct):M(todayTrue))+'</span>'):'<span class=mut>anchoring&hellip;</span>',(todayTrue!=null)?('<span class="'+C(todayTrue)+'">'+M(todayTrue)+'</span> &middot; NAV vs day start '+F(S.day_nav0)):'account, NAV vs day start'),
-      tile('Fees (total)',F((S.k_fees||0)+(cS.fees||0)),'both books, lifetime')
+      tile('Fees (total)',F((S.k_fees||0)+(cS.fees||0)),'both books, lifetime'),
+      // 8/10 truth check: internal book ledgers vs the exchange's NAV.
+      // A growing gap means a bookkeeping bug - shown loudly, never hidden.
+      (function(){const g=(L.pnl_true!=null)?(L.pnl_true-((S.net||0)+(S.unrealized||0)+(cS.realized||0)+(cS.unrealized||0))):null;
+        return tile('Books vs NAV',(g!=null)?('<span class="'+C(g)+'">'+M(g)+'</span>'):NA,'internal ledgers vs exchange NAV &middot; investigate if it grows');})()
     ].join('');
     // PERFORMANCE - weekly & monthly % returns by book, from the
     // never-trimmed daily ledgers; % beside $, live period chipped
@@ -960,7 +975,7 @@ async function load(){
         +'<td>'+(h.outcome===1?'<span class=pos>WON</span>':(h.outcome===0?'<span class=neg>LOST</span>':'STOP'))+'</td>'
         +'<td class=num><span class="'+C(h.pnl)+'">'+M(h.pnl)+'</span></td></tr>').join('');}}
   {const strip=[];
-   const fmtL=(tag,LV)=>{const L=LV.summary;return tag+' '+(L.mode||'LIVE')+' '+M(L.net||0)+' ('+(L.wins||0)+'W/'+(L.losses||0)+'L)'
+   const fmtL=(tag,LV)=>{const L=LV.summary;const w=(L.k_wins!=null?L.k_wins:L.wins),l=(L.k_wins!=null?L.k_losses:L.losses);return tag+' '+(L.mode||'LIVE')+' '+M(L.net||0)+' ('+(w||0)+'W/'+(l||0)+'L)'
       +(L.resting!=null?' \u00b7 '+L.resting+' resting':'')
       +(L.day_pnl!=null?' \u00b7 day '+M(L.day_pnl):'')
       +(L.halted?' \u00b7 HALTED':'')
