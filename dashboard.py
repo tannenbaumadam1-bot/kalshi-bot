@@ -304,6 +304,11 @@ def build_data():
             lv = json.load(open(lpath))
             out[key] = {"updated": lv.get("updated", ""),
                         "summary": lv.get("summary", {}) or {},
+                        # 8/11 tie-out fix: the account NAV adds
+                        # dv.recv_c, but this whitelist dropped it - the
+                        # weather settlement receivable was invisible to
+                        # the hero number (per-book NAV was fine)
+                        "recv_c": lv.get("recv_c"),
                         "balance_c": lv.get("balance_c")}
         except Exception:
             continue
