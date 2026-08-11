@@ -947,3 +947,108 @@ def test_reentry_after_lift_same_market(tmp_path, monkeypatch):
     # signal fires again: the book buys the same market again
     assert b.place(mkts=[_mk(bid=82, ask=85)]) == 1
     assert b.bets[tk]["count"] == 5
+
+
+# ---- 8/11 standing bid side ----
+
+def test_dip_defaults():
+    assert dl.DIP_ON is True and dl.DIP_DISCOUNT_C == 4
+    assert dl.DIP_MAX_PCT == 0.15
+
+
+def _mkq(tk="KXHIGHNY-26JUL-T86", bid=87, ask=89, **kw):
+    return _mk(tk=tk, bid=bid, ask=ask, **kw)
+
+
+def test_dip_bids_rest_on_context_markets(tmp_path, monkeypatch):
+    b = _bot(tmp_path, monkeypatch)
+    mkt = _mkq()
+    b.place(mkts=[mkt])                     # entry 89 taker, 5 lots
+    tk = next(iter(b.bets))
+    # place() already quoted the dip on the way out (held context)
+    d = b.dips[tk]
+    assert d["px"] == 83 and d["count"] == 5 and d["side"] == "yes"
+    # no context, no dip: a market that never triggered an entry
+    b.place(mkts=[_mkq(tk="KXHIGHNY-26JUL-X1", bid=70, ask=74,
+                       city="elsewhere")])  # below the level trigger
+    assert "KXHIGHNY-26JUL-X1" not in b.bets
+    assert "KXHIGHNY-26JUL-X1" not in b.dips
+    # sold context: after a full sale the dip bid keeps working the market
+    b2 = _bot(tmp_path, monkeypatch)
+    b2.place(mkts=[mkt])
+    tk2 = next(iter(b2.bets))
+    b2.quote_offers()
+    legs = b2.offers[tk2]["legs"]
+    b2._check_offers(set(), {legs[0]["oid"]: 3, legs[1]["oid"]: 2})
+    assert tk2 not in b2.bets and tk2 in b2.k_sold
+    b2.quote_dips([mkt], b2.dry_balance_c, b2._bucket_stats())
+    assert tk2 in b2.dips                   # rebuy bid resting at 83
+
+
+def test_dip_floor_and_room(tmp_path, monkeypatch):
+    b = _bot(tmp_path, monkeypatch)
+    b.place(mkts=[_mkq(bid=82, ask=84)])    # entry 84
+    tk = next(iter(b.bets))
+    b.dips.pop(tk, None)
+    # bid 82: 82-4=78 clamps to floor 80, room 82-80=2 >= 2: placed at 80
+    b.quote_dips([_mkq(bid=82, ask=84)], b.dry_balance_c, b._bucket_stats())
+    assert b.dips[tk]["px"] == 80
+    # bid 81: floor 80 leaves only 1c of room - no dip
+    b.dips.pop(tk, None)
+    b.quote_dips([_mkq(bid=81, ask=83)], b.dry_balance_c, b._bucket_stats())
+    assert tk not in b.dips
+
+
+def test_dip_fill_merges_and_creates(tmp_path, monkeypatch):
+    b = _bot(tmp_path, monkeypatch)
+    b.place(mkts=[_mkq()])                  # 5 lots at 89
+    tk = next(iter(b.bets))
+    n0, e0 = b.bets[tk]["count"], b.bets[tk]["entry"]
+    oid = b.dips[tk]["oid"]
+    b._check_dips(set(), {oid: 5})          # wobble fills us at 83
+    assert b.bets[tk]["count"] == n0 + 5
+    assert b.bets[tk]["entry"] < e0         # average cheapened
+    assert b.exec_stats["dip_fills"] == 1
+    assert tk not in b.dips
+    # fill with NO position (sold context): new bet in the dip lane
+    b2 = _bot(tmp_path, monkeypatch)
+    b2.place(mkts=[_mkq()])
+    tk2 = next(iter(b2.bets))
+    b2.quote_offers()
+    legs = b2.offers[tk2]["legs"]
+    b2._check_offers(set(), {legs[0]["oid"]: 3, legs[1]["oid"]: 2})
+    b2.quote_dips([_mkq()], b2.dry_balance_c, b2._bucket_stats())
+    oid2 = b2.dips[tk2]["oid"]
+    b2._check_dips(set(), {oid2: 5})
+    assert b2.bets[tk2]["trig"] == "dip" and b2.bets[tk2]["entry"] == 83
+    # ...and the offer engine retails the dip inventory
+    b2.quote_offers()
+    assert tk2 in b2.offers
+
+
+def test_dip_refresh_follows_market(tmp_path, monkeypatch):
+    b = _bot(tmp_path, monkeypatch)
+    b.place(mkts=[_mkq()])                  # dip at 83 (bid 87)
+    tk = next(iter(b.bets))
+    assert b.dips[tk]["px"] == 83
+    # market runs up 4c: target 87, drift >= refresh threshold -> requote
+    b.quote_dips([_mkq(bid=91, ask=93)], b.dry_balance_c,
+                 b._bucket_stats())
+    assert b.dips[tk]["px"] == 87
+    # small wiggle (2c): keep resting, no churn
+    b.quote_dips([_mkq(bid=93, ask=95)], b.dry_balance_c,
+                 b._bucket_stats())
+    assert b.dips[tk]["px"] == 87
+
+
+def test_dip_total_cap(tmp_path, monkeypatch):
+    monkeypatch.setattr(dl, "CITY_CAP_PCT", 1.0)
+    monkeypatch.setattr(dl, "SLATE_CAP_PCT", 1.0)
+    b = _bot(tmp_path, monkeypatch)
+    b.dry_balance_c = 10000                 # NAV $100 -> dip cap $15
+    ms = [_mkq(tk=f"KXHIGHNY-26JUL-D{i}", bid=87, ask=89, city=f"c{i}",
+               strike=70 + i) for i in range(6)]
+    b.place(mkts=ms)                        # entries + dips on the way out
+    dip_cost = sum(d["entry"] * d["count"] for d in b.dips.values())
+    assert dip_cost <= 1500                 # <= 15% of NAV
+    assert len(b.dips) < 6                  # the cap refused the rest

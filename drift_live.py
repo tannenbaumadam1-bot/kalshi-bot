@@ -233,6 +233,22 @@ SLATE_CAP_PCT = float(os.environ.get("DRIFT_LIVE_SLATE_CAP_PCT", "0.40"))
 # stays at the base pct. Aggression is earned per bucket, never global.
 PROVEN_BET_PCT = float(os.environ.get("DRIFT_LIVE_PROVEN_BET_PCT", "0.08"))
 QUOTE_ON = os.environ.get("DRIFT_LIVE_QUOTES", "1") == "1"
+# --- 8/11 STANDING BID SIDE (Adam-approved; completes the MM loop):
+# the offer side proved inventory-constrained - 65% of everything
+# quoted gets lifted and the shelf sells out. This manufactures more
+# inventory CHEAPER: on markets with established context (held now, or
+# sold this era), rest a maker BUY a few cents under the market and let
+# intraday wobbles fill us - the stop autopsy proved those dips are
+# noise that recovers. Fills merge into held positions (cheapening the
+# eventual offer) or reopen sold markets as their own evidence lane
+# (trig "dip" buckets earn scale like every other lane). Never bids
+# below the 80c floor where entries measurably lose; city/slate/open
+# caps all apply at placement.
+DIP_ON = os.environ.get("DRIFT_LIVE_DIPS", "1") == "1"
+DIP_DISCOUNT_C = int(os.environ.get("DRIFT_LIVE_DIP_DISCOUNT", "4"))
+DIP_MIN_ROOM_C = 2      # bid must sit >= 2c under the market bid
+DIP_REFRESH_C = int(os.environ.get("DRIFT_LIVE_DIP_REFRESH", "3"))
+DIP_MAX_PCT = float(os.environ.get("DRIFT_LIVE_DIP_MAX_PCT", "0.15"))
 SELL_MIN_C = int(os.environ.get("DRIFT_LIVE_SELL_MIN", "97"))
 NICKEL_SELL_MIN_C = int(os.environ.get("DRIFT_LIVE_NICKEL_SELL_MIN", "98"))
 SELL_MARKUP_C = int(os.environ.get("DRIFT_LIVE_SELL_MARKUP", "6"))
@@ -373,6 +389,9 @@ class DriftLive:
         self.offers = {}
         # 8/11: every sale graded against eventual settlement
         self.sold_log = []
+        # 8/11 standing bid side: resting dip-bids, tk -> {oid, px,
+        # count, city, strike, kind, cap, hl, date, pside, ots}
+        self.dips = {}
         self.load()
 
     # ---- persistence ----
@@ -389,7 +408,7 @@ class DriftLive:
                           "k_sold",
                           "day_nav0_c", "autopsy", "miss", "exec_stats",
                           "k_cum", "pnl_days", "recv", "recv_bal_c",
-                          "offers", "sold_log",
+                          "offers", "sold_log", "dips",
                           "k_positions", "k_resting", "dry_balance_c"):
                     if k in d:
                         setattr(self, k, d[k])
@@ -774,6 +793,7 @@ class DriftLive:
              "k_settlements": self.k_settlements[:300],
              "k_cum": self.k_cum, "k_sold": self.k_sold,
              "sold_log": self.sold_log[-200:],
+             "dips": self.dips,
              "offers": self.offers,
              "pnl_days": self.pnl_days,
              "k_exit_realized_c": self.k_exit_realized_c,
@@ -824,6 +844,17 @@ class DriftLive:
                                               for r in self.sold_log), 2),
                             "min": SELL_MIN_C,
                             "nickel_min": NICKEL_SELL_MIN_C},
+                 "dips": {"on": DIP_ON,
+                          "resting": len(self.dips),
+                          "cost": round(sum(d.get("entry", 0)
+                                            * d.get("count", 0)
+                                            for d in self.dips.values())
+                                        / 100.0, 2),
+                          "fills": self.exec_stats.get("dip_fills", 0),
+                          "fill_cost": round(self.exec_stats.get(
+                              "dip_fill_cost_c", 0) / 100.0, 2),
+                          "discount": DIP_DISCOUNT_C,
+                          "max_pct": DIP_MAX_PCT},
                  "day_nav0": (round(self.day_nav0_c / 100.0, 2)
                               if self.day_nav0_c is not None else None),
                  "has_kalshi_truth": bool(self.k_settlements) or self.k_exit_realized_c != 0,
@@ -1224,7 +1255,11 @@ class DriftLive:
             # they must never be adopted as buy-order ids, so they count
             # as owned here.
             owned = ({oid for oid in self.pending}
-                     | {o.get("oid") for o in self.offers.values()})
+                     | {leg.get("oid") for o in self.offers.values()
+                        for leg in (o.get("legs") or [])}
+                     | {o.get("oid") for o in self.offers.values()
+                        if o.get("oid")}
+                     | {d.get("oid") for d in self.dips.values()})
             for oid, o in list(self.pending.items()):
                 if oid in resting_ids:
                     continue
@@ -1314,6 +1349,7 @@ class DriftLive:
                 del self.pending[oid]
         if self.client is not None:
             self._check_offers(resting_ids, fills_by_oid)
+            self._check_dips(resting_ids, fills_by_oid)
 
     # ---- 8/10 two-sided book: the OFFER side --------------------------
     def quote_offers(self):
@@ -1902,8 +1938,14 @@ class DriftLive:
             nav_cc = getattr(self, "last_nav_c", 0)
             if nav_cc:
                 cost_new = entry * size
+                # NB: resting dip-bids are NOT counted against entries -
+                # the proven entry lanes keep full cap priority. Dips
+                # check the full picture (incl. themselves) at their own
+                # placement, so the worst overshoot is one entry per
+                # city placed after a dip - bounded and accepted.
                 c_cost = d_cost = 0
-                for b0 in list(self.bets.values()) + list(self.pending.values()):
+                for b0 in (list(self.bets.values())
+                           + list(self.pending.values())):
                     c0 = b0.get("entry", 0) * b0.get("count", 0)
                     if b0.get("city") == mk["city"]:
                         c_cost += c0
@@ -1974,7 +2016,157 @@ class DriftLive:
                                       "fee": fee, "oid": oid,
                                       "ots": o["ots"], "era": ERA}
                 del self.pending[oid]
+        self.quote_dips(mkts, balance_c, bstats)   # 8/11 bid side
         return placed
+
+    # ---- 8/11 standing bid side --------------------------------------
+    def quote_dips(self, mkts, balance_c, bstats):
+        """Rest a maker BUY a few cents under the market on CONTEXT
+        markets (held now, or sold this era): the stop autopsy proved
+        intraday dips on favorites are noise that recovers, so wobbles
+        fill us at wholesale-minus and the offer engine retails them.
+        Never below the 80c floor; every cap applies at placement."""
+        if not DIP_ON or not mkts:
+            return
+        nav_c = getattr(self, "last_nav_c", 0)
+        if not nav_c:
+            return
+        floor_px = max(80, ENTRY_FLOOR)
+        pend_tks = {o["ticker"] for o in self.pending.values()}
+        by_tk = {m["ticker"]: m for m in mkts}
+
+        def side_quotes(mk):
+            yb, ya = mk["yes_bid"], mk["yes_ask"]
+            if not yb or not ya:
+                return None
+            mid = (yb + ya) / 2.0
+            if mid >= 80:
+                return "yes", yb, mid
+            if mid <= 20:
+                return "no", 100 - ya, 100 - mid
+            return None                     # not a favorite: no context bid
+
+        # refresh pass: market moved -> cancel, replaced below
+        for tk, d in list(self.dips.items()):
+            mk = by_tk.get(tk)
+            if mk is None:
+                continue                    # not scanned this cycle: leave
+            sq = side_quotes(mk)
+            tgt = None
+            if sq and sq[0] == d.get("side"):
+                t = max(floor_px, int(sq[1]) - DIP_DISCOUNT_C)
+                if t <= sq[1] - DIP_MIN_ROOM_C:
+                    tgt = t
+            if tgt is not None and abs(tgt - d.get("px", 0)) < DIP_REFRESH_C:
+                continue                    # close enough: keep resting
+            if self.client is not None:
+                try:
+                    self.client.cancel_order(d.get("oid"))
+                except Exception:
+                    continue
+            del self.dips[tk]
+        for mk in mkts:
+            tk = mk["ticker"]
+            if tk in self.dips or tk in pend_tks:
+                continue
+            if tk not in self.bets and tk not in (self.k_sold or {}):
+                continue                    # no context: not our market
+            sq = side_quotes(mk)
+            if not sq:
+                continue
+            side, sbid, smid = sq
+            b0 = self.bets.get(tk)
+            if b0 is not None and b0.get("side") != side:
+                continue                    # never average an opposite side
+            px = max(floor_px, int(sbid) - DIP_DISCOUNT_C)
+            if px > sbid - DIP_MIN_ROOM_C:
+                continue                    # no room under the market
+            if self._bucket_blocked(bstats, "dip", px):
+                continue                    # the dip lane lost this band
+            size = MIN_CONTRACTS
+            cost = px * size
+            dip_tot = sum(d["entry"] * d["count"] for d in self.dips.values())
+            if dip_tot + cost > int(nav_c * DIP_MAX_PCT):
+                continue
+            c_cost = d_cost = 0
+            for x in (list(self.bets.values()) + list(self.pending.values())
+                      + list(self.dips.values())):
+                c0 = x.get("entry", 0) * x.get("count", 0)
+                if x.get("city") == mk["city"]:
+                    c_cost += c0
+                if x.get("date", "") == mk.get("date", ""):
+                    d_cost += c0
+            if c_cost + cost > int(nav_c * CITY_CAP_PCT):
+                continue
+            if d_cost + cost > int(nav_c * SLATE_CAP_PCT):
+                continue
+            if self.open_cost_c() + dip_tot + cost > self.max_open_c:
+                continue
+            if balance_c - cost < self.reserve_c:
+                continue
+            oid = f"dp-{self.placed + 1}"
+            if self.client is not None:
+                try:
+                    resp = self.client.create_order(
+                        tk, action="buy", side=side, count=size,
+                        price_cents=px)
+                    ro = resp.get("order") or {}
+                    oid = (ro.get("order_id") or ro.get("id")
+                           or resp.get("order_id") or resp.get("id") or oid)
+                except Exception:
+                    continue
+            self.dips[tk] = {"oid": oid, "px": px, "entry": px,
+                             "count": size, "side": side,
+                             "pside": round(smid / 100.0, 3),
+                             "city": mk["city"], "strike": mk["strike"],
+                             "kind": mk.get("kind", "ge"),
+                             "cap": mk.get("cap"),
+                             "hl": ("lo" if mk["is_low"] else "hi"),
+                             "date": mk.get("date", ""), "ots": now()}
+            self.placed += 1
+            self.exec_stats["dips_placed"] = (
+                self.exec_stats.get("dips_placed", 0) + 1)
+            self._log([now(), "DIPBID", self.mode, mk["city"], mk["strike"],
+                       ("lo" if mk["is_low"] else "hi"), side,
+                       round(smid / 100.0, 3), px, size, "", "", oid])
+
+    def _check_dips(self, resting_ids, fills_by_oid):
+        """Book dip-bid fills: wholesale inventory for the offer side."""
+        for tk, d in list(self.dips.items()):
+            oid = d.get("oid")
+            if oid in resting_ids:
+                continue
+            filled = 0.0
+            if fills_by_oid is not None:
+                filled = round(min(float(d["count"]),
+                                   float(fills_by_oid.get(oid, 0))), 2)
+            del self.dips[tk]               # gone; requoted next cycle
+            if filled <= 0.009:
+                continue                    # canceled externally
+            fee = fee_cents(d["px"], filled, taker=False)
+            self.fees_c += fee
+            self.exec_stats["dip_fills"] = (
+                self.exec_stats.get("dip_fills", 0) + 1)
+            self.exec_stats["dip_fill_cost_c"] = round(
+                self.exec_stats.get("dip_fill_cost_c", 0)
+                + d["px"] * filled, 1)
+            if tk in self.bets:
+                self._merge_fill(tk, d["px"], filled, fee)
+            else:
+                self.bets[tk] = {"side": d["side"], "entry": d["px"],
+                                 "count": filled, "fee": fee,
+                                 "pside": d.get("pside", 0),
+                                 "city": d.get("city"),
+                                 "strike": d.get("strike"),
+                                 "kind": d.get("kind", "ge"),
+                                 "cap": d.get("cap"), "hl": d.get("hl"),
+                                 "date": d.get("date", ""),
+                                 "trig": "dip", "peak": d["px"],
+                                 "ots": now(), "era": ERA}
+            self._log([now(), "DIPFILL", self.mode, d.get("city"),
+                       d.get("strike"), d.get("hl"), d["side"],
+                       round(d.get("pside", 0), 3), d["px"], filled,
+                       "", "", oid])
 
     def _maybe_requote(self, tk, mk):
         """Execution engine: if the market ran away from an unfilled maker
