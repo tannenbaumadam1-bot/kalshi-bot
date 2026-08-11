@@ -218,11 +218,32 @@ MIN_CONTRACTS = int(os.environ.get("DRIFT_LIVE_MIN_CONTRACTS", "5"))
 # Both floors sit above the 97c entry/chase ceiling, so a fill is
 # always a realized profit by construction (net of the maker fee).
 # This is NOT the retired stop/trail: we never sell below entry.
+# --- 8/11 CONCENTRATION CAPS (Adam-approved; the autopsy's #1 tail
+# risk): losses now come from correlation, not strategy - all 8 open
+# positions settled the same morning and ~$17 sat on ONE Chicago
+# thermometer. New entries respect:
+#   per-CITY:  open+pending cost per city  <= CITY_CAP_PCT  x NAV
+#   per-SLATE: open+pending cost per settlement date <= SLATE_CAP_PCT x NAV
+# Existing positions are never touched; caps only gate NEW risk.
+# Pyramid adds are exempt (already capped at 2 per position).
+CITY_CAP_PCT = float(os.environ.get("DRIFT_LIVE_CITY_CAP_PCT", "0.10"))
+SLATE_CAP_PCT = float(os.environ.get("DRIFT_LIVE_SLATE_CAP_PCT", "0.40"))
+# --- 8/11 EARNED SIZING (Adam-approved): buckets the ledger has PROVEN
+# (half-Kelly lanes) size to PROVEN_BET_PCT of NAV; everything else
+# stays at the base pct. Aggression is earned per bucket, never global.
+PROVEN_BET_PCT = float(os.environ.get("DRIFT_LIVE_PROVEN_BET_PCT", "0.08"))
 QUOTE_ON = os.environ.get("DRIFT_LIVE_QUOTES", "1") == "1"
 SELL_MIN_C = int(os.environ.get("DRIFT_LIVE_SELL_MIN", "97"))
 NICKEL_SELL_MIN_C = int(os.environ.get("DRIFT_LIVE_NICKEL_SELL_MIN", "98"))
 SELL_MARKUP_C = int(os.environ.get("DRIFT_LIVE_SELL_MARKUP", "6"))
 SELL_CAP_C = 99
+# 8/11 OFFER LADDER (Adam-approved): night one lifted 60% of quotes at
+# a flat 97c - the shelf was priced too low. Quotes now split across
+# two rungs: half the position at the low rung (97 / nickel 98), the
+# rest at 99. sold_check() grades every sale against the eventual
+# settlement so the pricing argument is settled by the ledger, not
+# opinion. DRIFT_LIVE_SELL_LADDER=0 restores single-rung quoting.
+SELL_LADDER_ON = os.environ.get("DRIFT_LIVE_SELL_LADDER", "1") == "1"
 CYCLE_S = int(os.environ.get("DRIFT_LIVE_CYCLE_S", "600"))
 # 8/6: crypto sub-cycle - the crypto book scans every CRYPTO_SUB_S
 # seconds inside the drift book's CYCLE_S nap (hourly markets are too
@@ -348,8 +369,10 @@ class DriftLive:
         self.recv = []           # [[ts, amount_c], ...]
         self.recv_bal_c = None   # last balance seen by _recv_c
         # 8/10 two-sided book: resting premium SELL quotes, one per held
-        # position - tk -> {oid, px, count, ots}
+        # position - tk -> {legs: [{oid, px, count}], count, ots}
         self.offers = {}
+        # 8/11: every sale graded against eventual settlement
+        self.sold_log = []
         self.load()
 
     # ---- persistence ----
@@ -366,7 +389,7 @@ class DriftLive:
                           "k_sold",
                           "day_nav0_c", "autopsy", "miss", "exec_stats",
                           "k_cum", "pnl_days", "recv", "recv_bal_c",
-                          "offers",
+                          "offers", "sold_log",
                           "k_positions", "k_resting", "dry_balance_c"):
                     if k in d:
                         setattr(self, k, d[k])
@@ -715,8 +738,16 @@ class DriftLive:
               for r in (self.k_positions or [])}
         mine = {tk: norm(b.get("side"), b.get("count"))
                 for tk, b in self.bets.items()}
+        # 8/11 (the stuck sync_diffs=3): Kalshi's positions API keeps
+        # listing settled AND sold-away markets for a while - both are
+        # expected divergence, not drift. Excluded, exactly like the
+        # crypto book has done since 8/7. A ticker we re-bought after
+        # selling stays checked (only excluded when NOT in the book).
+        done = set(self.settled_tks or [])
+        sold = {t for t in (self.k_sold or {}) if t not in self.bets}
         bad = sorted(tk for tk in set(kp) | set(mine)
-                     if kp.get(tk) != mine.get(tk))
+                     if kp.get(tk) != mine.get(tk)
+                     and tk not in done and tk not in sold)
         # 8/7: name the offenders - a bare count is not actionable
         self.sync_bad = [{"tk": tk, "kalshi": kp.get(tk), "book": mine.get(tk)}
                          for tk in bad[:10]]
@@ -742,6 +773,7 @@ class DriftLive:
              "settled_tks": self.settled_tks[-300:],
              "k_settlements": self.k_settlements[:300],
              "k_cum": self.k_cum, "k_sold": self.k_sold,
+             "sold_log": self.sold_log[-200:],
              "offers": self.offers,
              "pnl_days": self.pnl_days,
              "k_exit_realized_c": self.k_exit_realized_c,
@@ -775,10 +807,21 @@ class DriftLive:
                                       else sum(s["pnl"] for s in self.k_settlements))
                                      + self.k_exit_realized_c / 100.0, 2),
                  "quotes": {"on": QUOTE_ON,
-                            "resting": len(self.offers),
+                            "resting": sum(len(o.get("legs") or [0])
+                                           for o in self.offers.values()),
+                            "positions": len(self.offers),
                             "sold": self.exec_stats.get("offers_sold", 0),
                             "sold_net": round(self.exec_stats.get(
                                 "offers_sold_net_c", 0) / 100.0, 2),
+                            "ladder": SELL_LADDER_ON,
+                            # 8/11 sold-vs-settled verdict, from the ledger:
+                            # kept > 0 = selling BEAT holding outright
+                            "graded": sum(1 for r in self.sold_log
+                                          if r.get("res") is not None),
+                            "would_won": sum(1 for r in self.sold_log
+                                             if (r.get("would_pnl") or 0) > 0),
+                            "kept": round(sum(r.get("kept") or 0
+                                              for r in self.sold_log), 2),
                             "min": SELL_MIN_C,
                             "nickel_min": NICKEL_SELL_MIN_C},
                  "day_nav0": (round(self.day_nav0_c / 100.0, 2)
@@ -793,11 +836,18 @@ class DriftLive:
                                   else sum(s.get("fee", 0) for s in self.k_settlements))
                                  + sum(p.get("fee", 0) for p in self.k_positions) / 100.0, 2),
                  "sync_diffs": self._sync_diffs(),
+                 # 8/11: name the offenders on the tracker (crypto has
+                 # done this since 8/7; weather's bare count was
+                 # undiagnosable - Adam: "fix the weather sync detail")
+                 "sync_bad": (self.sync_bad or [])[:10],
                  # live risk caps as currently applied (proof the dynamic
                  # NAV-% compounding is active, straight from the trader)
                  "caps": {"bet": round(self.max_bet_c / 100.0, 2),
+                          "bet_pv": round(getattr(self, "max_bet_pv_c", 0)
+                                          / 100.0, 2),
                           "open": round(self.max_open_c / 100.0, 2),
                           "halt": round(self.max_day_loss_c / 100.0, 2),
+                          "city": CITY_CAP_PCT, "slate": SLATE_CAP_PCT,
                           "dyn": DYN_CAPS, "floor": ENTRY_FLOOR,
                           "chase": CHASE_MAX_E, "rest_h": REST_MAX_H,
                           "min_ct": MIN_CONTRACTS,
@@ -1274,7 +1324,15 @@ class DriftLive:
         machinery is untouched."""
         if not QUOTE_ON:
             return
-        # cleanup/resize pass: settled positions drop their quote;
+        # legacy single-leg offers from before the 8/11 ladder: wrap
+        for tk, off in list(self.offers.items()):
+            if "legs" not in off and "oid" in off:
+                self.offers[tk] = {"legs": [{"oid": off.get("oid"),
+                                             "px": off.get("px"),
+                                             "count": off.get("count")}],
+                                   "count": off.get("count"),
+                                   "ots": off.get("ots", now())}
+        # cleanup/resize pass: settled positions drop their quotes;
         # resized positions (partial sell, pyramid add) requote fresh
         for tk, off in list(self.offers.items()):
             b = self.bets.get(tk)
@@ -1282,14 +1340,15 @@ class DriftLive:
                     == int(off.get("count", 0))):
                 continue
             if self.client is not None:
-                try:
-                    self.client.cancel_order(off.get("oid"))
-                except Exception:
-                    pass        # settled markets kill their orders anyway
+                for leg in off.get("legs") or []:
+                    try:
+                        self.client.cancel_order(leg.get("oid"))
+                    except Exception:
+                        pass    # settled markets kill their orders anyway
             del self.offers[tk]
         for tk, b in list(self.bets.items()):
-            # 8/11: fractional stubs (<1 contract, left by fractional
-            # buyers) can't be quoted - they hold to settlement
+            # fractional stubs (<1 contract) can't be quoted - they
+            # hold to settlement
             if tk in self.offers or int(float(b.get("count", 0))) < 1:
                 continue
             floor = (NICKEL_SELL_MIN_C if b.get("trig") == "nickel"
@@ -1297,78 +1356,139 @@ class DriftLive:
             px = min(SELL_CAP_C, max(floor, int(b["entry"]) + SELL_MARKUP_C))
             if px <= int(b["entry"]):
                 continue        # never quote at or below cost
-            oid = f"of-{self.placed + 1}"
-            if self.client is not None:
-                try:
-                    resp = self.client.create_order(
-                        tk, action="sell", side=b["side"],
-                        count=int(float(b["count"])), price_cents=px)
-                    ro = resp.get("order") or {}
-                    oid = (ro.get("order_id") or ro.get("id")
-                           or resp.get("order_id") or resp.get("id") or oid)
-                except Exception:
-                    continue
-            self.offers[tk] = {"oid": oid, "px": px,
-                               "count": int(float(b["count"])), "ots": now()}
-            self.placed += 1
-            self.exec_stats["offers_placed"] = (
-                self.exec_stats.get("offers_placed", 0) + 1)
-            self._log([now(), "OFFER", self.mode, b["city"], b["strike"],
-                       b["hl"], b["side"], round(b.get("pside", 0), 3),
-                       px, b["count"], "", "", oid])
+            n_all = int(float(b["count"]))
+            # 8/11 ladder: half at the low rung, half at 99 - unless the
+            # low rung already IS 99, the position is tiny, or laddering
+            # is off
+            if SELL_LADDER_ON and n_all >= 2 and px < SELL_CAP_C:
+                lo_n = n_all - n_all // 2
+                rungs = [(px, lo_n), (SELL_CAP_C, n_all - lo_n)]
+            else:
+                rungs = [(px, n_all)]
+            legs = []
+            for r_px, r_n in rungs:
+                oid = f"of-{self.placed + 1}"
+                if self.client is not None:
+                    try:
+                        resp = self.client.create_order(
+                            tk, action="sell", side=b["side"],
+                            count=r_n, price_cents=r_px)
+                        ro = resp.get("order") or {}
+                        oid = (ro.get("order_id") or ro.get("id")
+                               or resp.get("order_id")
+                               or resp.get("id") or oid)
+                    except Exception:
+                        continue
+                legs.append({"oid": oid, "px": r_px, "count": r_n})
+                self.placed += 1
+                self.exec_stats["offers_placed"] = (
+                    self.exec_stats.get("offers_placed", 0) + 1)
+                self._log([now(), "OFFER", self.mode, b["city"],
+                           b["strike"], b["hl"], b["side"],
+                           round(b.get("pside", 0), 3), r_px, r_n,
+                           "", "", oid])
+            if legs:
+                self.offers[tk] = {"legs": legs, "count": n_all,
+                                   "ots": now()}
 
     def _check_offers(self, resting_ids, fills_by_oid):
-        """Book lifted offers: realized premium, position reduced or
-        closed, cash freed for the next signal."""
+        """Book lifted offer legs: realized premium, position reduced or
+        closed, cash freed for the next signal. Surviving legs keep
+        resting; a resized position requotes via quote_offers."""
         for tk, off in list(self.offers.items()):
             b = self.bets.get(tk)
-            oid = off.get("oid")
             if b is None:
                 del self.offers[tk]         # settled first: quote is dead
                 continue
-            if oid in resting_ids:
-                continue                    # still quoted
-            sold = 0.0
-            if fills_by_oid is not None:
-                # 8/11: fractional lifts are counted exactly - a buyer
-                # really did take 4.75 of a 5-lot quote
-                sold = round(min(float(b["count"]),
-                                 float(fills_by_oid.get(oid, 0))), 2)
-            del self.offers[tk]             # gone either way; requote later
-            if sold <= 0.009:
-                continue                    # canceled externally, not lifted
-            px = int(off.get("px", 0))
-            fee_share = int(round(b.get("fee", 0) * sold / max(0.01, float(b["count"]))))
-            sell_fee = fee_cents(px, sold, taker=False)
-            net = (px - b["entry"]) * sold - fee_share - sell_fee
-            self.realized_c += net
-            self._day_add(net)
-            self.day_pnl_c += net
-            self.fees_c += sell_fee
-            self.exec_stats["offers_sold"] = (
-                self.exec_stats.get("offers_sold", 0) + 1)
-            self.exec_stats["offers_sold_net_c"] = round(
-                self.exec_stats.get("offers_sold_net_c", 0) + net, 1)
-            self._k_sold_add(tk, px * sold)
-            self.history.append({"tk": tk, "city": b["city"],
-                                 "strike": b["strike"],
-                                 "kind": b.get("kind", "ge"),
-                                 "cap": b.get("cap"), "hl": b["hl"],
-                                 "side": b["side"], "trig": b.get("trig"),
-                                 "pside": round(b.get("pside", 0), 3),
-                                 "entry": b["entry"], "count": sold,
-                                 "outcome": None, "exited": True,
-                                 "sold": True, "exit_px": px,
-                                 "pnl": round(net / 100, 2), "ts": now(),
-                                 "ots": b.get("ots", ""), "era": ERA})
-            self._log([now(), "SOLD", self.mode, b["city"], b["strike"],
-                       b["hl"], b["side"], round(b.get("pside", 0), 3),
-                       px, sold, "", round(net / 100, 2), oid])
-            if sold >= float(b["count"]) - 0.009:
-                del self.bets[tk]
+            legs = off.get("legs") or (
+                [{"oid": off.get("oid"), "px": off.get("px"),
+                  "count": off.get("count")}] if off.get("oid") else [])
+            keep = []
+            for leg in legs:
+                oid = leg.get("oid")
+                if oid in resting_ids:
+                    keep.append(leg)
+                    continue                # still quoted
+                sold = 0.0
+                if fills_by_oid is not None:
+                    sold = round(min(float(b["count"]),
+                                     float(fills_by_oid.get(oid, 0))), 2)
+                if sold <= 0.009:
+                    continue    # leg canceled externally: requote later
+                self._book_sale(tk, b, int(leg.get("px", 0)), sold, oid)
+                if tk not in self.bets:
+                    break                   # fully sold
+            if tk in self.bets and keep and len(keep) == len(legs):
+                continue                    # untouched: leave as-is
+            if tk in self.bets and keep:
+                self.offers[tk]["legs"] = keep
+                # count stays the ORIGINAL total so a partial sale
+                # triggers the resize/requote pass in quote_offers
             else:
-                b["count"] = round(float(b["count"]) - sold, 2)
-                b["fee"] = max(0, b.get("fee", 0) - fee_share)
+                self.offers.pop(tk, None)
+
+    def _book_sale(self, tk, b, px, sold, oid):
+        """One lifted sale: realized P&L, ledgers, sold-autopsy row."""
+        fee_share = int(round(b.get("fee", 0) * sold
+                              / max(0.01, float(b["count"]))))
+        sell_fee = fee_cents(px, sold, taker=False)
+        net = (px - b["entry"]) * sold - fee_share - sell_fee
+        self.realized_c += net
+        self._day_add(net)
+        self.day_pnl_c += net
+        self.fees_c += sell_fee
+        self.exec_stats["offers_sold"] = (
+            self.exec_stats.get("offers_sold", 0) + 1)
+        self.exec_stats["offers_sold_net_c"] = round(
+            self.exec_stats.get("offers_sold_net_c", 0) + net, 1)
+        self._k_sold_add(tk, px * sold)
+        # 8/11 sold-vs-settled autopsy: every sale is graded against the
+        # eventual settlement (sold_check), so "were we selling too
+        # cheap?" is answered by the ledger
+        self.sold_log.append({"tk": tk, "side": b["side"],
+                              "entry": b["entry"], "px": px,
+                              "count": sold, "pnl": round(net / 100, 2),
+                              "ts": now(), "res": None})
+        self.sold_log = self.sold_log[-200:]
+        self.history.append({"tk": tk, "city": b["city"],
+                             "strike": b["strike"],
+                             "kind": b.get("kind", "ge"),
+                             "cap": b.get("cap"), "hl": b["hl"],
+                             "side": b["side"], "trig": b.get("trig"),
+                             "pside": round(b.get("pside", 0), 3),
+                             "entry": b["entry"], "count": sold,
+                             "outcome": None, "exited": True,
+                             "sold": True, "exit_px": px,
+                             "pnl": round(net / 100, 2), "ts": now(),
+                             "ots": b.get("ots", ""), "era": ERA})
+        self._log([now(), "SOLD", self.mode, b["city"], b["strike"],
+                   b["hl"], b["side"], round(b.get("pside", 0), 3),
+                   px, sold, "", round(net / 100, 2), oid])
+        if sold >= float(b["count"]) - 0.009:
+            del self.bets[tk]
+        else:
+            b["count"] = round(float(b["count"]) - sold, 2)
+            b["fee"] = max(0, b.get("fee", 0) - fee_share)
+
+    def sold_check(self, max_lookups=8):
+        """Grade past sales against eventual settlement (8/11): won =
+        the sold side would have paid 100. kept = what selling earned
+        MINUS what holding would have - positive means the sale beat
+        holding; slightly negative is the price of same-day recycling."""
+        done = 0
+        for row in self.sold_log:
+            if row.get("res") is not None or done >= max_lookups:
+                continue
+            res = fetch_result(row["tk"])
+            if res is None:
+                continue
+            done += 1
+            won = (res == row["side"])
+            would = (((100 if won else 0) - row["entry"]) * row["count"]
+                     - fee_cents(row["entry"], row["count"], taker=True))
+            row["res"] = res
+            row["would_pnl"] = round(would / 100.0, 2)
+            row["kept"] = round(row["pnl"] - row["would_pnl"], 2)
 
     # ---- position reconciliation: Kalshi is the source of truth ----
     def _tk_meta(self, tk):
@@ -1606,6 +1726,9 @@ class DriftLive:
         bet_pct = BET_PCT_BOOST if acct_nav_c < BOOST_NAV_C else BET_PCT
         self.bet_pct_now = bet_pct
         self.max_bet_c = max(BET_FLOOR_C, int(nav_c * bet_pct))
+        # 8/11 earned sizing: the per-bet ceiling for PROVEN buckets only
+        self.max_bet_pv_c = max(self.max_bet_c,
+                                int(nav_c * PROVEN_BET_PCT))
         self.max_open_c = int(nav_c * OPEN_PCT)
         self.max_day_loss_c = max(HALT_FLOOR_C, int(nav_c * HALT_PCT))
 
@@ -1740,6 +1863,7 @@ class DriftLive:
                 if lane_cost + entry * size > int(nav_c * NICKEL_LANE_PCT):
                     continue
             else:
+                _pv = False          # probe mode: never the earned cap
                 if gate_mode == "probe":
                     size = max(1, PROBE_COST_CENTS // entry)
                 else:
@@ -1752,17 +1876,47 @@ class DriftLive:
                     f_star = (max(0.0, pside - (1 - pside) / b_odds)
                               * self._kelly_frac(bstats, trig, bid_entry))
                     bankroll = balance_c + self.open_cost_c()
-                    size = int(min(f_star, dp.PER_BET_CAP) * bankroll // entry)
+                    # 8/11 earned sizing: a PROVEN bucket (half-Kelly
+                    # lane) may size Kelly up to PROVEN_BET_PCT of
+                    # bankroll; unproven lanes keep the base fraction
+                    _pv = (self._kelly_frac(bstats, trig, bid_entry)
+                           > KELLY_BASE)
+                    _frac = PROVEN_BET_PCT if _pv else dp.PER_BET_CAP
+                    size = int(min(f_star, _frac) * bankroll // entry)
                     if size < 1 and exec_kind == "taker":
                         # edge too thin to pay the toll: rest a maker join
                         entry, exec_kind = bid_entry, "maker"
-                        size = int(min(f_star, dp.PER_BET_CAP)
+                        size = int(min(f_star, _frac)
                                    * bankroll // entry)
                     if size < 1:
                         continue
                 size = max(size, MIN_CONTRACTS)   # fee-rounding floor
-                while size > MIN_CONTRACTS and entry * size > self.max_bet_c:
+                # ...and trims to the matching dollar ceiling
+                _cap = (getattr(self, "max_bet_pv_c", 0) or self.max_bet_c
+                        ) if _pv else self.max_bet_c
+                while size > MIN_CONTRACTS and entry * size > _cap:
                     size -= 1                      # trim ABOVE the floor only
+            # 8/11 concentration caps: correlation is the book's #1 tail
+            # risk. A new entry may not push one CITY past CITY_CAP_PCT
+            # of NAV or one settlement DATE past SLATE_CAP_PCT.
+            nav_cc = getattr(self, "last_nav_c", 0)
+            if nav_cc:
+                cost_new = entry * size
+                c_cost = d_cost = 0
+                for b0 in list(self.bets.values()) + list(self.pending.values()):
+                    c0 = b0.get("entry", 0) * b0.get("count", 0)
+                    if b0.get("city") == mk["city"]:
+                        c_cost += c0
+                    if b0.get("date", "") == mk.get("date", ""):
+                        d_cost += c0
+                if c_cost + cost_new > int(nav_cc * CITY_CAP_PCT):
+                    self.exec_stats["city_capped"] = (
+                        self.exec_stats.get("city_capped", 0) + 1)
+                    continue
+                if d_cost + cost_new > int(nav_cc * SLATE_CAP_PCT):
+                    self.exec_stats["slate_capped"] = (
+                        self.exec_stats.get("slate_capped", 0) + 1)
+                    continue
             if self.open_cost_c() + entry * size > self.max_open_c:
                 continue
             if balance_c - entry * size < self.reserve_c:
@@ -1937,6 +2091,7 @@ class DriftLive:
         self.settle()
         self.autopsy_check()         # grade past exits vs settlement
         self.miss_check()            # grade unfilled cancels vs settlement
+        self.sold_check()            # grade lifted offers vs settlement
         self.stop_check()
         self.place()
         self.quote_offers()          # 8/10: the offer side of the book

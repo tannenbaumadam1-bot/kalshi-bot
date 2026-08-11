@@ -204,7 +204,8 @@ def test_proven_bucket_sizes_up(tmp_path, monkeypatch):
     b.history = _proven_hist()                 # gate=scale + proven 85-89
     assert b._gate()[0] == "scale"
     assert b.place(mkts=[_mk(bid=87, ask=89)]) == 1
-    assert next(iter(b.bets.values()))["count"] == 3   # half-Kelly
+    # 8/11 earned sizing: proven lanes use the 8% Kelly ceiling (was 3%)
+    assert next(iter(b.bets.values()))["count"] == 4   # half-Kelly, 8% cap
     monkeypatch.setattr(dl, "KELLY_PROVEN_N", 999)     # same lane, unproven
     b2 = _bot(tmp_path, monkeypatch)
     b2.history = _proven_hist()
@@ -229,6 +230,9 @@ def test_taker_falls_back_to_maker_when_toll_too_big(tmp_path, monkeypatch):
 
 def test_nickel_pos_cap_trims_to_nav(tmp_path, monkeypatch):
     monkeypatch.setattr(dl, 'WX_ALLOC', 1.0)   # cap math, pre-split
+    # isolate the pos-cap floor from the 8/11 concentration caps
+    monkeypatch.setattr(dl, "CITY_CAP_PCT", 1.0)
+    monkeypatch.setattr(dl, "SLATE_CAP_PCT", 1.0)
     # 7/29 pos cap trims the ladder; 8/10 the 5-lot floor overrides it
     # (Adam: every weather position >= 5 contracts) - only the LANE
     # aggregate cap may skip a nickel now
@@ -702,38 +706,52 @@ def test_premium_offers_quote_all_inventory(tmp_path, monkeypatch):
     b.quote_offers()
     tk = next(iter(b.bets))
     off = b.offers[tk]
-    # level entry 85: min(99, max(97, 91)) = 97, full position size
-    assert off["px"] == 97 and off["count"] == b.bets[tk]["count"]
-    # nickel entry 95: min(99, max(98, 101)) = 99
+    # 8/11 ladder: 5 lots split - 3 at the 97 rung, 2 at 99
+    assert off["count"] == b.bets[tk]["count"] == 5
+    assert [(l["px"], l["count"]) for l in off["legs"]] == [(97, 3), (99, 2)]
+    # nickel entry 95: low rung min(99, max(98, 101)) = 99 -> single rung
     monkeypatch.setattr(dl, 'WX_ALLOC', 1.0)
     b2 = _bot(tmp_path, monkeypatch)
     b2.place(mkts=[_mk(bid=95, ask=97)])
     b2.quote_offers()
     tk2 = next(iter(b2.bets))
     assert b2.bets[tk2]["trig"] == "nickel"
-    assert b2.offers[tk2]["px"] == 99
+    legs2 = b2.offers[tk2]["legs"]
+    assert len(legs2) == 1 and legs2[0]["px"] == 99
+    assert legs2[0]["count"] == int(b2.bets[tk2]["count"])
     # idempotent: re-running does not duplicate or resize
     n_off = dict(b.offers)
     b.quote_offers()
     assert b.offers == n_off
+    # ladder off: one rung at the low price
+    monkeypatch.setattr(dl, "SELL_LADDER_ON", False)
+    b3 = _bot(tmp_path, monkeypatch)
+    b3.place(mkts=[_mk(bid=82, ask=85)])
+    b3.quote_offers()
+    l3 = b3.offers[next(iter(b3.bets))]["legs"]
+    assert len(l3) == 1 and l3[0]["px"] == 97 and l3[0]["count"] == 5
 
 
 def test_offer_fill_books_premium_and_recycles(tmp_path, monkeypatch):
     b = _bot(tmp_path, monkeypatch)
     b.place(mkts=[_mk(bid=82, ask=85)])
     tk = next(iter(b.bets))
-    n = b.bets[tk]["count"]
     r0, day0 = b.realized_c, b.day_pnl_c
     b.quote_offers()
-    oid = b.offers[tk]["oid"]
-    # someone lifts the whole offer at 97c
-    b._check_offers(set(), {oid: n})
+    legs = b.offers[tk]["legs"]
+    # both rungs lift: 3 @ 97 and 2 @ 99
+    b._check_offers(set(), {legs[0]["oid"]: 3, legs[1]["oid"]: 2})
     assert tk not in b.bets and tk not in b.offers
     assert b.realized_c > r0 and b.day_pnl_c > day0
-    h = b.history[-1]
-    assert h.get("sold") is True and h["exit_px"] == 97 and h["pnl"] > 0
-    # roughly (97-85)*n minus entry+sell fees, in dollars
-    assert h["pnl"] >= (97 - 85) * n / 100.0 - 0.15
+    assert b.history[-1]["exit_px"] == 99 and b.history[-2]["exit_px"] == 97
+    assert all(h["pnl"] > 0 and h.get("sold") for h in b.history[-2:])
+    # 8/11 sold autopsy: grades against eventual settlement
+    monkeypatch.setattr(dl, "fetch_result", lambda tk: "yes")
+    b.sold_check()
+    rows = [r for r in b.sold_log if r["tk"] == tk]
+    assert all(r["res"] == "yes" and r["would_pnl"] > 0 for r in rows)
+    # would have won at settlement: selling gave up a little (kept < 0)
+    assert all(r["kept"] < 0 for r in rows)
 
 
 def test_offer_partial_fill_shrinks_and_requotes(tmp_path, monkeypatch):
@@ -741,14 +759,17 @@ def test_offer_partial_fill_shrinks_and_requotes(tmp_path, monkeypatch):
     b.place(mkts=[_mk(bid=82, ask=85)])
     tk = next(iter(b.bets))
     n = b.bets[tk]["count"]
-    assert n >= 5                                # 8/10 floor
+    assert n == 5                                # 8/10 floor
     b.quote_offers()
-    oid = b.offers[tk]["oid"]
-    b._check_offers(set(), {oid: 2})             # 2 of n lifted
-    assert b.bets[tk]["count"] == n - 2
-    assert tk not in b.offers                    # cleared for requote
-    b.quote_offers()
-    assert b.offers[tk]["count"] == n - 2        # fresh quote, new size
+    legs = b.offers[tk]["legs"]
+    # 2 of the 97-rung's 3 lift; the 99 leg keeps resting
+    b._check_offers({legs[1]["oid"]}, {legs[0]["oid"]: 2})
+    assert b.bets[tk]["count"] == 3
+    assert len(b.offers[tk]["legs"]) == 1        # surviving 99 leg
+    b.quote_offers()                             # resize: requote at 3
+    off = b.offers[tk]
+    assert off["count"] == 3
+    assert [(l["px"], l["count"]) for l in off["legs"]] == [(97, 2), (99, 1)]
     # position settles before the quote lifts: stale offer dropped
     del b.bets[tk]
     b.quote_offers()
@@ -760,7 +781,7 @@ def test_offer_never_below_cost_or_when_off(tmp_path, monkeypatch):
     b.bets["T1"] = _lvl_bet()
     b.bets["T1"]["entry"] = 98                   # deep entry: 99 quote ok
     b.quote_offers()
-    assert b.offers["T1"]["px"] == 99            # still above cost
+    assert b.offers["T1"]["legs"][0]["px"] == 99   # still above cost
     b.bets["T2"] = _lvl_bet()
     b.bets["T2"]["entry"] = 99                   # nothing above cost <= 99
     b.quote_offers()
@@ -782,14 +803,13 @@ def test_fractional_lift_leaves_exact_stub(tmp_path, monkeypatch):
     n = b.bets[tk]["count"]
     assert n == 5
     b.quote_offers()
-    oid = b.offers[tk]["oid"]
-    b._check_offers(set(), {oid: 4.75})
+    legs = b.offers[tk]["legs"]
+    # buyers take 3 @ 97 and 1.75 @ 99, leaving a 0.25 stub
+    b._check_offers(set(), {legs[0]["oid"]: 3, legs[1]["oid"]: 1.75})
     assert abs(b.bets[tk]["count"] - 0.25) < 0.001   # exact stub remains
-    assert b.history[-1]["count"] == 4.75            # sale booked exactly
-    assert abs(b.history[-1]["pnl"]
-               - round(((97 - 85) * 4.75 - round(1 * 4.75 / 5)
-                        - dl.fee_cents(97, 4.75, taker=False)) / 100, 2)
-               ) < 0.011 or b.history[-1]["pnl"] > 0
+    assert b.history[-1]["count"] == 1.75            # sales booked exactly
+    assert b.history[-2]["count"] == 3
+    assert b.history[-1]["pnl"] > 0 and b.history[-2]["pnl"] > 0
     # the stub can't be quoted (sub-1 contract) - it holds to settlement
     b.quote_offers()
     assert tk not in b.offers
@@ -824,5 +844,106 @@ def test_k_truth_v2_folds_sale_proceeds(tmp_path, monkeypatch):
     b3.place(mkts=[_mk(bid=82, ask=85)])
     tk = next(iter(b3.bets))
     b3.quote_offers()
-    b3._check_offers(set(), {b3.offers[tk]["oid"]: 5})
-    assert b3.k_sold.get(tk) == 485
+    lg = b3.offers[tk]["legs"]
+    b3._check_offers(set(), {lg[0]["oid"]: 3, lg[1]["oid"]: 2})
+    assert b3.k_sold.get(tk) == 97 * 3 + 99 * 2
+
+
+# ---- 8/11 approved queue: caps, earned sizing, sync detail, re-entry ----
+
+def test_city_cap_blocks_concentration(tmp_path, monkeypatch):
+    # two strikes on one thermometer was the autopsy's #2 risk: the
+    # second same-city entry that would breach 10% of NAV is refused
+    b = _bot(tmp_path, monkeypatch)
+    b.dry_balance_c = 10000                      # NAV $100 -> city cap $10
+    # low + high on one city pass the one-opinion key but share the cap
+    assert b.place(mkts=[_mk(tk="KXLOWTCHI-26AUG11-B64.5", bid=87, ask=89,
+                             city="chicago", strike=64,
+                             is_low=True)]) == 1                 # ~$4.45
+    assert b.place(mkts=[_mk(tk="KXHIGHCHI-26AUG11-B82.5", bid=87, ask=89,
+                             city="chicago", strike=82)]) == 1   # ~$8.90 tot
+    assert b.place(mkts=[_mk(tk="KXLOWTCHI-26AUG12-B66.5", bid=87, ask=89,
+                             city="chicago", strike=66, is_low=True,
+                             date="2099-01-02")]) == 0           # breach
+    assert b.exec_stats.get("city_capped") == 1
+    # a different city is unaffected
+    assert b.place(mkts=[_mk(tk="KXLOWTNYC-26AUG11-B69.5", bid=87, ask=89,
+                             city="new york", strike=69)]) == 1
+
+
+def test_slate_cap_blocks_same_morning_pileup(tmp_path, monkeypatch):
+    # all-8-positions-settling-one-morning was risk #1: one settlement
+    # date may not hold more than 40% of NAV
+    b = _bot(tmp_path, monkeypatch)
+    b.dry_balance_c = 10000                      # NAV $100 -> slate cap $40
+    placed = 0
+    for i in range(12):
+        placed += b.place(mkts=[_mk(tk=f"KXHIGHNY-26JUL-S{i}", bid=87,
+                                    ask=89, city=f"c{i}", strike=60 + i)])
+    # ~$4.45 each: 8 fit under $40, the 9th breaches
+    assert placed == 8
+    assert b.exec_stats.get("slate_capped", 0) >= 1
+    # a different settlement date is unaffected
+    assert b.place(mkts=[_mk(tk="KXHIGHNY-26JUL-S99", bid=87, ask=89,
+                             city="c99", strike=99,
+                             date="2099-01-01")]) == 1
+
+
+def test_proven_bucket_earns_bigger_cap(tmp_path, monkeypatch):
+    monkeypatch.setattr(dl, "CITY_CAP_PCT", 1.0)   # isolate sizing
+    monkeypatch.setattr(dl, "SLATE_CAP_PCT", 1.0)
+    b = _bot(tmp_path, monkeypatch)
+    b.dry_balance_c = 40000                      # NAV $400 (post-boost)
+    b._refresh_caps(b.balance_c())
+    assert b.max_bet_c == 1200                   # base 3% of $400
+    assert b.max_bet_pv_c == 3200                # proven 8%
+    # a proven half-Kelly lane sizes Kelly past the base 3% fraction
+    b.history = _proven_hist(n=30, entry=89)
+    assert b.place(mkts=[_mk(bid=89, ask=91)]) == 1
+    bet = next(iter(b.bets.values()))
+    cost = bet["entry"] * bet["count"]
+    assert cost > b.max_bet_c                    # beyond base cap
+    assert cost <= b.max_bet_pv_c                # inside the earned one
+    # same market, UNPROVEN lane: base fraction keeps it under base cap
+    monkeypatch.setattr(dl, "KELLY_PROVEN_N", 999)     # unproven now
+    b2 = _bot(tmp_path, monkeypatch)
+    b2.dry_balance_c = 40000
+    b2._refresh_caps(b2.balance_c())
+    b2.history = _proven_hist(n=30, entry=89)
+    assert b2.place(mkts=[_mk(bid=89, ask=91)]) == 1
+    bet2 = next(iter(b2.bets.values()))
+    assert bet2["entry"] * bet2["count"] <= b2.max_bet_c
+
+
+def test_sync_excludes_settled_and_sold(tmp_path, monkeypatch):
+    # the stuck sync_diffs=3: Kalshi keeps listing settled AND sold-away
+    # markets for a while - both are expected, not divergence
+    b = _bot(tmp_path, monkeypatch)
+    class _C:
+        pass
+    b.client = _C()
+    b.k_positions = [{"ticker": "T_SOLD", "side": "yes", "count": 5},
+                     {"ticker": "T_DONE", "side": "yes", "count": 3},
+                     {"ticker": "T_REAL", "side": "yes", "count": 2}]
+    b.k_sold = {"T_SOLD": 485}
+    b.settled_tks = ["T_DONE"]
+    assert b._sync_diffs() == 1                  # only T_REAL counts
+    assert b.sync_bad[0]["tk"] == "T_REAL"
+    # a re-bought sold ticker is checked again (not excluded)
+    b.bets["T_SOLD"] = dict(_lvl_bet(), count=1)
+    assert b._sync_diffs() == 2
+
+
+def test_reentry_after_lift_same_market(tmp_path, monkeypatch):
+    # 8/11 approved: sold at premium -> the same market may be re-entered
+    # on the next qualifying signal (second round trip, same day)
+    b = _bot(tmp_path, monkeypatch)
+    b.place(mkts=[_mk(bid=82, ask=85)])
+    tk = next(iter(b.bets))
+    b.quote_offers()
+    legs = b.offers[tk]["legs"]
+    b._check_offers(set(), {legs[0]["oid"]: 3, legs[1]["oid"]: 2})
+    assert tk not in b.bets                      # fully sold
+    # signal fires again: the book buys the same market again
+    assert b.place(mkts=[_mk(bid=82, ask=85)]) == 1
+    assert b.bets[tk]["count"] == 5
