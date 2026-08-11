@@ -496,10 +496,10 @@ class DriftLive:
     # unfilled buy is scored against eventual settlement so "should we
     # cross the spread more?" is answered by the ledger, not opinion. ----
     def _log_miss(self, o, unfilled, why="", ask=0):
-        if unfilled <= 0:
+        if unfilled <= 0.009:
             return
         self.miss.append({"tk": o["ticker"], "side": o["side"],
-                          "entry": o["entry"], "count": int(unfilled),
+                          "entry": o["entry"], "count": round(float(unfilled), 2),
                           "trig": o.get("trig"),
                           "pside": round(o.get("pside", 0), 3),
                           "why": why or "unknown",
@@ -686,9 +686,9 @@ class DriftLive:
             return None
         def norm(side, count):
             try:
-                return (side, int(count or 0))
+                return (side, round(float(count or 0), 2))
             except (TypeError, ValueError):
-                return (side, 0)
+                return (side, 0.0)
         kp = {r.get("ticker"): norm(r.get("side"), r.get("count"))
               for r in (self.k_positions or [])}
         mine = {tk: norm(b.get("side"), b.get("count"))
@@ -991,13 +991,16 @@ class DriftLive:
         try:
             kp = []
             for p in self.client.get_positions():
-                pos = int(round(self._kval(p, "position") or 0))
-                if pos == 0:
+                # 8/11: Kalshi trades FRACTIONAL contracts now (a buyer
+                # took 4.75 of a 5-lot offer, leaving a 0.25 stub the
+                # int-rounding made invisible). Mirror the exact float.
+                pos = float(self._kval(p, "position") or 0)
+                if abs(pos) < 0.01:
                     continue
                 tk = p.get("ticker") or ""
                 if not _is_wx(tk):
                     continue    # mirror shows THIS book vs ITS universe
-                cnt = abs(pos)
+                cnt = round(abs(pos), 2)
                 exp = abs(self._kval(p, "market_exposure") or 0)
                 b = self.bets.get(tk) or {}
                 kp.append({"ticker": tk, "side": "yes" if pos > 0 else "no",
@@ -1055,7 +1058,7 @@ class DriftLive:
     # unconsumed hard-expires at 15 minutes so it can never overstate
     # NAV for long. ----
     def _recv_add(self, amount_c):
-        self.recv.append([now(), int(amount_c)])
+        self.recv.append([now(), int(round(amount_c))])
 
     def _recv_c(self, balance_c=None):
         if balance_c is not None:
@@ -1148,32 +1151,36 @@ class DriftLive:
                 fills_by_oid = {}
                 for f in self.client.get_fills(limit=100):
                     fo = f.get("order_id")
-                    fc = int(round(float(f.get("count_fp") or f.get("count") or 0)))
+                    # 8/11: fractional fills are real - count them exactly
+                    fc = round(float(f.get("count_fp") or f.get("count") or 0), 2)
                     fills_by_oid[fo] = fills_by_oid.get(fo, 0) + fc
             except Exception:
                 fills_by_oid = None         # fills unknown this cycle
         nowdt = datetime.datetime.now()
         for oid, o in list(self.pending.items()):
-            seen = int(o.get("filled_seen", 0))
+            seen = float(o.get("filled_seen", 0))
             if self.client is not None and oid not in resting_ids:
                 # gone from the resting book: filled and/or canceled
                 if fills_by_oid is not None:
-                    filled = max(0, fills_by_oid.get(oid, 0) - seen)
+                    filled = max(0.0, round(fills_by_oid.get(oid, 0)
+                                            - seen, 2))
                 else:
-                    filled = max(0, o["count"] - seen)  # assume rest filled
-                if filled > 0:
+                    filled = max(0.0, o["count"] - seen)  # assume rest filled
+                if filled > 0.009:
                     self._promote_fill(oid, o, filled)
-                if filled == 0 and seen == 0:
+                if filled <= 0.009 and seen <= 0.009:
                     self.canceled += 1
-                unfilled_v = o["count"] - seen - filled
+                unfilled_v = round(o["count"] - seen - filled, 2)
                 # 8/10 (Adam: "stop the misses"): a vanished order is
                 # re-entered at the ask RIGHT NOW instead of being
                 # forfeited - signal, caps and balance are all
                 # re-checked inside _cross_expiring. Since the 8/7
                 # instrumentation EVERY vanished order (15/15 weather,
                 # 9/9 crypto) settled as a winner we didn't hold.
-                if (unfilled_v > 0 and CROSS_EXPIRY
-                        and self._cross_expiring(o, unfilled_v)):
+                # (8/11: fractional remainders <1 can't be ordered -
+                # they fall through to the miss log instead)
+                if (unfilled_v >= 1 and CROSS_EXPIRY
+                        and self._cross_expiring(o, int(unfilled_v))):
                     self.exec_stats["revanish"] = (
                         self.exec_stats.get("revanish", 0) + 1)
                 else:
@@ -1186,10 +1193,10 @@ class DriftLive:
             # still resting: promote any PARTIAL fills so stops/settles
             # protect those contracts immediately
             if self.client is not None and fills_by_oid is not None:
-                new = max(0, fills_by_oid.get(oid, 0) - seen)
-                if new > 0:
+                new = max(0.0, round(fills_by_oid.get(oid, 0) - seen, 2))
+                if new > 0.009:
                     self._promote_fill(oid, o, new)
-                    o["filled_seen"] = seen + new
+                    o["filled_seen"] = round(seen + new, 2)
             try:
                 age_h = (nowdt - datetime.datetime.fromisoformat(o["ots"])).total_seconds() / 3600
             except Exception:
@@ -1200,14 +1207,16 @@ class DriftLive:
                         self.client.cancel_order(oid)
                     except Exception:
                         continue
-                unfilled = o["count"] - int(o.get("filled_seen", 0))
-                crossed = CROSS_EXPIRY and self._cross_expiring(o, unfilled)
+                unfilled = round(o["count"]
+                                 - float(o.get("filled_seen", 0)), 2)
+                crossed = (CROSS_EXPIRY and unfilled >= 1
+                           and self._cross_expiring(o, int(unfilled)))
                 if not crossed:
                     self._log_miss(o, unfilled,
                                    why=("cross_off" if not CROSS_EXPIRY
                                         else getattr(self, "_cross_why", "")),
                                    ask=getattr(self, "_cross_ask", 0))
-                    if int(o.get("filled_seen", 0)) == 0:
+                    if float(o.get("filled_seen", 0)) <= 0.009:
                         self.canceled += 1
                 self._log([now(), "CANCEL", self.mode, o["city"], o["strike"],
                            o["hl"], o["side"], round(o["pside"], 3),
@@ -1229,7 +1238,8 @@ class DriftLive:
         # resized positions (partial sell, pyramid add) requote fresh
         for tk, off in list(self.offers.items()):
             b = self.bets.get(tk)
-            if b is not None and int(b.get("count", 0)) == int(off.get("count", 0)):
+            if (b is not None and int(float(b.get("count", 0)))
+                    == int(off.get("count", 0))):
                 continue
             if self.client is not None:
                 try:
@@ -1238,7 +1248,9 @@ class DriftLive:
                     pass        # settled markets kill their orders anyway
             del self.offers[tk]
         for tk, b in list(self.bets.items()):
-            if tk in self.offers or int(b.get("count", 0)) < 1:
+            # 8/11: fractional stubs (<1 contract, left by fractional
+            # buyers) can't be quoted - they hold to settlement
+            if tk in self.offers or int(float(b.get("count", 0))) < 1:
                 continue
             floor = (NICKEL_SELL_MIN_C if b.get("trig") == "nickel"
                      else SELL_MIN_C)
@@ -1250,14 +1262,14 @@ class DriftLive:
                 try:
                     resp = self.client.create_order(
                         tk, action="sell", side=b["side"],
-                        count=int(b["count"]), price_cents=px)
+                        count=int(float(b["count"])), price_cents=px)
                     ro = resp.get("order") or {}
                     oid = (ro.get("order_id") or ro.get("id")
                            or resp.get("order_id") or resp.get("id") or oid)
                 except Exception:
                     continue
             self.offers[tk] = {"oid": oid, "px": px,
-                               "count": int(b["count"]), "ots": now()}
+                               "count": int(float(b["count"])), "ots": now()}
             self.placed += 1
             self.exec_stats["offers_placed"] = (
                 self.exec_stats.get("offers_placed", 0) + 1)
@@ -1276,14 +1288,17 @@ class DriftLive:
                 continue
             if oid in resting_ids:
                 continue                    # still quoted
-            sold = 0
+            sold = 0.0
             if fills_by_oid is not None:
-                sold = min(int(b["count"]), int(fills_by_oid.get(oid, 0)))
+                # 8/11: fractional lifts are counted exactly - a buyer
+                # really did take 4.75 of a 5-lot quote
+                sold = round(min(float(b["count"]),
+                                 float(fills_by_oid.get(oid, 0))), 2)
             del self.offers[tk]             # gone either way; requote later
-            if sold <= 0:
+            if sold <= 0.009:
                 continue                    # canceled externally, not lifted
             px = int(off.get("px", 0))
-            fee_share = int(round(b.get("fee", 0) * sold / max(1, b["count"])))
+            fee_share = int(round(b.get("fee", 0) * sold / max(0.01, float(b["count"]))))
             sell_fee = fee_cents(px, sold, taker=False)
             net = (px - b["entry"]) * sold - fee_share - sell_fee
             self.realized_c += net
@@ -1308,10 +1323,10 @@ class DriftLive:
             self._log([now(), "SOLD", self.mode, b["city"], b["strike"],
                        b["hl"], b["side"], round(b.get("pside", 0), 3),
                        px, sold, "", round(net / 100, 2), oid])
-            if sold >= int(b["count"]):
+            if sold >= float(b["count"]) - 0.009:
                 del self.bets[tk]
             else:
-                b["count"] = int(b["count"]) - sold
+                b["count"] = round(float(b["count"]) - sold, 2)
                 b["fee"] = max(0, b.get("fee", 0) - fee_share)
 
     # ---- position reconciliation: Kalshi is the source of truth ----

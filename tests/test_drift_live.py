@@ -770,3 +770,34 @@ def test_offer_never_below_cost_or_when_off(tmp_path, monkeypatch):
     b3.bets["T3"] = _lvl_bet()
     b3.quote_offers()
     assert not b3.offers
+
+
+def test_fractional_lift_leaves_exact_stub(tmp_path, monkeypatch):
+    # 8/11: Kalshi trades fractional contracts - a buyer took 4.75 of a
+    # 5-lot quote live, and the int-rounding booked it as 5 sold. Now
+    # the fraction is counted exactly: stub stays, P&L is precise.
+    b = _bot(tmp_path, monkeypatch)
+    b.place(mkts=[_mk(bid=82, ask=85)])
+    tk = next(iter(b.bets))
+    n = b.bets[tk]["count"]
+    assert n == 5
+    b.quote_offers()
+    oid = b.offers[tk]["oid"]
+    b._check_offers(set(), {oid: 4.75})
+    assert abs(b.bets[tk]["count"] - 0.25) < 0.001   # exact stub remains
+    assert b.history[-1]["count"] == 4.75            # sale booked exactly
+    assert abs(b.history[-1]["pnl"]
+               - round(((97 - 85) * 4.75 - round(1 * 4.75 / 5)
+                        - dl.fee_cents(97, 4.75, taker=False)) / 100, 2)
+               ) < 0.011 or b.history[-1]["pnl"] > 0
+    # the stub can't be quoted (sub-1 contract) - it holds to settlement
+    b.quote_offers()
+    assert tk not in b.offers
+    # and a fractional Kalshi mirror row survives sync without a false
+    # divergence flag
+    b.k_positions = [{"ticker": tk, "side": "yes", "count": 0.25}]
+    b.bets[tk]["count"] = 0.25
+    class _C:  # minimal client stub so _sync_diffs runs
+        pass
+    b.client = _C()
+    assert b._sync_diffs() == 0

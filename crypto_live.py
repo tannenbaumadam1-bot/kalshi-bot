@@ -709,7 +709,7 @@ class CryptoLive:
     # exchange's cash credit. Consumed as the balance rises; hard-expired
     # at 15 minutes so it can never overstate NAV for long. ----
     def _recv_add(self, amount_c):
-        self.recv.append([now(), int(amount_c)])
+        self.recv.append([now(), int(round(amount_c))])
 
     def _recv_c(self, balance_c=None):
         if balance_c is not None:
@@ -955,7 +955,8 @@ class CryptoLive:
                 fills_by_oid = {}
                 for f in self.client.get_fills(limit=100):
                     fo = f.get("order_id")
-                    fc = int(round(float(f.get("count_fp") or f.get("count") or 0)))
+                    # 8/11: fractional fills counted exactly (see weather)
+                    fc = round(float(f.get("count_fp") or f.get("count") or 0), 2)
                     fills_by_oid[fo] = fills_by_oid.get(fo, 0) + fc
             except Exception:
                 return
@@ -1100,15 +1101,17 @@ class CryptoLive:
             kp = []
             for p in self.client.get_positions():
                 v = p.get("position_fp")
-                pos = int(round(float(v))) if v is not None else int(p.get("position") or 0)
-                if pos == 0:
+                # 8/11: fractional positions mirrored exactly
+                pos = (float(v) if v is not None
+                       else float(p.get("position") or 0))
+                if abs(pos) < 0.01:
                     continue
                 tk = p.get("ticker") or ""
                 if tk.split("-")[0] in wx:
                     continue
                 kp.append({"ticker": tk,
                            "side": "yes" if pos > 0 else "no",
-                           "count": abs(pos)})
+                           "count": round(abs(pos), 2)})
             self.k_positions = kp
         except Exception:
             pass
@@ -1133,9 +1136,9 @@ class CryptoLive:
             return None
         def norm(side, count):
             try:
-                return (side, int(count or 0))
+                return (side, round(float(count or 0), 2))
             except (TypeError, ValueError):
-                return (side, 0)
+                return (side, 0.0)
         kp = {r.get("ticker"): norm(r.get("side"), r.get("count"))
               for r in (self.k_positions or [])}
         mine = {tk: norm(b.get("side"), b.get("count"))
