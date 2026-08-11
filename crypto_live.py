@@ -123,6 +123,11 @@ GATE_ERA = os.environ.get("CRYPTO_GATE_ERA", "g4-core80-88-wilson")
 # with the Wilson LOWER bound clearing the lane's own fee-adjusted
 # breakeven, before the lane re-arms with real money
 SHADOW_UNBLOCK_N = int(os.environ.get("CRYPTO_SHADOW_UNBLOCK_N", "30"))
+# 8/11 (Adam): the shadow book is RETIRED for now. It already did its
+# job - 25-2 in shadow and STILL -$0.76 proved the hi band edgeless
+# with zero dollars at risk. The gate ledgers keep that evidence;
+# CRYPTO_SHADOW_ON=1 revives collection if the book ever resumes.
+SHADOW_ON = os.environ.get("CRYPTO_SHADOW_ON", "0") == "1"
 # ---- 8/10 LADDER-COHERENCE ARB LANE (Adam-approved, real money) ----
 # Two threshold markets on the same coin+hour must obey arithmetic:
 # P(above lower strike) >= P(above higher strike). When separate order
@@ -734,6 +739,8 @@ class CryptoLive:
         """Paper-shadow a blocked lane's refused entry (8/10): records
         the trade it WOULD have made, sized at the 3-lot floor, settled
         virtually in settle(). Zero dollars at risk."""
+        if not SHADOW_ON:
+            return              # 8/11: retired (see SHADOW_ON)
         if tk in self.shadow or len(self.shadow) >= 300:
             return
         uk = underlying_key(tk)
@@ -1262,6 +1269,8 @@ class CryptoLive:
         """Resolve the paper-shadow book and re-arm any blocked lane
         whose shadow record has EARNED it (8/10). Shadow outcomes land
         in the gate ledger's s* counters, never in the money ledgers."""
+        if not SHADOW_ON and not self.shadow:
+            return
         for tk, sb in list(self.shadow.items()):
             res = fetch_result(tk)
             if res is None:

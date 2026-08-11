@@ -801,3 +801,28 @@ def test_fractional_lift_leaves_exact_stub(tmp_path, monkeypatch):
         pass
     b.client = _C()
     assert b._sync_diffs() == 0
+
+
+def test_k_truth_v2_folds_sale_proceeds(tmp_path, monkeypatch):
+    # 8/11: settlements-only accounting scored every premium sale as a
+    # phantom loss (k_losses 65->86 the first offer-side night). The v2
+    # rebuild backfills sale proceeds from history and reseeds k_cum.
+    b = _bot(tmp_path, monkeypatch)
+    b.history.append({"tk": "T9", "city": "x", "strike": 1, "hl": "hi",
+                      "side": "yes", "trig": "level", "pside": 0.85,
+                      "entry": 85, "count": 5, "outcome": None,
+                      "exited": True, "sold": True, "exit_px": 97,
+                      "pnl": 0.55, "ts": "2026-08-11T00:00:00", "ots": "", "era": "dlive1"})
+    b.k_cum = {"seeded": True, "w": 1, "l": 2, "pnl": -5.0}
+    b.k_sold = {}
+    b.save()
+    b2 = dl.DriftLive(None, mode="DRY")
+    assert b2.k_cum == {"v2_sold": True}         # forced reseed
+    assert b2.k_sold.get("T9") == 485            # 97c x 5 backfilled
+    # live recording: a lifted offer books its proceeds too
+    b3 = _bot(tmp_path, monkeypatch)
+    b3.place(mkts=[_mk(bid=82, ask=85)])
+    tk = next(iter(b3.bets))
+    b3.quote_offers()
+    b3._check_offers(set(), {b3.offers[tk]["oid"]: 5})
+    assert b3.k_sold.get(tk) == 485

@@ -19,6 +19,8 @@ def _mk(tk="KXBTCD-26AUG0317-T64000", ev="KXBTCD-26AUG0317", bid=84, ask=86,
 def _bot(tmp_path, monkeypatch, peer_cost=0.0):
     # 8/10: the live book is PAUSED (Adam); tests exercise the machinery
     monkeypatch.setattr(cl, "PAUSED", False)
+    # 8/11: shadow retired in prod; its machinery stays tested
+    monkeypatch.setattr(cl, "SHADOW_ON", True)
     monkeypatch.setattr(cl, "STATE", str(tmp_path / "c.json"))
     monkeypatch.setattr(cl, "BETS", str(tmp_path / "c.csv"))
     peer = tmp_path / "peer.json"
@@ -986,3 +988,13 @@ def test_arb_respects_pair_cap(tmp_path, monkeypatch):
             bid=90, ask=92)]
     b.place(mkts=two_events)
     assert len(b.arb_pairs) == 1                # cap holds
+
+
+def test_shadow_retired_by_default(tmp_path, monkeypatch):
+    # 8/11 (Adam): shadow book off in prod - no collection while paused
+    assert os.environ.get("CRYPTO_SHADOW_ON", "0") == "0"
+    b = _bot(tmp_path, monkeypatch)
+    monkeypatch.setattr(cl, "SHADOW_ON", False)
+    b.dry_balance_c = 20000
+    b.place(mkts=[_mk(tk="H1", ev="EH1", bid=93, ask=95)])
+    assert not b.shadow

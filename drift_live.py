@@ -326,6 +326,12 @@ class DriftLive:
         self.k_cum = {}          # cumulative settlement ledger (never rolls)
         self.pnl_days = {}       # date -> realized $ that day (never trimmed)
         self.k_exit_realized_c = 0.0   # Kalshi's realized pnl on open markets
+        # 8/11 K-TRUTH v2: gross sale proceeds per ticker (premium
+        # offers + any exits). Kalshi's settlement rows carry OUR costs
+        # but the BUYER's payout for contracts we sold - without this,
+        # every profitable sale scored as a phantom settlement loss
+        # (k_losses inflated 65->86 the first night the offer side ran).
+        self.k_sold = {}         # tk -> proceeds in cents
         self.day_nav0_c = None   # NAV anchor at day start (for true today-P&L)
         self.autopsy = []        # every exit, graded vs eventual settlement
         self.miss = []           # every unfilled cancel, graded vs settlement
@@ -357,6 +363,7 @@ class DriftLive:
                           "realized_c", "fees_c", "wins", "losses", "placed",
                           "canceled", "day", "day_pnl_c", "history",
                           "settled_tks", "k_settlements", "k_exit_realized_c",
+                          "k_sold",
                           "day_nav0_c", "autopsy", "miss", "exec_stats",
                           "k_cum", "pnl_days", "recv", "recv_bal_c",
                           "offers",
@@ -369,6 +376,21 @@ class DriftLive:
                     self.day_nav0_c = None
             except Exception:
                 pass
+        # 8/11 K-TRUTH v2 one-time rebuild: backfill sale proceeds from
+        # the retained history (sold offers, stops), then clear the
+        # cumulative ledger so the next sync_kalshi_truth reseeds the
+        # FULL era history with sales folded in. Rows older than the
+        # 200-row history window can't be adjusted - the era is young
+        # enough that everything sold so far is still in the window.
+        if not self.k_cum.get("v2_sold"):
+            for h in self.history:
+                tk = h.get("tk")
+                if tk and h.get("exited") and h.get("exit_px"):
+                    self.k_sold[tk] = round(
+                        self.k_sold.get(tk, 0)
+                        + h["exit_px"] * float(h.get("count", 0)), 1)
+            self.k_cum = {"v2_sold": True}
+            self.k_settlements = []
         self._seed_pnl_days()
 
     def _day_add(self, net_c):
@@ -719,7 +741,7 @@ class DriftLive:
              "dry_balance_c": self.dry_balance_c,
              "settled_tks": self.settled_tks[-300:],
              "k_settlements": self.k_settlements[:300],
-             "k_cum": self.k_cum,
+             "k_cum": self.k_cum, "k_sold": self.k_sold,
              "offers": self.offers,
              "pnl_days": self.pnl_days,
              "k_exit_realized_c": self.k_exit_realized_c,
@@ -932,7 +954,18 @@ class DriftLive:
             except (TypeError, ValueError):
                 fee = 0.0
             pnl_c = rev + val - cy - cn - fee
+            # 8/11 K-TRUTH v2: for contracts we SOLD, the settlement row
+            # carries our cost but the BUYER's payout - fold our sale
+            # proceeds back in so the ledger scores the actual round
+            # trip instead of a phantom loss. (Kalshi's realized_pnl on
+            # still-listed positions overlaps this for a few minutes
+            # around settlement; the k_exit tile is a snapshot, this is
+            # the permanent record.)
+            sold_c = self.k_sold.get(tk) or 0
+            if sold_c:
+                pnl_c += sold_c
             return {"tk": tk, "pnl": round(pnl_c / 100.0, 2),
+                    "sold": bool(sold_c),
                     "fee": round(fee / 100.0, 2), "ts": ts}
 
         try:
@@ -1057,6 +1090,13 @@ class DriftLive:
     # dips by a winner's payout. Consumed as the balance rises; anything
     # unconsumed hard-expires at 15 minutes so it can never overstate
     # NAV for long. ----
+    def _k_sold_add(self, tk, proceeds_c):
+        """Record gross sale proceeds for the k-truth ledger (8/11)."""
+        self.k_sold[tk] = round(self.k_sold.get(tk, 0) + proceeds_c, 1)
+        if len(self.k_sold) > 400:      # bounded; a market folds once
+            for k in list(self.k_sold)[:len(self.k_sold) - 400]:
+                del self.k_sold[k]
+
     def _recv_add(self, amount_c):
         self.recv.append([now(), int(round(amount_c))])
 
@@ -1309,6 +1349,7 @@ class DriftLive:
                 self.exec_stats.get("offers_sold", 0) + 1)
             self.exec_stats["offers_sold_net_c"] = round(
                 self.exec_stats.get("offers_sold_net_c", 0) + net, 1)
+            self._k_sold_add(tk, px * sold)
             self.history.append({"tk": tk, "city": b["city"],
                                  "strike": b["strike"],
                                  "kind": b.get("kind", "ge"),
@@ -1507,6 +1548,7 @@ class DriftLive:
                 except Exception:
                     continue
             exit_fee = fee_cents(bid, cnt, taker=True)
+            self._k_sold_add(tk, bid * cnt)     # k-truth: sale proceeds
             net = (bid - b["entry"]) * cnt - b.get("fee", 0) - exit_fee
             self.realized_c += net
             self._day_add(net)

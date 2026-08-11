@@ -916,7 +916,7 @@ async function load(){
     }
     // BOOK 1 - WEATHER: status at a glance
     $('wxtiles').innerHTML=[
-      tile('Record',(S.has_kalshi_truth&&S.k_wins!=null)?((S.k_wins||0)+'W / '+(S.k_losses||0)+'L'):'<span class=mut>syncing&hellip;</span>','Kalshi settlements, lifetime &middot; '+((S.k_open!=null?S.k_open:S.open)||0)+' open &middot; '+((S.k_resting_n!=null?S.k_resting_n:S.resting)||0)+' resting'),
+      tile('Record',(S.has_kalshi_truth&&S.k_wins!=null)?((S.k_wins||0)+'W / '+(S.k_losses||0)+'L'):'<span class=mut>syncing&hellip;</span>','Kalshi settlements + our sales, lifetime &middot; '+((S.k_open!=null?S.k_open:S.open)||0)+' open &middot; '+((S.k_resting_n!=null?S.k_resting_n:S.resting)||0)+' resting'),
       (S.caps?tile('Sizing',F(S.caps.bet)+'/bet','gate '+(S.gate==='scale'?'PASSED':'probe')+' &middot; halt -'+F(S.caps.halt)+' &middot; entries &ge;'+(S.caps.floor||80)+'&cent;'):''),
       (L.nickel?tile('Nickel lane',(L.nickel.wins||0)+'W / '+(L.nickel.losses!=null?L.nickel.losses:((L.nickel.n||0)-(L.nickel.wins||0)))+'L &middot; <span class="'+C(L.nickel.net)+'">'+M(L.nickel.net||0)+'</span>',(L.nickel.open||0)+'/'+(L.nickel.max_open||5)+' lanes &middot; settle-or-stop'):''),
       (S.quotes&&S.quotes.on?tile('Offer side',((S.quotes.sold||0)?((S.quotes.sold||0)+' lifted &middot; <span class="'+C(S.quotes.sold_net)+'">'+M(S.quotes.sold_net||0)+'</span>'):'<span class=mut>quoting&hellip;</span>'),(S.quotes.resting||0)+' resting &middot; sells at &ge;'+(S.quotes.min||97)+'&cent; ('+(S.quotes.nickel_min||98)+'&cent; nickels) &middot; two-sided book'):''),
