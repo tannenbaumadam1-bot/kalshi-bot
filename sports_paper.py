@@ -59,6 +59,24 @@ PM_GAMMA = os.environ.get("SPORTS_PM_GAMMA",
 # an anchor if it is LIQUID and SANE. Thin Polymarket markets can show
 # stale prints that manufacture phantom edge.
 PM_MIN_VOL = float(os.environ.get("SPORTS_PM_MIN_VOL", "10000"))
+# 8/12 DUAL-ANCHOR VETO (the sharp-desk standard): Polymarket AND the
+# devigged DraftKings/FanDuel consensus (SharpAPI free tier) must agree
+# within VETO_DIFF or the trade is refused. When the sharp feed has no
+# match, PM-only entries are still allowed but TAGGED (anchors=1) so
+# the gate dataset can judge the cohorts separately.
+VETO_DIFF = float(os.environ.get("SPORTS_ANCHOR_VETO_DIFF", "0.05"))
+SHARP_URL = os.environ.get("SPORTS_SHARP_URL",
+                           "https://api.sharpapi.io/api/v1")
+
+
+def _sharp_key():
+    k = os.environ.get("SPORTS_SHARPAPI_KEY")
+    if k:
+        return k.strip()
+    try:
+        return open("sharpapi_key.txt").read().strip()
+    except Exception:
+        return ""
 FAIR_MIN = float(os.environ.get("SPORTS_FAIR_MIN", "0.50"))
 FAIR_MAX = float(os.environ.get("SPORTS_FAIR_MAX", "0.98"))
 
@@ -99,6 +117,7 @@ class SportsPaper:
         self.gate = {"w": 0, "l": 0, "pnl": 0.0, "ben": 0.0}
         self.sold_log = []    # sales graded vs settlement
         self._pm_cache = {"ts": None, "rows": []}
+        self._sharp_cache = {"ts": None, "rows": []}
         self.load()
 
     # ---- persistence ----
@@ -286,6 +305,69 @@ class SportsPaper:
         self._pm_cache = {"ts": now(), "rows": rows}
         return rows
 
+    def fetch_sharp_index(self):
+        """Devigged DK/FanDuel moneyline consensus via SharpAPI (free
+        tier, 60s-delayed - irrelevant pre-game). Same row shape as the
+        PM index so anchor_prob works on both. Cached 10 minutes."""
+        key = _sharp_key()
+        if not key:
+            return []
+        ts = self._sharp_cache.get("ts")
+        if ts and (datetime.datetime.now()
+                   - datetime.datetime.fromisoformat(ts)
+                   ).total_seconds() < 600:
+            return self._sharp_cache["rows"]
+        games = {}
+        try:
+            offset = 0
+            for _ in range(2):
+                d = requests.get(SHARP_URL + "/odds",
+                                 params={"market_type": "moneyline",
+                                         "limit": 500, "offset": offset},
+                                 headers={"X-API-Key": key},
+                                 timeout=20).json()
+                for r in d.get("data") or []:
+                    if (r.get("market_type") != "moneyline"
+                            or r.get("is_live")):
+                        continue
+                    g = games.setdefault(
+                        r.get("event_id"),
+                        {"home": r.get("home_team") or "",
+                         "away": r.get("away_team") or "", "books": {}})
+                    try:
+                        p = float(r.get("odds_probability") or 0)
+                    except (TypeError, ValueError):
+                        continue
+                    if p > 0:
+                        g["books"].setdefault(
+                            r.get("sportsbook"), {})[
+                            r.get("selection") or ""] = p
+                pg = d.get("pagination") or {}
+                if not pg.get("has_more") or not pg.get("next_offset"):
+                    break
+                offset = pg["next_offset"]
+            rows = []
+            for g in games.values():
+                acc = {}
+                for probs in g["books"].values():
+                    if len(probs) != 2:
+                        continue        # need both sides to strip vig
+                    tot = sum(probs.values())
+                    if tot <= 0:
+                        continue
+                    for sel, p in probs.items():
+                        acc.setdefault(sel, []).append(p / tot)
+                if not acc:
+                    continue
+                q = f"{g['away']} at {g['home']}"
+                rows.append({"q": q, "toks": sorted(_tokens(q)),
+                             "probs": {s: sum(v) / len(v)
+                                       for s, v in acc.items()}})
+            self._sharp_cache = {"ts": now(), "rows": rows}
+        except Exception:
+            rows = self._sharp_cache["rows"] or []
+        return rows
+
     def anchor_prob(self, mk, pm_rows):
         """Polymarket-implied probability for this Kalshi market's YES
         team, or None when no confident match exists (skip, never guess)."""
@@ -387,6 +469,7 @@ class SportsPaper:
                              "kind": kind, "exit_px": exit_px,
                              "fair_end": b.get("fair_now"),
                              "fair_min": b.get("fair_min"),
+                             "anchors": b.get("anchors"),
                              "sold": kind == "sold",
                              "pnl": round(net_c / 100.0, 2),
                              "ts": now(), "ots": b.get("ots", ""),
@@ -429,6 +512,7 @@ class SportsPaper:
         if len(self.bets) >= MAX_OPEN:
             return 0
         pm_rows = self.fetch_pm_index()
+        sharp_rows = self.fetch_sharp_index()
         open_events = {b.get("event") for b in self.bets.values()}
         placed = 0
         for mk in mkts:
@@ -451,6 +535,16 @@ class SportsPaper:
                 self._miss_add("anchor_insane")
                 continue        # a 65-90c ask against a <50% or >98%
                                 # anchor is a mismatch, not an edge
+            # 8/12 dual-anchor veto: the sharp consensus must agree
+            sh_fair = (self.anchor_prob(mk, sharp_rows)
+                       if sharp_rows else None)
+            anchors = 1
+            if sh_fair is not None:
+                if abs(sh_fair - fair) > VETO_DIFF:
+                    self._miss_add("anchor_disagree")
+                    continue
+                fair = (fair + sh_fair) / 2.0
+                anchors = 2
             fee = fee_cents(ask, SIZE, taker=True)
             edge_c = fair * 100 - ask - fee / SIZE
             if edge_c < EDGE_MIN_C:
@@ -464,6 +558,9 @@ class SportsPaper:
                              "team": mk.get("team"),
                              "entry": ask, "count": SIZE, "fee": fee,
                              "fair": round(fair, 3),
+                             "fair_sharp": (round(sh_fair, 3)
+                                            if sh_fair is not None else None),
+                             "anchors": anchors,
                              "edge": round(edge_c, 1),
                              "rungs": rungs, "ots": now(), "era": ERA}
             self.fees_c += fee

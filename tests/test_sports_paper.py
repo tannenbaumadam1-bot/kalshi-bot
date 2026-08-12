@@ -12,6 +12,8 @@ import sports_paper as sp
 def _bot(tmp_path, monkeypatch):
     monkeypatch.setattr(sp, "STATE", str(tmp_path / "sp.json"))
     b = sp.SportsPaper()
+    # tests stay offline: no live sharp feed unless a test injects one
+    monkeypatch.setattr(b, "fetch_sharp_index", lambda: [])
     return b
 
 
@@ -109,3 +111,33 @@ def test_five_lot_floor(tmp_path, monkeypatch):
     monkeypatch.setattr(b, "fetch_pm_index", lambda: _pm())
     b.place([_mk()])
     assert next(iter(b.bets.values()))["count"] >= 5
+
+
+def test_dual_anchor_veto_and_blend(tmp_path, monkeypatch):
+    # 8/12: two anchors agreeing = trade at the blend; disagreeing = veto
+    b = _bot(tmp_path, monkeypatch)
+    monkeypatch.setattr(b, "fetch_pm_index", lambda: _pm())
+    sharp_agree = [{"q": "New York Yankees at Boston Red Sox",
+                    "toks": sorted(sp._tokens(
+                        "New York Yankees at Boston Red Sox")),
+                    "probs": {"New York Yankees": 0.86,
+                              "Boston Red Sox": 0.14}}]
+    monkeypatch.setattr(b, "fetch_sharp_index", lambda: sharp_agree)
+    assert b.place([_mk()]) == 1
+    pos = next(iter(b.bets.values()))
+    assert pos["anchors"] == 2
+    assert pos["fair"] == round((0.84 + 0.86) / 2, 3)   # the blend
+    # disagreement beyond 5c: refused, counted
+    b2 = _bot(tmp_path, monkeypatch)
+    monkeypatch.setattr(b2, "fetch_pm_index", lambda: _pm())
+    sharp_off = [dict(sharp_agree[0],
+                      probs={"New York Yankees": 0.70,
+                             "Boston Red Sox": 0.30})]
+    monkeypatch.setattr(b2, "fetch_sharp_index", lambda: sharp_off)
+    assert b2.place([_mk()]) == 0
+    assert b2.miss.get("anchor_disagree") == 1
+    # no sharp match at all: PM-only entry allowed but tagged
+    b3 = _bot(tmp_path, monkeypatch)
+    monkeypatch.setattr(b3, "fetch_pm_index", lambda: _pm())
+    assert b3.place([_mk()]) == 1
+    assert next(iter(b3.bets.values()))["anchors"] == 1
