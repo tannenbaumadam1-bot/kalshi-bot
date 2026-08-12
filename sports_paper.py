@@ -42,7 +42,12 @@ EDGE_MIN_C = float(os.environ.get("SPORTS_EDGE_MIN_C", "3"))
 ENTRY_MIN = int(os.environ.get("SPORTS_ENTRY_MIN", "65"))
 ENTRY_MAX = int(os.environ.get("SPORTS_ENTRY_MAX", "90"))
 MAX_SPREAD = int(os.environ.get("SPORTS_MAX_SPREAD", "5"))
-SIZE = int(os.environ.get("SPORTS_SIZE", "5"))
+# 8/12 (Adam): 5-contract MINIMUM, same floor as the live books - the
+# fee-rounding math (a 1-lot pays the same rounded-up cent as 5) and
+# the go-live dataset both need real-sized trades. No config may take
+# the size below the floor.
+MIN_CONTRACTS = int(os.environ.get("SPORTS_MIN_CONTRACTS", "5"))
+SIZE = max(MIN_CONTRACTS, int(os.environ.get("SPORTS_SIZE", "5")))
 MAX_OPEN = int(os.environ.get("SPORTS_MAX_OPEN", "10"))
 SELL_LO_C = int(os.environ.get("SPORTS_SELL_LO", "97"))
 SELL_HI_C = int(os.environ.get("SPORTS_SELL_HI", "99"))

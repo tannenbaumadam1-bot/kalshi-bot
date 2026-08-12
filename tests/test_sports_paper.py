@@ -100,3 +100,12 @@ def test_sold_rows_graded_vs_settlement(tmp_path, monkeypatch):
     monkeypatch.setattr(sp, "fetch_result", lambda t: "yes")
     b.settle()
     assert all(r["res"] == "yes" and "kept" in r for r in b.sold_log)
+
+
+def test_five_lot_floor(tmp_path, monkeypatch):
+    # 8/12 (Adam): 5-contract minimum across ALL strategies, paper incl.
+    assert sp.MIN_CONTRACTS == 5 and sp.SIZE >= 5
+    b = _bot(tmp_path, monkeypatch)
+    monkeypatch.setattr(b, "fetch_pm_index", lambda: _pm())
+    b.place([_mk()])
+    assert next(iter(b.bets.values()))["count"] >= 5
