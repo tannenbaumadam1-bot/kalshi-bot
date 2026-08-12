@@ -55,6 +55,12 @@ CLOSE_H = float(os.environ.get("SPORTS_CLOSE_H", "36"))
 GATE_N = int(os.environ.get("SPORTS_GATE_N", "200"))
 PM_GAMMA = os.environ.get("SPORTS_PM_GAMMA",
                           "https://gamma-api.polymarket.com")
+# 8/12 anchor-quality guards (the pro-desk standard): an anchor is only
+# an anchor if it is LIQUID and SANE. Thin Polymarket markets can show
+# stale prints that manufacture phantom edge.
+PM_MIN_VOL = float(os.environ.get("SPORTS_PM_MIN_VOL", "10000"))
+FAIR_MIN = float(os.environ.get("SPORTS_FAIR_MIN", "0.50"))
+FAIR_MAX = float(os.environ.get("SPORTS_FAIR_MAX", "0.98"))
 
 _WORD = re.compile(r"[a-z0-9]+")
 
@@ -257,6 +263,13 @@ class SportsPaper:
                         continue
                     if len(outs) != len(prices) or not outs:
                         continue
+                    try:
+                        vol = float(m.get("volume") or m.get("volumeNum")
+                                    or 0)
+                    except (TypeError, ValueError):
+                        vol = 0.0
+                    if vol < PM_MIN_VOL:
+                        continue    # thin anchor = no anchor
                     probs = {}
                     for o, p in zip(outs, prices):
                         try:
@@ -304,8 +317,28 @@ class SportsPaper:
         mkts = self.fetch_kalshi_sports()
         self.offer_check(mkts)
         self.place(mkts)
+        self.track_anchors()
         self.save()
         return len(self.bets)
+
+    def track_anchors(self):
+        """8/12: sports lines move on NEWS (injuries, lineups) in a way
+        weather never does. Every cycle the anchor is re-read for held
+        positions and the worst reading recorded - the dataset itself
+        will show whether an anchor-stop is needed before going live,
+        instead of importing weather's hold-forever doctrine untested."""
+        if not self.bets:
+            return
+        pm_rows = self.fetch_pm_index()
+        for tk, b in self.bets.items():
+            fair = self.anchor_prob({"team": b.get("team"),
+                                     "title": b.get("title")}, pm_rows)
+            if fair is None:
+                continue
+            b["fair_now"] = round(fair, 3)
+            lo = b.get("fair_min")
+            b["fair_min"] = round(min(fair, lo) if lo is not None
+                                  else fair, 3)
 
     def settle(self):
         for tk, b in list(self.bets.items()):
@@ -352,6 +385,8 @@ class SportsPaper:
                              "entry": b["entry"], "count": count,
                              "fair": b.get("fair"), "edge": b.get("edge"),
                              "kind": kind, "exit_px": exit_px,
+                             "fair_end": b.get("fair_now"),
+                             "fair_min": b.get("fair_min"),
                              "sold": kind == "sold",
                              "pnl": round(net_c / 100.0, 2),
                              "ts": now(), "ots": b.get("ots", ""),
@@ -412,6 +447,10 @@ class SportsPaper:
             if fair is None:
                 self._miss_add("no_anchor")
                 continue
+            if not (FAIR_MIN <= fair <= FAIR_MAX):
+                self._miss_add("anchor_insane")
+                continue        # a 65-90c ask against a <50% or >98%
+                                # anchor is a mismatch, not an edge
             fee = fee_cents(ask, SIZE, taker=True)
             edge_c = fair * 100 - ask - fee / SIZE
             if edge_c < EDGE_MIN_C:
