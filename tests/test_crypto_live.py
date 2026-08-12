@@ -179,17 +179,17 @@ def test_daily_pnl_ledger_never_trims(tmp_path, monkeypatch):
 
 
 def test_bet_pct_boost_reverts_at_300_nav(tmp_path, monkeypatch):
-    # 8/4 Adam: 6%/bet while account NAV < $300, standard 3% after.
-    # The handoff is a step DOWN in bet dollars - that is the design.
+    # 8/12 Adam: boost extended - 6%/bet while account NAV < $500,
+    # standard 3% after. The handoff is a step DOWN in bet dollars.
     b = _bot(tmp_path, monkeypatch, peer_cost=0)
-    b.dry_balance_c = 29900                           # $299: boosted
+    b.dry_balance_c = 49900                           # $499: boosted
     b.refresh_bank(b.balance_c())
     assert b._bet_pct() == cl.BET_PCT_BOOST
-    assert b._bet_cap_c() == int(29900 * 0.5 * 0.06)  # ~$8.97
-    b.dry_balance_c = 30000                           # $300: reverts
+    assert b._bet_cap_c() == int(49900 * 0.5 * 0.06)
+    b.dry_balance_c = 50000                           # $500: reverts
     b.refresh_bank(b.balance_c())
     assert b._bet_pct() == cl.BET_PCT
-    assert b._bet_cap_c() == int(30000 * 0.5 * 0.03)  # $4.50
+    assert b._bet_cap_c() == int(50000 * 0.5 * 0.03)
     # weather book steps at the same account-NAV threshold
     import drift_live as dl2
     monkeypatch.setattr(dl2, "STATE", str(tmp_path / "w.json"))
@@ -197,12 +197,12 @@ def test_bet_pct_boost_reverts_at_300_nav(tmp_path, monkeypatch):
     monkeypatch.setattr(dl2, "CRYPTO_STATE_PATH", str(tmp_path / "none.json"))
     w = dl2.DriftLive(None, mode="DRY")
     # 8/10: weather alloc is 100% while crypto is paused
-    w.dry_balance_c = 29900
+    w.dry_balance_c = 49900
     w._refresh_caps(w.balance_c())
-    assert w.max_bet_c == int(29900 * dl2.WX_ALLOC * 0.06)
-    w.dry_balance_c = 30000
+    assert w.max_bet_c == int(49900 * dl2.WX_ALLOC * 0.06)
+    w.dry_balance_c = 50000
     w._refresh_caps(w.balance_c())
-    assert w.max_bet_c == int(30000 * dl2.WX_ALLOC * 0.03)
+    assert w.max_bet_c == int(50000 * dl2.WX_ALLOC * 0.03)
 
 
 def test_hi_band_probe_ledger(tmp_path, monkeypatch):
@@ -258,8 +258,8 @@ def test_hi_ladder_steps_on_evidence(tmp_path, monkeypatch):
     b.hi = {"w": 20, "l": 0, "pnl": 0.0}
     b.hi_g = dict({"w": 20, "l": 0, "pnl": 0.0})
     assert b._hi_pct() == cl.BET_PCT_BOOST            # zero net is not proof
-    # ladder never sizes BELOW base: at >=$300 NAV base is 3%, steps hold
-    b.dry_balance_c = 40000
+    # ladder never sizes BELOW base: at >=$500 NAV base is 3%, steps hold
+    b.dry_balance_c = 60000
     b.refresh_bank(b.balance_c())
     b.hi = {"w": 10, "l": 0, "pnl": 0.6}
     b.hi_g = dict({"w": 10, "l": 0, "pnl": 0.6})

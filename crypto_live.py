@@ -64,7 +64,8 @@ BET_PCT = float(os.environ.get("CRYPTO_BET_PCT", "0.03"))
 # $300, then auto-revert to the standard 3% (a step DOWN in bet dollars
 # at the threshold, by design).
 BET_PCT_BOOST = float(os.environ.get("CRYPTO_BET_PCT_BOOST", "0.06"))
-BOOST_NAV_C = int(os.environ.get("CRYPTO_BOOST_NAV_C", "30000"))
+# 8/12 (Adam): boost extended to $500 NAV, matching the weather book
+BOOST_NAV_C = int(os.environ.get("CRYPTO_BOOST_NAV_C", "50000"))
 OPEN_PCT = float(os.environ.get("CRYPTO_OPEN_PCT", "0.60"))
 HALT_PCT = float(os.environ.get("CRYPTO_HALT_PCT", "0.10"))
 RESERVE_C = int(os.environ.get("CRYPTO_RESERVE_C", "200"))

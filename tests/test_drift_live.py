@@ -893,10 +893,10 @@ def test_proven_bucket_earns_bigger_cap(tmp_path, monkeypatch):
     monkeypatch.setattr(dl, "CITY_CAP_PCT", 1.0)   # isolate sizing
     monkeypatch.setattr(dl, "SLATE_CAP_PCT", 1.0)
     b = _bot(tmp_path, monkeypatch)
-    b.dry_balance_c = 40000                      # NAV $400 (post-boost)
+    b.dry_balance_c = 60000                      # NAV $600 (post-boost)
     b._refresh_caps(b.balance_c())
-    assert b.max_bet_c == 1200                   # base 3% of $400
-    assert b.max_bet_pv_c == 3200                # proven 8%
+    assert b.max_bet_c == 1800                   # base 3% of $600
+    assert b.max_bet_pv_c == 4800                # proven 8%
     # a proven half-Kelly lane sizes Kelly past the base 3% fraction
     b.history = _proven_hist(n=30, entry=89)
     assert b.place(mkts=[_mk(bid=89, ask=91)]) == 1
@@ -907,7 +907,7 @@ def test_proven_bucket_earns_bigger_cap(tmp_path, monkeypatch):
     # same market, UNPROVEN lane: base fraction keeps it under base cap
     monkeypatch.setattr(dl, "KELLY_PROVEN_N", 999)     # unproven now
     b2 = _bot(tmp_path, monkeypatch)
-    b2.dry_balance_c = 40000
+    b2.dry_balance_c = 60000
     b2._refresh_caps(b2.balance_c())
     b2.history = _proven_hist(n=30, entry=89)
     assert b2.place(mkts=[_mk(bid=89, ask=91)]) == 1

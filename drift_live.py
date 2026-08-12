@@ -87,7 +87,11 @@ BET_PCT = float(os.environ.get("DRIFT_LIVE_BET_PCT", "0.03"))    # per bet
 # $300, then auto-revert to the standard 3%. Note the handoff is a step
 # DOWN in bet dollars (~$9 -> ~$4.50); that's the design, not a bug.
 BET_PCT_BOOST = float(os.environ.get("DRIFT_LIVE_BET_PCT_BOOST", "0.06"))
-BOOST_NAV_C = int(os.environ.get("DRIFT_LIVE_BOOST_NAV_C", "30000"))
+# 8/12 (Adam): boost extended - 6%/bet holds until $500 account NAV
+# (was $300), then the standard 3% takes over. At the current growth
+# rate the step-down was days away; the machine keeps its aggression
+# while the caps (city/slate/open/halt) keep the tail bounded.
+BOOST_NAV_C = int(os.environ.get("DRIFT_LIVE_BOOST_NAV_C", "50000"))
 OPEN_PCT = float(os.environ.get("DRIFT_LIVE_OPEN_PCT", "0.60"))  # exposure
 HALT_PCT = float(os.environ.get("DRIFT_LIVE_HALT_PCT", "0.10"))  # day loss
 BET_FLOOR_C = 200    # a probe must always be placeable
