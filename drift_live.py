@@ -1198,6 +1198,33 @@ class DriftLive:
         oc += sum(o["entry"] * o["count"] for o in self.pending.values())
         return oc
 
+    def _conc_cost_c(self, city, date):
+        """FILLED city/date cost in cents: the MAX of our book and
+        Kalshi's own position feed. 8/12 Miami lesson ($43 = 33% of NAV
+        on one thermometer, 3x the city cap): a fill our book hasn't
+        seen yet (promotion bug, adoption lag - any cause) is invisible
+        to caps that only read self.bets. The exchange view can lag a
+        settlement (settled tickers excluded below) but it NEVER lags a
+        fill, so the max of the two views is the honest exposure."""
+        bc = dc = kc = kd = 0
+        for b in self.bets.values():
+            c0 = b.get("entry", 0) * b.get("count", 0)
+            if b.get("city") == city:
+                bc += c0
+            if b.get("date", "") == date:
+                dc += c0
+        done = set(self.settled_tks)
+        for p in (self.k_positions or []):
+            tk = p.get("ticker")
+            if not tk or tk in done:
+                continue
+            c0 = (p.get("entry") or 0) * (p.get("count") or 0)
+            if p.get("city") == city:
+                kc += c0
+            if p.get("date", "") == date:
+                kd += c0
+        return max(bc, int(kc)), max(dc, int(kd))
+
     def _cap_refused(self, kind, tk, entry, size, c_cost, d_cost, nav_cc):
         """8/12: name every concentration refusal on the tracker. 2,353
         bare counter ticks were undiagnosable from outside - the zombie-
@@ -1950,11 +1977,22 @@ class DriftLive:
         cands.sort(key=lambda c: ({"nickel": 0, "level": 1}.get(c[0], 2), -c[1]))
         placed = 0
         _ccap_add, _dcap_add = {}, {}   # 8/12: same-cycle placements
+        _done_tks = set(self.settled_tks)
+        kpos_tks = {p.get("ticker") for p in (self.k_positions or [])
+                    if p.get("ticker") and p.get("ticker") not in _done_tks}
         for (trig, score, mk, side, entry, smid, ekey, exec_kind,
              bid_entry) in cands:
             if ekey in (nk_keys if trig == "nickel" else ev_keys):
                 continue
             tk = mk["ticker"]
+            # 8/12 Miami lesson: if the EXCHANGE already holds this
+            # market but our book hasn't adopted it yet, placing again
+            # is how 44 lots stacked into one strike. Wait a cycle for
+            # the mirror; pyramid adds (tk in bets) are unaffected.
+            if tk in kpos_tks and tk not in self.bets:
+                self.exec_stats["sync_wait"] = (
+                    self.exec_stats.get("sync_wait", 0) + 1)
+                continue
             pside = smid / 100.0
             if trig == "nickel":
                 if sum(1 for b in list(self.bets.values())
@@ -2027,14 +2065,10 @@ class DriftLive:
                 # guard), and an oversize candidate TRIMS to the room
                 # left (>= the 5-lot floor) like every other cap here
                 # instead of refusing outright.
-                c_cost = _ccap_add.get(mk["city"], 0)
-                d_cost = _dcap_add.get(mk.get("date", ""), 0)
-                for b0 in self.bets.values():
-                    c0 = b0.get("entry", 0) * b0.get("count", 0)
-                    if b0.get("city") == mk["city"]:
-                        c_cost += c0
-                    if b0.get("date", "") == mk.get("date", ""):
-                        d_cost += c0
+                # 8/12 Miami hardening: exposure = max(book, exchange)
+                c0d0 = self._conc_cost_c(mk["city"], mk.get("date", ""))
+                c_cost = c0d0[0] + _ccap_add.get(mk["city"], 0)
+                d_cost = c0d0[1] + _dcap_add.get(mk.get("date", ""), 0)
                 room_c = int(nav_cc * CITY_CAP_PCT) - c_cost
                 room_d = int(nav_cc * SLATE_CAP_PCT) - d_cost
                 room = min(room_c, room_d)
@@ -2180,11 +2214,12 @@ class DriftLive:
             dip_tot = sum(d["entry"] * d["count"] for d in self.dips.values())
             if dip_tot + cost > int(nav_c * DIP_MAX_PCT):
                 continue
-            # 8/12: FILLED risk + this lane's own resting bids only -
-            # pending maker joins no longer double-reserve the caps
-            # (see the entry-path rework for the full story)
-            c_cost = d_cost = 0
-            for x in (list(self.bets.values()) + list(self.dips.values())):
+            # 8/12: FILLED risk (max of book and exchange views, see
+            # _conc_cost_c) + this lane's own resting bids - pending
+            # maker joins no longer double-reserve the caps
+            c_cost, d_cost = self._conc_cost_c(mk["city"],
+                                               mk.get("date", ""))
+            for x in self.dips.values():
                 c0 = x.get("entry", 0) * x.get("count", 0)
                 if x.get("city") == mk["city"]:
                     c_cost += c0

@@ -1172,3 +1172,46 @@ def test_heal_adopts_yes_projected_no_side_orders(tmp_path, monkeypatch):
     assert "R7" in b.pending                  # healed to the real oid
     assert "synthetic-1" not in b.pending
     assert b.client.canceled == []            # and nothing was canceled
+
+
+# ---- 8/12 Miami hardening: caps read the EXCHANGE view too ----
+
+def test_city_cap_sees_unbooked_exchange_position(tmp_path, monkeypatch):
+    # the $43-on-one-thermometer night: fills our book hadn't seen were
+    # invisible to bets-only caps. Exposure is now max(book, exchange).
+    b = _bot(tmp_path, monkeypatch)
+    b.dry_balance_c = 10000                    # NAV $100 -> city cap $10
+    b.k_positions = [{"ticker": "KXLOWTMIA-26AUG12-B79.5", "side": "no",
+                      "count": 11, "entry": 88, "city": "miami",
+                      "strike": 79, "kind": "band", "cap": 80, "hl": "lo",
+                      "date": TODAY}]           # $9.68 the book can't see
+    assert b.place(mkts=[_mk(tk="KXLOWTMIA-26AUG12-B75.5", bid=87, ask=89,
+                             city="miami", strike=75, is_low=True)]) == 0
+    assert b.exec_stats.get("city_capped") == 1
+    assert b.cap_refuse[-1]["city_c"] == 11 * 88
+    # a settled leftover row must NOT block (positions API lags settles)
+    b2 = _bot(tmp_path, monkeypatch)
+    b2.dry_balance_c = 10000
+    b2.k_positions = list(b.k_positions)
+    b2.settled_tks = ["KXLOWTMIA-26AUG12-B79.5"]
+    assert b2.place(mkts=[_mk(tk="KXLOWTMIA-26AUG12-B75.5", bid=87, ask=89,
+                              city="miami", strike=75, is_low=True)]) == 1
+
+
+def test_entry_waits_for_adoption_of_exchange_position(tmp_path,
+                                                       monkeypatch):
+    # the exchange holds the ticker, our book doesn't know it yet ->
+    # placing again is how 44 lots stacked into one strike. Skip and
+    # let the mirror adopt first.
+    b = _bot(tmp_path, monkeypatch)
+    tk = "KXHIGHNY-26JUL-T86"
+    b.k_positions = [{"ticker": tk, "side": "yes", "count": 5,
+                      "entry": 85, "city": "new york", "strike": 86,
+                      "kind": "ge", "cap": None, "hl": "hi",
+                      "date": TODAY}]
+    assert b.place(mkts=[_mk(tk=tk, bid=82, ask=85)]) == 0
+    assert b.exec_stats.get("sync_wait") == 1
+    # once adopted into bets, normal rules (incl. pyramid adds) resume
+    b.bets[tk] = dict(_stale_order(tk=tk, entry=85, count=5), fee=0)
+    assert b.place(mkts=[_mk(tk=tk, bid=82, ask=85)]) == 0  # dedupe, no stack
+    assert b.exec_stats.get("sync_wait") == 1               # not re-counted
