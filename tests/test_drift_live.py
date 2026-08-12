@@ -1170,3 +1170,21 @@ def test_full_sale_cancels_surviving_ladder_leg(tmp_path, monkeypatch):
     assert tk not in b.bets                   # fully sold
     assert "L2" in b.client.canceled          # sibling rung not orphaned
     assert tk not in b.offers
+
+
+def test_zombie_pending_bound_to_sell_oid_is_dropped(tmp_path, monkeypatch):
+    # found live AFTER the heal fix shipped: pre-fix zombies persist in
+    # state and count as "owned", shielding their sell orders from the
+    # orphan sweep. A pending BUY keyed by a SELL order's oid is dropped
+    # outright - and its fills must never promote as a buy.
+    monkeypatch.setattr(dl, "CROSS_EXPIRY", False)
+    b = _bot(tmp_path, monkeypatch)
+    tk = "KXHIGHNY-26JUL-T86"
+    b.client = _FakeOrphanClient([{"order_id": "S9", "ticker": tk,
+                                   "action": "sell", "side": "yes"}])
+    b.pending = {"S9": dict(_stale_order(tk=tk, entry=90, count=11),
+                            exec="maker")}
+    b.check_orders()
+    assert not b.pending and not b.bets       # dropped, nothing promoted
+    assert "S9" in b.client.canceled
+    assert b.exec_stats.get("zombies_dropped") == 1

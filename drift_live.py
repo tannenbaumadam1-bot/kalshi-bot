@@ -1323,6 +1323,30 @@ class DriftLive:
                                    round(o["pside"], 3), o["entry"],
                                    o["count"], "", "", f"{oid}->{cand}"])
                         break
+            # 8/12: a pending BUY bound to a SELL order's oid is a healed
+            # zombie (pre-fix pollution, persisted in state and kept
+            # fresh by every re-heal). Drop the row and cancel the
+            # stray - its fills are someone's sale, never a buy fill to
+            # promote. Without this the zombies count as "owned" and
+            # the orphan sweep below can't touch their orders.
+            _act = {(ro.get("order_id") or ro.get("id")):
+                    (ro.get("action") or "buy") for ro in resting_rows}
+            for oid, o in list(self.pending.items()):
+                if _act.get(oid) != "sell":
+                    continue
+                try:
+                    self.client.cancel_order(oid)
+                except Exception:
+                    pass
+                del self.pending[oid]
+                owned.discard(oid)
+                self.exec_stats["zombies_dropped"] = (
+                    self.exec_stats.get("zombies_dropped", 0) + 1)
+                self._log([now(), "ZOMBIE-DROP", self.mode,
+                           o.get("city", ""), o.get("strike", ""),
+                           o.get("hl", ""), o.get("side", ""), "",
+                           o.get("entry", ""), o.get("count", ""),
+                           "", "", oid])
             # 8/12 orphan sweep: a resting order we don't own on a
             # weather market is a stray (pre-fix surviving ladder legs,
             # externally-placed leftovers). Live and unmanaged, it can
