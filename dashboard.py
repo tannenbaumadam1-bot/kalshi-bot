@@ -950,8 +950,10 @@ async function load(){
           'takers '+(E.filled_taker||0)+'/'+(E.placed_taker||0)+' &middot; bucket-blocked '+(E.bucket_blocked||0));})(),
       tile('Exit autopsy',(S.autopsy_n_settled?('exits '+((S.autopsy_saved||0)>=0?'saved ':'cost ')+'<span class="'+C(S.autopsy_saved)+'">'+M(S.autopsy_saved||0)+'</span>'):'<span class=mut>grading&hellip;</span>'),
         (S.autopsy_would_won||0)+' of '+(S.autopsy_n_settled||0)+' graded would have won'),
-      tile('Missed fills',(S.miss_settled?('patience '+((S.miss_cost||0)>0?'cost ':'saved ')+'<span class="'+C(-(S.miss_cost||0))+'">'+M(Math.abs(S.miss_cost||0))+'</span>'):'<span class=mut>grading&hellip;</span>'),
-        (S.miss_would_won||0)+' of '+(S.miss_settled||0)+' would have won &middot; '+(S.miss_n||0)+' logged)')
+      tile('Missed fills',(function(){const ms=S.miss_since||{};
+        return (S.miss_settled?('recoverable '+'<span class="'+C(-(ms.recoverable||0))+'">'+M(Math.abs(ms.recoverable||0))+'</span>'+' <span class=mut style="font-size:12px">since fix</span>'):'<span class=mut>grading&hellip;</span>');})(),
+        (function(){const ms=S.miss_since||{},mp=S.miss_pre||{};
+        return (ms.n||0)+' since taker-first ('+(ms.would_won||0)+' would-won at unreachable prices, '+M(ms.cost||0)+') &middot; pre-fix history: '+(mp.n||0)+' misses '+M(mp.cost||0)+' (closed 8/10)';})())
     ].join('');
     $('rmbuckets').innerHTML=((S.buckets||[]).map(b=>'<tr><td>'+b.bucket+'</td>'
       +'<td class=num>'+b.n+'</td><td class=num>'+b.wins+'W/'+(b.n-b.wins)+'L</td>'

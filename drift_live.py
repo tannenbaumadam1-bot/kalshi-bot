@@ -731,7 +731,30 @@ class DriftLive:
             a = why.setdefault(k, {"n": 0, "cost": 0.0})
             a["n"] += 1
             a["cost"] = round(a["cost"] + (r.get("cross_pnl") or 0), 2)
+        # 8/12 era split (Adam): the cumulative log mixes pre-fix
+        # history with post-fix residue and scared the tile. Pre-fix =
+        # rows before taker-first shipped (8/10 15:30) or unclassified;
+        # since-fix, the honest number is RECOVERABLE (scored at the
+        # ask we actually refused - misses at unreachable prices are
+        # the chase ceiling working, not a leak).
+        _FIX = "2026-08-10T15:30:00"
+        _new = [r for r in self.miss
+                if "why" in r and (r.get("cts") or "") >= _FIX]
+        _newg = [r for r in _new if r.get("res") is not None]
         return {"miss_n": len(self.miss),
+                "miss_since": {
+                    "n": len(_new),
+                    "would_won": sum(1 for r in _newg
+                                     if r.get("would_pnl", 0) > 0),
+                    "cost": round(sum(r.get("would_pnl", 0)
+                                      for r in _newg), 2),
+                    "recoverable": round(sum(r.get("cross_pnl") or 0
+                                             for r in _newg), 2)},
+                "miss_pre": {"n": len(self.miss) - len(_new),
+                             "cost": round(sum(r.get("would_pnl", 0)
+                                               for r in graded)
+                                           - sum(r.get("would_pnl", 0)
+                                                 for r in _newg), 2)},
                 "miss_settled": len(graded),
                 "miss_would_won": sum(1 for r in graded
                                       if r.get("would_pnl", 0) > 0),
