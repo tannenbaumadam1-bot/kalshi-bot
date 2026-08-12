@@ -1176,6 +1176,7 @@ class DriftLive:
                            if x.get("ticker") == tk), {})
                 kr.append({"ticker": tk, "side": side, "count": cnt,
                            "entry": (int(round(px)) if px else ob.get("entry")),
+                           "oid": o.get("order_id") or o.get("id"),
                            "action": o.get("action", "buy"),
                            "trig": ob.get("trig"), "pside": ob.get("pside"),
                            **self._tk_meta(tk)})
@@ -1503,6 +1504,38 @@ class DriftLive:
                     except Exception:
                         pass    # settled markets kill their orders anyway
             del self.offers[tk]
+        # 8/12 OVER-OFFER GUARD (found live: MIA B79.5 held 44 lots with
+        # 70 lots of sells resting - 22/22 current ladder PLUS a stale
+        # 13/13 ladder from when the position was smaller). Selling more
+        # than we hold doesn't just close: it FLIPS us long the outcome
+        # we bet against. Any resting order on a market we hold that
+        # isn't one of our own known orders is a dead quote - cancel it.
+        # Scoped hard: held tickers only, and never a ticker with a live
+        # pending entry join (that's heal's turf, and mis-scoping it is
+        # exactly how this morning's revert happened).
+        if self.client is not None and self.k_resting:
+            known = ({leg.get("oid") for o in self.offers.values()
+                      for leg in (o.get("legs") or [])}
+                     | {d.get("oid") for d in self.dips.values()}
+                     | set(self.pending))
+            pend_tks = {o["ticker"] for o in self.pending.values()}
+            for ro in self.k_resting:
+                tk0, roid = ro.get("ticker"), ro.get("oid")
+                if not roid or tk0 not in self.bets or tk0 in pend_tks:
+                    continue
+                if roid in known:
+                    continue
+                try:
+                    self.client.cancel_order(roid)
+                except Exception:
+                    continue
+                self.exec_stats["stale_quotes_canceled"] = (
+                    self.exec_stats.get("stale_quotes_canceled", 0) + 1)
+                self._log([now(), "STALE-QUOTE-CANCEL", self.mode,
+                           ro.get("city", ""), ro.get("strike", ""),
+                           ro.get("hl", ""), ro.get("side", ""), "",
+                           ro.get("entry", ""), ro.get("count", ""),
+                           "", "", f"{tk0}:{roid}"])
         for tk, b in list(self.bets.items()):
             # fractional stubs (<1 contract) can't be quoted - they
             # hold to settlement

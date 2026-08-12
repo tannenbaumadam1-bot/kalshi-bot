@@ -400,34 +400,42 @@ class SportsPaper:
         title_t = _tokens(mk.get("title"))
         if not team_t:
             return None
-        best = None
+        # 8/12 FIX (55 no_anchor against a healthy 28-row index): PM
+        # writes game markets two ways and the old gate only understood
+        # one of them.
+        #   (A) head-to-head: question "Yankees vs. Red Sox", outcomes
+        #       keyed by TEAM NAME -> the name IS the match, and it's
+        #       the strongest signal available.
+        #   (B) per-team: question "Will the <team> win on <date>?",
+        #       outcomes Yes/No -> the opponent never appears, so a
+        #       "X vs Y" Kalshi title shares ONE token with it and the
+        #       old >=2-token rule refused every single candidate.
+        # For (B) the honest test is that PM names OUR WHOLE team, which
+        # also stops "Boston Red Sox" matching "Chicago White Sox".
+        best = None                          # (rank, score, prob)
         for r in pm_rows:
             toks = set(r["toks"])
-            if not team_t & toks:
+            probs = r["probs"]
+            score = len((title_t | team_t) & toks)
+            got = None
+            rank = 0
+            for name, p in probs.items():
+                nt = _tokens(name)
+                if nt & team_t and (nt <= team_t or team_t <= nt):
+                    got, rank = p, 2         # (A) named outcome
+                    break
+            if got is None:
+                keys = {str(k).strip().lower() for k in probs}
+                if keys == {"yes", "no"} and team_t <= toks:
+                    for k, p in probs.items():
+                        if str(k).strip().lower() == "yes":
+                            got, rank = p, 1     # (B) team is the Yes
+                            break
+            if got is None:
                 continue
-            overlap = len((title_t | team_t) & toks)
-            if overlap >= max(2, len(team_t)):
-                score = overlap
-                if best is None or score > best[0]:
-                    best = (score, r)
-        if best is None:
-            return None
-        probs = best[1]["probs"]
-        for name, p in probs.items():
-            if _tokens(name) & team_t:
-                return p
-        # 8/12: PM prices many games as per-team "Will <team> win on
-        # <date>?" markets with Yes/No outcomes - the team lives in the
-        # QUESTION (already token-matched above, opponents can't match
-        # because the gate is on TEAM tokens), so Yes IS this team's
-        # probability. Moneyline-only indexing keeps "win by 3+" and
-        # futures phrasing out of this fallback.
-        keys = {str(k).strip().lower() for k in probs}
-        if keys == {"yes", "no"}:
-            for k, p in probs.items():
-                if str(k).strip().lower() == "yes":
-                    return p
-        return None
+            if best is None or (rank, score) > (best[0], best[1]):
+                best = (rank, score, got)
+        return None if best is None else best[2]
 
     # ---- the cycle ----
     def step(self):

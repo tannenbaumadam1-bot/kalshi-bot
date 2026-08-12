@@ -1276,3 +1276,33 @@ def test_requote_chases_only_the_remainder(tmp_path, monkeypatch):
     assert b.bets[tk]["count"] == 3            # the fills got booked
     no = b.pending[next(iter(b.pending))]
     assert no["count"] == 7 and no["filled_seen"] == 0
+
+
+def test_stale_exchange_quotes_on_held_ticker_are_canceled(tmp_path,
+                                                           monkeypatch):
+    # found live: MIA held 44 lots with 70 lots of sells resting (the
+    # current 22/22 ladder + a stale 13/13 from a smaller position).
+    # Overselling FLIPS the position, so unknown quotes on a market we
+    # hold get canceled. Scope guards: held tickers only, never a
+    # ticker with a live pending entry join.
+    b = _bot(tmp_path, monkeypatch)
+    b.client = _FakeOrphanClient([])
+    tk, other = "KXLOWTMIA-26AUG12-B79.5", "KXHIGHNY-26JUL-T86"
+    b.bets[tk] = dict(_stale_order(tk=tk, entry=88, count=44), fee=0)
+    b.bets[other] = dict(_stale_order(tk=other, entry=85, count=5), fee=0)
+    b.offers[tk] = {"legs": [{"oid": "L1", "px": 97, "count": 22},
+                             {"oid": "L2", "px": 99, "count": 22}],
+                    "count": 44, "ots": ""}
+    b.pending["p1"] = dict(_stale_order(tk=other), exec="maker")
+    b.dips["KXLOWTMIA-26AUG12-B77.5"] = {"oid": "D1"}
+    b.k_resting = [
+        {"ticker": tk, "oid": "L1"}, {"ticker": tk, "oid": "L2"},
+        {"ticker": tk, "oid": "STALE1"},      # the 13-lot ghost rungs
+        {"ticker": tk, "oid": "STALE2"},
+        {"ticker": other, "oid": "X9"},       # pending join here: hands off
+        {"ticker": "KXLOWTMIA-26AUG12-B77.5", "oid": "D1"},   # our dip
+        {"ticker": "KXHIGHTPHX-26AUG12-B98.5", "oid": "N1"},  # unheld
+    ]
+    b.quote_offers()
+    assert sorted(b.client.canceled) == ["STALE1", "STALE2"]
+    assert b.exec_stats.get("stale_quotes_canceled") == 2

@@ -198,3 +198,29 @@ def test_pm_index_keeps_only_moneyline_games(tmp_path, monkeypatch):
     out = b.fetch_pm_index()
     assert len(out) == 1
     assert out[0]["probs"] == {"Yes": 0.84, "No": 0.16}
+
+
+def test_anchor_matches_pm_per_team_question_phrasing(tmp_path,
+                                                      monkeypatch):
+    # 55 no_anchor with a healthy index: PM prices games as "Will the
+    # <team> win on <date>?" - the opponent never appears, so the old
+    # >=2-shared-title-token gate could never match a "X vs Y" title.
+    b = _bot(tmp_path, monkeypatch)
+    monkeypatch.setattr(b, "fetch_pm_index", lambda: _pm(
+        question="Will the New York Yankees win on 2026-08-12?",
+        probs={"Yes": 0.84, "No": 0.16}))
+    assert b.place([_mk(title="Yankees vs. Red Sox Winner?",
+                        team="New York Yankees")]) == 1
+    assert b.bets[next(iter(b.bets))]["fair"] == 0.84
+
+
+def test_anchor_needs_every_team_token(tmp_path, monkeypatch):
+    # the guard against loose matching: a partial name hit is not our
+    # team (Sox: Boston vs Chicago White), so it must refuse
+    b = _bot(tmp_path, monkeypatch)
+    monkeypatch.setattr(b, "fetch_pm_index", lambda: _pm(
+        question="Will the Chicago White Sox win on 2026-08-12?",
+        probs={"Yes": 0.84, "No": 0.16}))
+    assert b.place([_mk(title="Red Sox vs. Yankees Winner?",
+                        team="Boston Red Sox")]) == 0
+    assert b.miss.get("no_anchor") == 1
