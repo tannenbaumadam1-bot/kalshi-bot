@@ -956,12 +956,15 @@ async function load(){
       +'<td class=num>'+F(o.entry*o.count/100)+'</td><td class=num>&ndash;</td></tr>'));
     $('rmopen').innerHTML=rows.join('')||'<tr><td colspan=9 class=empty>No live positions or resting orders yet.</td></tr>';
     const rl=[];
-    (L.history||[]).forEach(b=>{const won=Number(b.outcome)===1;
+    // 8/12 (Adam): result = P&L SIGN, full stop. Outcome-based labels
+    // called a +$0.06 premium sale "LOST" because the settlement went
+    // to the buyer. Money decides; sold rows get their own chip.
+    (L.history||[]).forEach(b=>{const won=Number(b.pnl)>0;
       rl.push('<tr><td class=mut>'+((b.ts||'').slice(5,16).replace('T',' '))+'</td>'+mkt(b)+side(b.side)
       +'<td class=num>'+b.entry+'&cent;</td>'
       +'<td class=num>'+(b.exit_px!=null?b.exit_px+'&cent;':(won?'100&cent;':'0&cent;'))+'</td>'
       +'<td class=num>'+b.count+'</td>'
-      +'<td>'+(b.stopped?'<span class=chip style="background:rgba(232,180,76,.13);color:var(--amb)">STOP</span>':(b.faded?'<span class=chip style="background:rgba(180,120,230,.15);color:#b478e6">FADE</span>':('<span class="'+(won?'won':'lost')+'">'+(won?'WON':'LOST')+'</span>')))+'</td>'
+      +'<td>'+(b.sold?('<span class=chip style="background:rgba(47,208,140,.13);color:var(--grn)">SOLD '+(won?'+':'')+'</span>'):(b.stopped?'<span class=chip style="background:rgba(232,180,76,.13);color:var(--amb)">STOP</span>':(b.faded?'<span class=chip style="background:rgba(180,120,230,.15);color:#b478e6">FADE</span>':('<span class="'+(won?'won':'lost')+'">'+(won?'WON':'LOST')+'</span>'))))+'</td>'
       +'<td class=num><span class="'+C(b.pnl)+'">'+M(b.pnl)+'</span></td></tr>');});
     $('rmreal').innerHTML=rl.join('')||'<tr><td colspan=8 class=empty>Nothing realized yet &mdash; first settlements land tomorrow morning.</td></tr>';
   }
@@ -1092,7 +1095,7 @@ async function load(){
     const nleg=all.length-cur.length;
     $('legnote').textContent=nleg>0?'('+nleg+' older legacy-model bets hidden \u2014 still counted in totals)':'';
     $('settled').innerHTML=cur.slice(0,15).map(b=>{
-      const won=Number(b.outcome)===1;
+      const won=Number(b.pnl)>0;    // 8/12: money decides, not outcome
       return '<tr>'+mkt(b)+side(b.side)+era(b)+prob(b.pside)
       +'<td class=num>'+b.entry+'&cent;</td><td class=num>'+b.count+'</td>'
       +'<td class=num>'+feeC(b.fee)+'</td>'
@@ -1124,7 +1127,7 @@ async function load(){
       +'<td class=num>'+(b.upnl!=null?('<span class="'+C(b.upnl)+'">'+M(b.upnl)+'</span>'):'&ndash;')+'</td></tr>'));
     $('driftwtbl').innerHTML=dr.join('')||'<tr><td colspan=10 class=empty>No open positions — first scan pending.</td></tr>';
     const rl=[];
-    (D.settled||[]).slice(0,20).forEach(b=>{const won=Number(b.outcome)===1;
+    (D.settled||[]).slice(0,20).forEach(b=>{const won=Number(b.pnl)>0;
       rl.push('<tr><td class=mut>'+((b.ts||'').slice(5,16).replace('T',' '))+'</td>'+wmkt(b)+side(b.side)
       +'<td class=num>'+Math.round((b.pside||0)*100)+'%</td>'
       +'<td class=num>'+b.entry+'&cent;</td>'
