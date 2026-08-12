@@ -191,33 +191,39 @@ class SportsPaper:
     def fetch_kalshi_sports(self):
         """Open Kalshi sports WINNER markets closing within CLOSE_H, with
         live quotes. Discovery: events pages filtered to Sports."""
+        # 8/12 FIX (Adam caught the empty book): /events pagination never
+        # reaches tonight's games - page one is full of 2043-dated
+        # futures. Sweep /markets by CLOSE-TIME WINDOW instead, which is
+        # exactly the recycling question: what settles soon?
         rows, cursor = [], None
         try:
-            for _ in range(4):
-                params = {"status": "open", "limit": 200,
-                          "with_nested_markets": "true"}
+            import time as _t
+            nowts = int(_t.time())
+            for _ in range(8):
+                params = {"status": "open", "limit": 1000,
+                          "min_close_ts": nowts,
+                          "max_close_ts": nowts + int(CLOSE_H * 3600)}
                 if cursor:
                     params["cursor"] = cursor
-                d = requests.get(we.KALSHI + "/events", params=params,
-                                 timeout=20).json()
-                for ev in d.get("events") or []:
-                    if (ev.get("category") or "").lower() != "sports":
+                d = requests.get(we.KALSHI + "/markets", params=params,
+                                 timeout=25).json()
+                for mk in d.get("markets") or []:
+                    tk = mk.get("ticker") or ""
+                    # GAME WINNERS ONLY: no parlays/multi-game products
+                    # (KXMVE*), no spreads/totals/props/series - wrong
+                    # anchors manufacture phantom edge
+                    if tk.startswith("KXMVE"):
                         continue
-                    # 8/12: GAME WINNERS ONLY. Spreads/totals/props share
-                    # team names with the moneyline, so the anchor
-                    # matcher could hand them the WRONG fair value and
-                    # manufacture phantom edge - the exact contamination
-                    # a go-live dataset cannot carry. Other market types
-                    # need their own anchors before they may trade.
-                    t = (ev.get("title") or "").lower()
+                    t = (mk.get("title") or "").lower()
                     if "winner" not in t:
                         continue
                     if any(w in t for w in ("series", "championship",
                                             "by ", "margin", "total",
-                                            "spread")):
+                                            "spread", "parlay")):
                         continue
-                    for mk in ev.get("markets") or []:
-                        rows.append((ev, mk))
+                    rows.append((
+                        {"event_ticker": mk.get("event_ticker"),
+                         "title": mk.get("title")}, mk))
                 cursor = d.get("cursor")
                 if not cursor:
                     break
