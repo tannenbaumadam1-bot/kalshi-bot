@@ -151,6 +151,11 @@ class SportsPaper:
                  "sold_net_c": self.sold_net_c,
                  "miss": self.miss, "gate": self.gate,
                  "sold_log": self.sold_log[-200:],
+                 # 8/12: anchor-index sizes on the tracker - an EMPTY pm
+                 # index (this launch bug) is now one glance, not a
+                 # session of funnel archaeology
+                 "pm_idx": len(self._pm_cache.get("rows") or []),
+                 "sharp_idx": len(self._sharp_cache.get("rows") or []),
                  "summary": {
                      "mode": "PAPER",
                      "net": round(self.realized_c / 100.0, 2),
@@ -271,16 +276,30 @@ class SportsPaper:
             return self._pm_cache["rows"]
         rows = []
         try:
+            # 8/12 FIX (book placed ZERO since launch): gamma /markets
+            # rows carry NO 'category' field at all - the old category
+            # filter matched nothing, the index was always EMPTY, and
+            # every candidate died no_anchor (38/38 on the tracker).
+            # Verified live: game rows are identified by
+            # sportsMarketType == "moneyline", and the close-window
+            # params return today's games directly instead of paging
+            # blind through thousands of futures.
+            t0 = datetime.datetime.utcnow()
+            t1 = t0 + datetime.timedelta(hours=CLOSE_H)
             for offset in (0, 500):
                 d = requests.get(
                     PM_GAMMA + "/markets",
                     params={"closed": "false", "limit": 500,
-                            "offset": offset}, timeout=20).json()
+                            "offset": offset,
+                            "order": "volumeNum", "ascending": "false",
+                            "end_date_min":
+                                t0.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                            "end_date_max":
+                                t1.strftime("%Y-%m-%dT%H:%M:%SZ")},
+                    timeout=20).json()
                 for m in (d if isinstance(d, list) else []):
-                    cat = (m.get("category") or "").lower()
-                    if "sport" not in cat and cat not in (
-                            "nfl", "nba", "mlb", "nhl", "soccer"):
-                        continue
+                    if m.get("sportsMarketType") != "moneyline":
+                        continue    # games only: no futures/spreads/props
                     try:
                         outs = json.loads(m.get("outcomes") or "[]")
                         prices = json.loads(m.get("outcomePrices") or "[]")
@@ -397,6 +416,17 @@ class SportsPaper:
         for name, p in probs.items():
             if _tokens(name) & team_t:
                 return p
+        # 8/12: PM prices many games as per-team "Will <team> win on
+        # <date>?" markets with Yes/No outcomes - the team lives in the
+        # QUESTION (already token-matched above, opponents can't match
+        # because the gate is on TEAM tokens), so Yes IS this team's
+        # probability. Moneyline-only indexing keeps "win by 3+" and
+        # futures phrasing out of this fallback.
+        keys = {str(k).strip().lower() for k in probs}
+        if keys == {"yes", "no"}:
+            for k, p in probs.items():
+                if str(k).strip().lower() == "yes":
+                    return p
         return None
 
     # ---- the cycle ----

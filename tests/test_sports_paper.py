@@ -141,3 +141,60 @@ def test_dual_anchor_veto_and_blend(tmp_path, monkeypatch):
     monkeypatch.setattr(b3, "fetch_pm_index", lambda: _pm())
     assert b3.place([_mk()]) == 1
     assert next(iter(b3.bets.values()))["anchors"] == 1
+
+
+# ---- 8/12: the launch bug - empty PM index (gamma has no 'category') ----
+
+def test_anchor_yes_no_market_prices_the_team(tmp_path, monkeypatch):
+    # PM prices many games per-team: "Will the New York Yankees win on
+    # 2026-08-12?" with Yes/No outcomes. Yes IS the team's probability.
+    b = _bot(tmp_path, monkeypatch)
+    monkeypatch.setattr(b, "fetch_pm_index", lambda: _pm(
+        question="Will the New York Yankees win on 2026-08-12?",
+        probs={"Yes": 0.84, "No": 0.16}))
+    assert b.place([_mk()]) == 1
+    pos = b.bets[next(iter(b.bets))]
+    assert pos["fair"] == 0.84
+
+
+def test_pm_index_keeps_only_moneyline_games(tmp_path, monkeypatch):
+    # gamma /markets rows have NO 'category' field (verified live 8/12 -
+    # the old filter kept nothing and the book placed zero for a day).
+    # The discriminator is sportsMarketType == "moneyline".
+    b = _bot(tmp_path, monkeypatch)
+    rows = [
+        {"question": "Will the New York Yankees win on 2026-08-12?",
+         "sportsMarketType": "moneyline", "volume": "50000",
+         "outcomes": json.dumps(["Yes", "No"]),
+         "outcomePrices": json.dumps(["0.84", "0.16"])},
+        {"question": "Will the New York Yankees win the 2026 World Series?",
+         "volume": "999999",                       # futures: no smt field
+         "outcomes": json.dumps(["Yes", "No"]),
+         "outcomePrices": json.dumps(["0.18", "0.82"])},
+        {"question": "Yankees vs. Red Sox: winning margin 3+?",
+         "sportsMarketType": "spreads", "volume": "50000",
+         "outcomes": json.dumps(["Yes", "No"]),
+         "outcomePrices": json.dumps(["0.4", "0.6"])},
+        {"question": "Thin game", "sportsMarketType": "moneyline",
+         "volume": "5",                            # under PM_MIN_VOL
+         "outcomes": json.dumps(["Yes", "No"]),
+         "outcomePrices": json.dumps(["0.5", "0.5"])},
+    ]
+
+    class _R:
+        def __init__(self, data):
+            self._d = data
+
+        def json(self):
+            return self._d
+
+    def _get(*a, **k):        # page 0 has the rows; page 2 is empty
+        off = (k.get("params") or {}).get("offset", 0)
+        return _R(rows if not off else [])
+
+    monkeypatch.setattr(sp, "requests", type("M", (), {
+        "get": staticmethod(_get)}))
+    b._pm_cache = {"ts": None, "rows": []}
+    out = b.fetch_pm_index()
+    assert len(out) == 1
+    assert out[0]["probs"] == {"Yes": 0.84, "No": 0.16}
