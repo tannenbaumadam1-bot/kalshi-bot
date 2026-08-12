@@ -582,6 +582,16 @@ def main():
                 print("archived logs/driftw_state.json (driftw paper retired 7/30)")
         except Exception:
             pass
+    # SPORTS PAPER BOOK (8/12, Adam): the offer-side template on sports,
+    # Polymarket-anchored, zero dollars, building the go-live dataset.
+    sp_bot = None
+    if os.environ.get("PAPER_SPORTS", "1") == "1":
+        try:
+            import sports_paper
+            sp_bot = sports_paper.SportsPaper()
+        except Exception as e:
+            print(f"sports paper book unavailable: {e}")
+            sp_bot = None
     dl_dry = None
     if drift_live is not None:
         try:
@@ -738,6 +748,16 @@ def main():
                               f"settled {(cs['wins'] + cs['losses'])}/100 gate")
                 except Exception as e:
                     print(f"  drift-crypto step skipped: {e}")
+            if sp_bot is not None and n % 5 == 2:
+                try:
+                    no = sp_bot.step()
+                    if no or sp_bot.placed:
+                        print(f"  SPORTS(paper): open {no} | "
+                              f"{sp_bot.wins}W/{sp_bot.losses}L | "
+                              f"net ${sp_bot.realized_c / 100:+.2f} | "
+                              f"sold {sp_bot.sold}")
+                except Exception as e:
+                    print(f"  sports paper step skipped: {e}")
             if (dl_dry is not None and n % 20 == 17
                     and not os.path.exists(drift_live.ARM_FILE)
                     and os.environ.get("KALSHI_DRIFT_LIVE", "") != "1"):

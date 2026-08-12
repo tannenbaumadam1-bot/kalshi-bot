@@ -397,6 +397,17 @@ def build_data():
     # drift1 paper book retired 7/25; driftw2-fin retired 7/30
     # driftc = LANE 2 AUDITION (7/31): crypto drift paper book, gate 100
     # driftc paper audition retired 8/3 (gate passed -> live book)
+    # SPORTS PAPER BOOK (8/12): its state renders as Book 3
+    try:
+        _sp = os.path.join("logs", "sports_paper_state.json")
+        if os.path.exists(_sp):
+            _sd = json.load(open(_sp))
+            _sd["history"] = (_sd.get("history") or [])[-30:]
+            _sd.pop("sold_log", None)
+            _sd.pop("bets", None)
+            out["sports"] = _sd
+    except Exception:
+        pass
     for key, fname in (("clive", "crypto_live_state.json"),):
         fpath = os.path.join("logs", fname)
         if os.path.exists(fpath):
@@ -661,7 +672,7 @@ td.num,th.num{text-align:right}
 <table><thead><tr><th>Month</th><th class=num>Weather</th><th class=num>Crypto</th><th class=num>Total</th><th class=num>NAV end</th></tr></thead>
 <tbody id=perfm></tbody></table></div>
 </div></div>
-<h2 style="margin:18px 0 10px;border-top:1px solid rgba(125,144,173,.25);padding-top:14px">Book 1 &middot; Weather <span style="text-transform:none;letter-spacing:0">(era dlive1 &middot; maker + pursuit ladder &middot; 50% of NAV)</span></h2>
+<h2 style="margin:18px 0 10px;border-top:1px solid rgba(125,144,173,.25);padding-top:14px">Book 1 &middot; Weather <span style="text-transform:none;letter-spacing:0">(era dlive1 &middot; two-sided book: taker entries + dip bids + 97/99 offers &middot; 100% of NAV)</span></h2>
 <div class=grid id=wxtiles></div>
 <details style="margin-top:10px"><summary style="cursor:pointer;font-size:11px;color:var(--mut);text-transform:uppercase;letter-spacing:.12em">Diagnostics &amp; capital routing</summary>
 <div class=grid id=wxdiag style="margin-top:10px"></div>
@@ -689,6 +700,14 @@ td.num,th.num{text-align:right}
 <table><thead><tr><th>Closed</th><th>Market</th><th>Side</th><th class=num>Entry</th>
 <th class=num>Exit/Settle</th><th class=num>Qty</th><th>Result</th><th class=num>P&amp;L</th></tr></thead>
 <tbody id=clreal></tbody></table></div>
+</div>
+<div id=sportswrap style="display:none;border:1.5px solid rgba(47,208,140,.45);border-radius:12px;padding:14px 18px;margin:14px 0 4px;background:linear-gradient(180deg,rgba(47,208,140,.04),transparent)">
+<h2 style="margin:0 0 10px">Book 3 &middot; Sports <span id=spmode style="text-transform:none;letter-spacing:0"></span></h2>
+<div class=grid id=sptiles></div>
+<div style="margin-top:12px"><div class=t style="margin-bottom:6px">Recent trades</div>
+<table><thead><tr><th>Closed</th><th>Game</th><th>Team</th><th class=num>Fair</th>
+<th class=num>Entry</th><th class=num>Exit</th><th class=num>Qty</th><th>Result</th><th class=num>P&amp;L</th></tr></thead>
+<tbody id=sptbl></tbody></table></div>
 </div>
 <!-- PAPER SECTIONS RETIRED 7/30 (Adam: 'get rid of the other two paper
      strategies for now') - hidden, not deleted; ledgers archived on the
@@ -1006,6 +1025,27 @@ async function load(){
         +'<td class=num>'+h.count+'</td>'
         +'<td>'+(h.outcome===1?'<span class=pos>WON</span>':(h.outcome===0?'<span class=neg>LOST</span>':'STOP'))+'</td>'
         +'<td class=num><span class="'+C(h.pnl)+'">'+M(h.pnl)+'</span></td></tr>').join('');}}
+  if(d.sports&&d.sports.summary){const SP=d.sports.summary;
+    $('sportswrap').style.display='block';
+    const g=SP.gate||{},R=SP.rules||{};
+    $('spmode').innerHTML='<span class=chip style="background:rgba(125,144,173,.15);color:var(--mut)">PAPER</span>'
+      +' <span class=mut style="font-size:11px">era sports1 &middot; Polymarket-anchored entries &middot; the weather offer-side template &middot; real asks + exact fees &middot; lifts only on bid-through (conservative)</span>';
+    $('sptiles').innerHTML=[
+      tile('Go-live gate',(g.n||0)+' / '+(g.need||200)+' settled'+(g.ready?' &middot; <span class=pos>READY</span>':''),(g.lb!=null&&g.be!=null)?('Wilson LB '+(g.lb*100).toFixed(1)+'% vs breakeven '+(g.be*100).toFixed(1)+'%'):'accumulating evidence &middot; the ledger decides'),
+      tile('Record',(SP.wins||0)+'W / '+(SP.losses||0)+'L &middot; <span class="'+C(SP.net)+'">'+M(SP.net||0)+'</span>','paper, after exact fees &middot; '+(SP.open||0)+' open &middot; '+(SP.placed||0)+' placed'),
+      tile('Offer side',(SP.sold||0)+' lifted &middot; <span class="'+C(SP.sold_net)+'">'+M(SP.sold_net||0)+'</span>','sells at '+((R.sell||[97,99]).join('/'))+'&cent; &middot; bid-through only'),
+      tile("Today's P&L",'<span class="'+C(SP.day_pnl)+'">'+M(SP.day_pnl||0)+'</span>','edge &ge;'+(R.edge_min_c||3)+'&cent; vs anchor &middot; band '+((R.band||[65,90]).join('-'))+'&cent; &middot; '+(R.size||5)+' lots')
+    ].join('');
+    $('sptbl').innerHTML=((d.sports.history)||[]).slice().reverse().slice(0,12).map(h=>'<tr><td class=mut>'+String(h.ts||'').slice(5,16).replace('T',' ')+'</td>'
+      +'<td>'+(h.title||'')+'</td><td>'+(h.team||'')+'</td>'
+      +'<td class=num>'+(h.fair!=null?Math.round(h.fair*100)+'%':'&ndash;')+'</td>'
+      +'<td class=num>'+h.entry+'&cent;</td>'
+      +'<td class=num>'+(h.exit_px!=null?h.exit_px+'&cent;':'&ndash;')+'</td>'
+      +'<td class=num>'+h.count+'</td>'
+      +'<td>'+(h.sold?'<span class=chip style="background:rgba(47,208,140,.13);color:var(--grn)">SOLD</span>':('<span class="'+(Number(h.pnl)>0?'won':'lost')+'">'+(Number(h.pnl)>0?'WON':'LOST')+'</span>'))+'</td>'
+      +'<td class=num><span class="'+C(h.pnl)+'">'+M(h.pnl)+'</span></td></tr>').join('')
+      ||'<tr><td colspan=9 class=empty>Scanning sports books for anchored edge&hellip;</td></tr>';
+  }
   {const strip=[];
    const fmtL=(tag,LV)=>{const L=LV.summary;const w=(L.k_wins!=null?L.k_wins:L.wins),l=(L.k_wins!=null?L.k_losses:L.losses);return tag+' '+(L.mode||'LIVE')+' '+M(L.net||0)+' ('+(w||0)+'W/'+(l||0)+'L)'
       +(L.resting!=null?' \u00b7 '+L.resting+' resting':'')
