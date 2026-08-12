@@ -1052,3 +1052,121 @@ def test_dip_total_cap(tmp_path, monkeypatch):
     dip_cost = sum(d["entry"] * d["count"] for d in b.dips.values())
     assert dip_cost <= 1500                 # <= 15% of NAV
     assert len(b.dips) < 6                  # the cap refused the rest
+
+
+# ---- 8/12 over-refusal fixes: filled-only caps, trim, orphan hygiene ----
+
+def test_concentration_cap_ignores_pending(tmp_path, monkeypatch):
+    # over-refusal autopsy: zombie/churning maker joins read as $40 of
+    # slate commitment at $8.40 of real risk -> every entry refused all
+    # day. Caps now count FILLED risk only (open cap still bounds both).
+    b = _bot(tmp_path, monkeypatch)
+    b.dry_balance_c = 10000                   # NAV $100 -> slate cap $40
+    b.pending["zombie"] = dict(_stale_order(tk="KXHIGHNY-26JUL-Z9",
+                                            entry=90, count=40),
+                               exec="maker")  # $36 phantom on today's slate
+    assert b.place(mkts=[_mk(bid=95, ask=97, city="q1", strike=1)]) == 1
+    nk = [x for x in b.bets.values() if x["trig"] == "nickel"]
+    assert nk and nk[0]["count"] == 10        # full size, not refused
+
+
+def test_concentration_cap_trims_to_fit(tmp_path, monkeypatch):
+    # an oversize candidate takes the room that's left (>= 5-lot floor)
+    # instead of walking away from a slate with real headroom
+    monkeypatch.setattr(dl, "SLATE_CAP_PCT", 0.05)   # $5.00 of room
+    b = _bot(tmp_path, monkeypatch)
+    b.dry_balance_c = 10000
+    assert b.place(mkts=[_mk(bid=95, ask=97)]) == 1  # nickel wants 10 lots
+    bet = next(iter(b.bets.values()))
+    assert bet["trig"] == "nickel" and bet["count"] == 5   # 10 -> 5 fits
+    assert bet["entry"] * bet["count"] <= 500
+
+
+def test_concentration_refusal_publishes_detail(tmp_path, monkeypatch):
+    # a refusal that can't trim to the floor is counted AND named on the
+    # tracker with its arithmetic - never again a bare 2,353
+    monkeypatch.setattr(dl, "SLATE_CAP_PCT", 0.01)   # $1: nothing fits
+    b = _bot(tmp_path, monkeypatch)
+    b.dry_balance_c = 10000
+    assert b.place(mkts=[_mk(bid=95, ask=97)]) == 0
+    assert b.exec_stats.get("slate_capped") == 1
+    r = b.cap_refuse[-1]
+    assert r["kind"] == "slate" and r["tk"] == "KXHIGHNY-26JUL-T86"
+    assert r["nav_c"] > 0 and r["px"] == 95
+    b.save()
+    import json as _json
+    st = _json.load(open(dl.STATE))
+    assert st["summary"]["cap_refuse_last"][-1]["kind"] == "slate"
+
+
+def test_same_cycle_placements_still_count(tmp_path, monkeypatch):
+    # dropping pending from the caps must NOT allow a one-cycle burst
+    # straight past the slate: placements made THIS call still count
+    monkeypatch.setattr(dl, "SLATE_CAP_PCT", 0.10)   # $10 of room
+    b = _bot(tmp_path, monkeypatch)
+    b.dry_balance_c = 10000
+    ms = [_mk(tk=f"KXHIGHNY-26JUL-B{i}", bid=95, ask=97, city=f"c{i}",
+              strike=i) for i in range(3)]
+    assert b.place(mkts=ms) == 1              # $9.50 fills the slate
+    assert b.exec_stats.get("slate_capped", 0) >= 1
+
+
+class _FakeOrphanClient:
+    def __init__(self, rows):
+        self.rows = rows
+        self.canceled = []
+
+    def get_resting_orders(self):
+        return list(self.rows)
+
+    def get_fills(self, limit=100):
+        return []
+
+    def cancel_order(self, oid):
+        self.canceled.append(oid)
+        return {}
+
+
+def test_heal_never_adopts_sell_and_sweeps_orphans(tmp_path, monkeypatch):
+    # the zombie chain: a surviving SELL leg's oid was adopted as a
+    # pending BUY's id (immortal phantom commitment). Heal now ignores
+    # sells, and an unowned resting order on an unheld market is
+    # canceled on sight.
+    monkeypatch.setattr(dl, "CROSS_EXPIRY", False)
+    b = _bot(tmp_path, monkeypatch)
+    tk = "KXHIGHNY-26JUL-T86"
+    b.client = _FakeOrphanClient([{"order_id": "S9", "ticker": tk,
+                                   "action": "sell", "side": "yes"}])
+    b.pending = {"synthetic-1": dict(_stale_order(tk=tk), exec="maker")}
+    b.check_orders()
+    assert not b.pending                      # vanished, not healed to S9
+    assert "S9" in b.client.canceled          # orphan swept
+    assert b.exec_stats.get("orphans_canceled") == 1
+
+
+def test_dead_book_entry_cancels_surviving_legs(tmp_path, monkeypatch):
+    # DESYNC-DROP/settle used to del the offers entry and leave the 99c
+    # rung resting live on the exchange (found live 8/12: 4 orphans)
+    b = _bot(tmp_path, monkeypatch)
+    b.client = _FakeOrphanClient([])
+    tk = "KXHIGHNY-26JUL-T86"
+    b.offers[tk] = {"legs": [{"oid": "L1", "px": 97, "count": 3},
+                             {"oid": "L2", "px": 99, "count": 2}],
+                    "count": 5, "ots": ""}
+    b._check_offers({"L2"}, {})               # book has no position
+    assert "L2" in b.client.canceled
+    assert tk not in b.offers
+
+
+def test_full_sale_cancels_surviving_ladder_leg(tmp_path, monkeypatch):
+    b = _bot(tmp_path, monkeypatch)
+    b.client = _FakeOrphanClient([])
+    tk = "KXHIGHNY-26JUL-T86"
+    b.bets[tk] = dict(_stale_order(tk=tk, entry=85, count=5), fee=0)
+    b.offers[tk] = {"legs": [{"oid": "L1", "px": 97, "count": 3},
+                             {"oid": "L2", "px": 99, "count": 2}],
+                    "count": 5, "ots": ""}
+    b._check_offers({"L2"}, {"L1": 5})        # L1 lifted the whole lot
+    assert tk not in b.bets                   # fully sold
+    assert "L2" in b.client.canceled          # sibling rung not orphaned
+    assert tk not in b.offers

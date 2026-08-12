@@ -910,6 +910,11 @@ class DriftLive:
                           "chase": CHASE_MAX_E, "rest_h": REST_MAX_H,
                           "min_ct": MIN_CONTRACTS,
                           "bet_pct": getattr(self, "bet_pct_now", BET_PCT)},
+                 # 8/12: the last concentration refusals, with the
+                 # arithmetic that produced them (kind/ticker/px/ct +
+                 # city_c/slate_c/nav_c cents at refusal time)
+                 "cap_refuse_last": (getattr(self, "cap_refuse", [])
+                                     or [])[-5:],
                  **self._autopsy_summary(),
                  **self._miss_summary(),
                  "buckets": [dict(v, bucket=k,
@@ -1193,6 +1198,16 @@ class DriftLive:
         oc += sum(o["entry"] * o["count"] for o in self.pending.values())
         return oc
 
+    def _cap_refused(self, kind, tk, entry, size, c_cost, d_cost, nav_cc):
+        """8/12: name every concentration refusal on the tracker. 2,353
+        bare counter ticks were undiagnosable from outside - the zombie-
+        pending saturation took a session and two /public diffs to find.
+        Last 5 published; never again without the numbers."""
+        self.cap_refuse = (getattr(self, "cap_refuse", []) + [{
+            "kind": kind, "tk": tk, "px": entry, "ct": size,
+            "city_c": c_cost, "slate_c": d_cost, "nav_c": nav_cc,
+            "ts": now()}])[-20:]
+
     # ---- settlement receivable (8/10): bridges the minutes between our
     # settlement detection and the exchange's cash credit so NAV never
     # dips by a winner's payout. Consumed as the balance rises; anything
@@ -1268,13 +1283,22 @@ class DriftLive:
             return
         resting_ids = set()
         resting_by_tk = {}
+        resting_rows = []
         fills_by_oid = None
         if self.client is not None:
             try:
                 for ro in self.client.get_resting_orders():
                     roid = ro.get("order_id") or ro.get("id")
                     resting_ids.add(roid)
-                    resting_by_tk.setdefault(ro.get("ticker"), []).append(roid)
+                    resting_rows.append(ro)
+                    # 8/12: heal candidates are BUY orders ONLY. Adopting
+                    # a surviving SELL leg's oid bound phantom pending
+                    # rows to immortal orders - four ~$10 zombies read as
+                    # slate commitment and refused every entry at $8.40
+                    # of real risk (slate_capped +16/cycle all day).
+                    if (ro.get("action") or "buy") == "buy":
+                        resting_by_tk.setdefault(ro.get("ticker"),
+                                                 []).append(roid)
             except Exception:
                 return                      # can't verify -> touch nothing
             # heal synthetic/mismatched oids by ticker before lifecycle
@@ -1299,6 +1323,31 @@ class DriftLive:
                                    round(o["pside"], 3), o["entry"],
                                    o["count"], "", "", f"{oid}->{cand}"])
                         break
+            # 8/12 orphan sweep: a resting order we don't own on a
+            # weather market is a stray (pre-fix surviving ladder legs,
+            # externally-placed leftovers). Live and unmanaged, it can
+            # dump a re-entered position at its resting price and its
+            # fills are never booked. Cancel on sight - except unowned
+            # BUYS on tickers with a pending join (heal's turf).
+            pend_tks = {o["ticker"] for o in self.pending.values()}
+            for ro in resting_rows:
+                roid = ro.get("order_id") or ro.get("id")
+                tk0 = ro.get("ticker") or ""
+                if roid in owned or not _is_wx(tk0):
+                    continue
+                if ((ro.get("action") or "buy") == "buy"
+                        and tk0 in pend_tks):
+                    continue
+                try:
+                    self.client.cancel_order(roid)
+                except Exception:
+                    continue
+                self.exec_stats["orphans_canceled"] = (
+                    self.exec_stats.get("orphans_canceled", 0) + 1)
+                self._log([now(), "ORPHAN-CANCEL", self.mode, "", "", "",
+                           ro.get("side", ""), "", ro.get("action", ""),
+                           ro.get("remaining_count", ""), "", "",
+                           f"{tk0}:{roid}"])
             try:
                 fills_by_oid = {}
                 for f in self.client.get_fills(limit=100):
@@ -1461,6 +1510,16 @@ class DriftLive:
         for tk, off in list(self.offers.items()):
             b = self.bets.get(tk)
             if b is None:
+                # 8/12: settlement usually kills the orders, but a
+                # DESYNC-DROP doesn't - cancel anything still resting
+                # so no leg outlives its book entry
+                for leg in (off.get("legs") or []):
+                    lo = leg.get("oid")
+                    if lo in resting_ids:
+                        try:
+                            self.client.cancel_order(lo)
+                        except Exception:
+                            pass
                 del self.offers[tk]         # settled first: quote is dead
                 continue
             legs = off.get("legs") or (
@@ -1488,6 +1547,19 @@ class DriftLive:
                 # count stays the ORIGINAL total so a partial sale
                 # triggers the resize/requote pass in quote_offers
             else:
+                # 8/12: cancel every leg still resting BEFORE dropping
+                # the book entry. Found live: when one ladder rung sold
+                # the position out, the surviving 99c rung kept resting
+                # unowned on the exchange (4 orphan sells: OKC/ATL/DC/
+                # NYC) - unmanaged live orders that also fed the
+                # heal-oid/slate-cap pollution below.
+                for leg in legs:
+                    lo = leg.get("oid")
+                    if lo in resting_ids:
+                        try:
+                            self.client.cancel_order(lo)
+                        except Exception:
+                            pass
                 self.offers.pop(tk, None)
 
     def _book_sale(self, tk, b, px, sold, oid):
@@ -1897,6 +1969,7 @@ class DriftLive:
                           bid_entry))
         cands.sort(key=lambda c: ({"nickel": 0, "level": 1}.get(c[0], 2), -c[1]))
         placed = 0
+        _ccap_add, _dcap_add = {}, {}   # 8/12: same-cycle placements
         for (trig, score, mk, side, entry, smid, ekey, exec_kind,
              bid_entry) in cands:
             if ekey in (nk_keys if trig == "nickel" else ev_keys):
@@ -1964,27 +2037,35 @@ class DriftLive:
             # of NAV or one settlement DATE past SLATE_CAP_PCT.
             nav_cc = getattr(self, "last_nav_c", 0)
             if nav_cc:
-                cost_new = entry * size
-                # NB: resting dip-bids are NOT counted against entries -
-                # the proven entry lanes keep full cap priority. Dips
-                # check the full picture (incl. themselves) at their own
-                # placement, so the worst overshoot is one entry per
-                # city placed after a dip - bounded and accepted.
-                c_cost = d_cost = 0
-                for b0 in (list(self.bets.values())
-                           + list(self.pending.values())):
+                # 8/12 rework (over-refusal autopsy): concentration is
+                # FILLED risk only. Unfilled maker joins churn all day
+                # and were double-reserving the slate - and with every
+                # weather market sharing ONE settlement date, the slate
+                # cap was acting as a hard 40% global cap fed by phantom
+                # commitment (the 60% open cap still bounds
+                # bets+pending). Same-cycle placements DO count (burst
+                # guard), and an oversize candidate TRIMS to the room
+                # left (>= the 5-lot floor) like every other cap here
+                # instead of refusing outright.
+                c_cost = _ccap_add.get(mk["city"], 0)
+                d_cost = _dcap_add.get(mk.get("date", ""), 0)
+                for b0 in self.bets.values():
                     c0 = b0.get("entry", 0) * b0.get("count", 0)
                     if b0.get("city") == mk["city"]:
                         c_cost += c0
                     if b0.get("date", "") == mk.get("date", ""):
                         d_cost += c0
-                if c_cost + cost_new > int(nav_cc * CITY_CAP_PCT):
-                    self.exec_stats["city_capped"] = (
-                        self.exec_stats.get("city_capped", 0) + 1)
-                    continue
-                if d_cost + cost_new > int(nav_cc * SLATE_CAP_PCT):
-                    self.exec_stats["slate_capped"] = (
-                        self.exec_stats.get("slate_capped", 0) + 1)
+                room_c = int(nav_cc * CITY_CAP_PCT) - c_cost
+                room_d = int(nav_cc * SLATE_CAP_PCT) - d_cost
+                room = min(room_c, room_d)
+                while size > MIN_CONTRACTS and entry * size > room:
+                    size -= 1
+                if entry * size > room:
+                    kind0 = "city" if room_c <= room_d else "slate"
+                    self.exec_stats[kind0 + "_capped"] = (
+                        self.exec_stats.get(kind0 + "_capped", 0) + 1)
+                    self._cap_refused(kind0, tk, entry, size,
+                                      c_cost, d_cost, nav_cc)
                     continue
             if self.open_cost_c() + entry * size > self.max_open_c:
                 continue
@@ -2013,6 +2094,10 @@ class DriftLive:
                 "exec": exec_kind, "ots": now()}
             pk = "placed_" + exec_kind
             self.exec_stats[pk] = self.exec_stats.get(pk, 0) + 1
+            _ccap_add[mk["city"]] = (_ccap_add.get(mk["city"], 0)
+                                     + entry * size)
+            _dcap_add[mk.get("date", "")] = (
+                _dcap_add.get(mk.get("date", ""), 0) + entry * size)
             (nk_keys if trig == "nickel" else ev_keys).add(ekey)
             self.placed += 1
             placed += 1
@@ -2115,9 +2200,11 @@ class DriftLive:
             dip_tot = sum(d["entry"] * d["count"] for d in self.dips.values())
             if dip_tot + cost > int(nav_c * DIP_MAX_PCT):
                 continue
+            # 8/12: FILLED risk + this lane's own resting bids only -
+            # pending maker joins no longer double-reserve the caps
+            # (see the entry-path rework for the full story)
             c_cost = d_cost = 0
-            for x in (list(self.bets.values()) + list(self.pending.values())
-                      + list(self.dips.values())):
+            for x in (list(self.bets.values()) + list(self.dips.values())):
                 c0 = x.get("entry", 0) * x.get("count", 0)
                 if x.get("city") == mk["city"]:
                     c_cost += c0
