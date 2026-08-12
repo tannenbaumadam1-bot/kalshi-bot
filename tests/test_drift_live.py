@@ -1215,3 +1215,64 @@ def test_entry_waits_for_adoption_of_exchange_position(tmp_path,
     b.bets[tk] = dict(_stale_order(tk=tk, entry=85, count=5), fee=0)
     assert b.place(mkts=[_mk(tk=tk, bid=82, ask=85)]) == 0  # dedupe, no stack
     assert b.exec_stats.get("sync_wait") == 1               # not re-counted
+
+
+# ---- 8/12 invariant: no pending row dies with unbooked fills ----
+
+class _FakeCancelClient:
+    """Cancel response reveals fills the cycle's snapshot missed."""
+    def __init__(self, resting, cancel_order_obj):
+        self._resting = resting
+        self._obj = cancel_order_obj
+        self.created = []
+
+    def get_resting_orders(self):
+        return list(self._resting)
+
+    def get_fills(self, limit=100):
+        return []
+
+    def cancel_order(self, oid):
+        return {"order": dict(self._obj)}
+
+    def create_order(self, tk, **kw):
+        self.created.append(kw)
+        return {"order": {"order_id": f"new-{len(self.created)}"}}
+
+
+def test_stale_cancel_books_fills_from_cancel_response(tmp_path,
+                                                       monkeypatch):
+    # 3 of 5 filled between the fills snapshot and the cancel: the old
+    # path deleted the row and those 3 lots went invisible (the Miami
+    # class). Now the cancel response books them first.
+    monkeypatch.setattr(dl, "CROSS_EXPIRY", False)
+    b = _bot(tmp_path, monkeypatch)
+    old = (_dt.datetime.now() - _dt.timedelta(hours=3)).isoformat()
+    tk = "KXHIGHNY-26JUL-T86"
+    b.client = _FakeCancelClient([{"order_id": "o1", "ticker": tk}],
+                                 {"initial_count": 5,
+                                  "remaining_count": 2})
+    b.pending = {"o1": dict(_stale_order(tk=tk, entry=85, count=5),
+                            exec="maker", ots=old)}
+    b.check_orders()
+    assert not b.pending
+    assert b.bets[tk]["count"] == 3            # booked, not vanished
+    # and the miss ledger sees only the true unfilled remainder
+    assert b.miss[-1]["count"] == 2
+
+
+def test_requote_chases_only_the_remainder(tmp_path, monkeypatch):
+    # old path: cancel, zero filled_seen, re-order the FULL count -
+    # a partially-filled join bought its filled lots again every chase
+    b = _bot(tmp_path, monkeypatch)
+    tk = "KXHIGHNY-26JUL-T86"
+    b.client = _FakeCancelClient([], {"initial_count": 10,
+                                      "remaining_count": 7})
+    b.pending = {"o1": dict(_stale_order(tk=tk, entry=80, count=10),
+                            exec="maker", requotes=0, ots=dl.now())}
+    mk = _mk(tk=tk, bid=86, ask=88)
+    assert b._maybe_requote(tk, mk) is True
+    assert b.client.created[-1]["count"] == 7  # remainder only
+    assert b.bets[tk]["count"] == 3            # the fills got booked
+    no = b.pending[next(iter(b.pending))]
+    assert no["count"] == 7 and no["filled_seen"] == 0

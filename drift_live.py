@@ -1296,6 +1296,43 @@ class DriftLive:
                    o["hl"], o["side"], round(o["pside"], 3),
                    o["entry"], filled, "", "", oid])
 
+    def _cancel_pending(self, oid, o):
+        """8/12 invariant (the Miami stack began as fills the book never
+        saw): a pending BUY is canceled ONLY through here, and any fills
+        the cancel response reveals are booked before the caller may
+        delete the row. Kalshi's DELETE returns the final order object -
+        the authoritative fill count at the moment of death. Returns
+        False when the cancel itself failed (caller must keep the row)."""
+        try:
+            resp = self.client.cancel_order(oid)
+        except Exception:
+            return False
+        ro = {}
+        if isinstance(resp, dict):
+            ro = resp.get("order") if isinstance(resp.get("order"),
+                                                 dict) else resp
+
+        def g(key):
+            v = ro.get(key + "_fp")
+            if v is None:
+                v = ro.get(key)
+            try:
+                return float(v)
+            except (TypeError, ValueError):
+                return None
+        filled = g("filled_count")
+        if filled is None:
+            ic, rc = g("initial_count"), g("remaining_count")
+            if ic is not None and rc is not None:
+                filled = max(0.0, ic - rc)
+        if filled is not None:
+            seen = float(o.get("filled_seen", 0))
+            new = round(filled - seen, 2)
+            if new > 0.009:
+                self._promote_fill(oid, o, new)
+                o["filled_seen"] = round(seen + new, 2)
+        return True
+
     def check_orders(self):
         """Promote fills (INCLUDING partial fills on still-resting orders -
         learned live 7/23: balance dropped $6+ at '0 filled' because Kalshi
@@ -1411,9 +1448,10 @@ class DriftLive:
                 age_h = 0
             if age_h > REST_MAX_H:
                 if self.client is not None:
-                    try:
-                        self.client.cancel_order(oid)
-                    except Exception:
+                    # 8/12: cancel-and-book - fills revealed by the
+                    # cancel response land in bets BEFORE the row dies,
+                    # so `unfilled` below is the truth, not a snapshot
+                    if not self._cancel_pending(oid, o):
                         continue
                 unfilled = round(o["count"]
                                  - float(o.get("filled_seen", 0)), 2)
@@ -2316,26 +2354,36 @@ class DriftLive:
         if join - o["entry"] < REQUOTE_C or join > max_e or join <= 0:
             return False
         new_oid = f"rq-{self.placed + 1}"
+        rem = o["count"]
         if self.client is not None:
-            try:
-                self.client.cancel_order(oid)
-            except Exception:
+            # 8/12: cancel-and-book, then chase only the REMAINDER.
+            # The old path re-ordered the FULL count after zeroing
+            # filled_seen - a partially-filled join got its filled lots
+            # AGAIN on every chase (same fills-go-invisible family as
+            # the Miami stack, from the other direction).
+            if not self._cancel_pending(oid, o):
                 return False
+            rem = round(float(o["count"])
+                        - float(o.get("filled_seen", 0)), 2)
+            if rem < 1:
+                del self.pending[oid]       # the chase filled it whole
+                return False
+            rem = int(rem)
             try:
                 resp = self.client.create_order(tk, action="buy", side=o["side"],
-                                                count=o["count"], price_cents=join)
+                                                count=rem, price_cents=join)
                 ro = resp.get("order") or {}
                 new_oid = (ro.get("order_id") or ro.get("id")
                            or resp.get("order_id") or resp.get("id") or new_oid)
             except Exception:
-                self._log_miss(o, o["count"] - int(o.get("filled_seen", 0)),
-                               why="requote_rejected")
+                self._log_miss(o, rem, why="requote_rejected")
                 del self.pending[oid]       # canceled but not replaced
                 return False
         if self.client is None:
             self.dry_balance_c -= (join - o["entry"]) * o["count"]
         o = self.pending.pop(oid)
-        o.update({"entry": join, "requotes": int(o.get("requotes", 0)) + 1,
+        o.update({"entry": join, "count": rem,
+                  "requotes": int(o.get("requotes", 0)) + 1,
                   "filled_seen": 0, "ots": now()})
         self.pending[new_oid] = o
         self.exec_stats["requotes"] = self.exec_stats.get("requotes", 0) + 1
