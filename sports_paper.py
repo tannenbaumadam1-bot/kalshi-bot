@@ -178,6 +178,19 @@ class SportsPaper:
                 for ev in d.get("events") or []:
                     if (ev.get("category") or "").lower() != "sports":
                         continue
+                    # 8/12: GAME WINNERS ONLY. Spreads/totals/props share
+                    # team names with the moneyline, so the anchor
+                    # matcher could hand them the WRONG fair value and
+                    # manufacture phantom edge - the exact contamination
+                    # a go-live dataset cannot carry. Other market types
+                    # need their own anchors before they may trade.
+                    t = (ev.get("title") or "").lower()
+                    if "winner" not in t:
+                        continue
+                    if any(w in t for w in ("series", "championship",
+                                            "by ", "margin", "total",
+                                            "spread")):
+                        continue
                     for mk in ev.get("markets") or []:
                         rows.append((ev, mk))
                 cursor = d.get("cursor")
