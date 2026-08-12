@@ -1283,22 +1283,21 @@ class DriftLive:
             return
         resting_ids = set()
         resting_by_tk = {}
-        resting_rows = []
         fills_by_oid = None
         if self.client is not None:
             try:
                 for ro in self.client.get_resting_orders():
                     roid = ro.get("order_id") or ro.get("id")
                     resting_ids.add(roid)
-                    resting_rows.append(ro)
-                    # 8/12: heal candidates are BUY orders ONLY. Adopting
-                    # a surviving SELL leg's oid bound phantom pending
-                    # rows to immortal orders - four ~$10 zombies read as
-                    # slate commitment and refused every entry at $8.40
-                    # of real risk (slate_capped +16/cycle all day).
-                    if (ro.get("action") or "buy") == "buy":
-                        resting_by_tk.setdefault(ro.get("ticker"),
-                                                 []).append(roid)
+                    # 8/12 HARD-LEARNED: do NOT filter heal candidates by
+                    # the row's action/side - GET /portfolio/orders
+                    # projects EVERYTHING onto the yes ledger (our NO buy
+                    # at 89c comes back as "sell yes 11c", our NO-position
+                    # ladder leg at 97c as "buy yes 3c"). An action filter
+                    # here spent 20 live minutes canceling real NO-side
+                    # entry joins as "zombies". The owned-set below is the
+                    # only correct guard against adopting our own quotes.
+                    resting_by_tk.setdefault(ro.get("ticker"), []).append(roid)
             except Exception:
                 return                      # can't verify -> touch nothing
             # heal synthetic/mismatched oids by ticker before lifecycle
@@ -1323,55 +1322,12 @@ class DriftLive:
                                    round(o["pside"], 3), o["entry"],
                                    o["count"], "", "", f"{oid}->{cand}"])
                         break
-            # 8/12: a pending BUY bound to a SELL order's oid is a healed
-            # zombie (pre-fix pollution, persisted in state and kept
-            # fresh by every re-heal). Drop the row and cancel the
-            # stray - its fills are someone's sale, never a buy fill to
-            # promote. Without this the zombies count as "owned" and
-            # the orphan sweep below can't touch their orders.
-            _act = {(ro.get("order_id") or ro.get("id")):
-                    (ro.get("action") or "buy") for ro in resting_rows}
-            for oid, o in list(self.pending.items()):
-                if _act.get(oid) != "sell":
-                    continue
-                try:
-                    self.client.cancel_order(oid)
-                except Exception:
-                    pass
-                del self.pending[oid]
-                owned.discard(oid)
-                self.exec_stats["zombies_dropped"] = (
-                    self.exec_stats.get("zombies_dropped", 0) + 1)
-                self._log([now(), "ZOMBIE-DROP", self.mode,
-                           o.get("city", ""), o.get("strike", ""),
-                           o.get("hl", ""), o.get("side", ""), "",
-                           o.get("entry", ""), o.get("count", ""),
-                           "", "", oid])
-            # 8/12 orphan sweep: a resting order we don't own on a
-            # weather market is a stray (pre-fix surviving ladder legs,
-            # externally-placed leftovers). Live and unmanaged, it can
-            # dump a re-entered position at its resting price and its
-            # fills are never booked. Cancel on sight - except unowned
-            # BUYS on tickers with a pending join (heal's turf).
-            pend_tks = {o["ticker"] for o in self.pending.values()}
-            for ro in resting_rows:
-                roid = ro.get("order_id") or ro.get("id")
-                tk0 = ro.get("ticker") or ""
-                if roid in owned or not _is_wx(tk0):
-                    continue
-                if ((ro.get("action") or "buy") == "buy"
-                        and tk0 in pend_tks):
-                    continue
-                try:
-                    self.client.cancel_order(roid)
-                except Exception:
-                    continue
-                self.exec_stats["orphans_canceled"] = (
-                    self.exec_stats.get("orphans_canceled", 0) + 1)
-                self._log([now(), "ORPHAN-CANCEL", self.mode, "", "", "",
-                           ro.get("side", ""), "", ro.get("action", ""),
-                           ro.get("remaining_count", ""), "", "",
-                           f"{tk0}:{roid}"])
+            # 8/12: ZOMBIE-DROP and the orphan sweep that briefly lived
+            # here were REMOVED the same day - both were built on
+            # misreading the yes-projected orders API (see note above)
+            # and canceled live NO-side entry joins. Stray-leg hygiene
+            # is handled where it belongs: _check_offers cancels every
+            # surviving leg before dropping a book entry.
             try:
                 fills_by_oid = {}
                 for f in self.client.get_fills(limit=100):

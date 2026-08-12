@@ -1127,23 +1127,6 @@ class _FakeOrphanClient:
         return {}
 
 
-def test_heal_never_adopts_sell_and_sweeps_orphans(tmp_path, monkeypatch):
-    # the zombie chain: a surviving SELL leg's oid was adopted as a
-    # pending BUY's id (immortal phantom commitment). Heal now ignores
-    # sells, and an unowned resting order on an unheld market is
-    # canceled on sight.
-    monkeypatch.setattr(dl, "CROSS_EXPIRY", False)
-    b = _bot(tmp_path, monkeypatch)
-    tk = "KXHIGHNY-26JUL-T86"
-    b.client = _FakeOrphanClient([{"order_id": "S9", "ticker": tk,
-                                   "action": "sell", "side": "yes"}])
-    b.pending = {"synthetic-1": dict(_stale_order(tk=tk), exec="maker")}
-    b.check_orders()
-    assert not b.pending                      # vanished, not healed to S9
-    assert "S9" in b.client.canceled          # orphan swept
-    assert b.exec_stats.get("orphans_canceled") == 1
-
-
 def test_dead_book_entry_cancels_surviving_legs(tmp_path, monkeypatch):
     # DESYNC-DROP/settle used to del the offers entry and leave the 99c
     # rung resting live on the exchange (found live 8/12: 4 orphans)
@@ -1172,19 +1155,20 @@ def test_full_sale_cancels_surviving_ladder_leg(tmp_path, monkeypatch):
     assert tk not in b.offers
 
 
-def test_zombie_pending_bound_to_sell_oid_is_dropped(tmp_path, monkeypatch):
-    # found live AFTER the heal fix shipped: pre-fix zombies persist in
-    # state and count as "owned", shielding their sell orders from the
-    # orphan sweep. A pending BUY keyed by a SELL order's oid is dropped
-    # outright - and its fills must never promote as a buy.
+def test_heal_adopts_yes_projected_no_side_orders(tmp_path, monkeypatch):
+    # 8/12 HARD-LEARNED: GET /portfolio/orders projects NO-side buys as
+    # yes-side SELLS ("sell yes 11c" == our buy NO 89c). Heal must adopt
+    # regardless of the projected action - an action filter here spent
+    # 20 live minutes canceling real NO-side entry joins as zombies.
     monkeypatch.setattr(dl, "CROSS_EXPIRY", False)
     b = _bot(tmp_path, monkeypatch)
     tk = "KXHIGHNY-26JUL-T86"
-    b.client = _FakeOrphanClient([{"order_id": "S9", "ticker": tk,
+    b.client = _FakeOrphanClient([{"order_id": "R7", "ticker": tk,
                                    "action": "sell", "side": "yes"}])
-    b.pending = {"S9": dict(_stale_order(tk=tk, entry=90, count=11),
-                            exec="maker")}
+    b.pending = {"synthetic-1": dict(_stale_order(tk=tk, entry=89,
+                                                  count=11), exec="maker")}
+    b.pending["synthetic-1"]["side"] = "no"
     b.check_orders()
-    assert not b.pending and not b.bets       # dropped, nothing promoted
-    assert "S9" in b.client.canceled
-    assert b.exec_stats.get("zombies_dropped") == 1
+    assert "R7" in b.pending                  # healed to the real oid
+    assert "synthetic-1" not in b.pending
+    assert b.client.canceled == []            # and nothing was canceled
