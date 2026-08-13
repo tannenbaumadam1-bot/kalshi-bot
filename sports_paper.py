@@ -96,6 +96,10 @@ def _tokens(s):
     return set(_WORD.findall((s or "").lower()))
 
 
+# words in a Kalshi game title that name no team
+_TITLE_STOP = {"vs", "v", "at", "winner", "the", "and", "game", "match",
+               "s"}
+
 _EV_TIME = re.compile(r"-(\d{2})([A-Z]{3})(\d{2})(\d{4})")
 _MONTHS = {"JAN": 1, "FEB": 2, "MAR": 3, "APR": 4, "MAY": 5, "JUN": 6,
            "JUL": 7, "AUG": 8, "SEP": 9, "OCT": 10, "NOV": 11, "DEC": 12}
@@ -559,6 +563,15 @@ class SportsPaper:
         #       old >=2-token rule refused every single candidate.
         # For (B) the honest test is that PM names OUR WHOLE team, which
         # also stops "Boston Red Sox" matching "Chicago White Sox".
+        # 8/13 SAME-GAME GUARD: Kalshi names teams by CITY, and a city
+        # is not a team - "Atlanta" matches the Braves, Falcons, Hawks,
+        # United AND Dream. Requiring our team's tokens alone let a
+        # wrong-SPORT row anchor an MLB market whenever the right game
+        # was missing from the index, which manufactures exactly the
+        # phantom edge the dual-anchor veto exists to prevent. So the
+        # anchor must also name the OPPONENT (taken from the Kalshi
+        # title, "Arizona vs Atlanta Winner?" -> {arizona}).
+        opp_t = (title_t - team_t) - _TITLE_STOP
         best = None                          # (rank, score, prob)
         for r in pm_rows:
             toks = set(r["toks"])
@@ -571,13 +584,24 @@ class SportsPaper:
                 if nt & team_t and (nt <= team_t or team_t <= nt):
                     got, rank = p, 2         # (A) named outcome
                     break
+            if got is not None and opp_t and not (opp_t & toks):
+                continue                     # a different game entirely
             if got is None:
                 keys = {str(k).strip().lower() for k in probs}
                 if keys == {"yes", "no"} and team_t <= toks:
-                    for k, p in probs.items():
-                        if str(k).strip().lower() == "yes":
-                            got, rank = p, 1     # (B) team is the Yes
-                            break
+                    # (B) per-team market: PM never names the opponent,
+                    # so a one-word city can't be pinned to a sport -
+                    # only trust it when the name is distinctive or the
+                    # opponent happens to appear
+                    if len(team_t) < 2 and not (opp_t & toks):
+                        self_amb = True
+                    else:
+                        self_amb = False
+                    if not self_amb:
+                        for k, p in probs.items():
+                            if str(k).strip().lower() == "yes":
+                                got, rank = p, 1
+                                break
             if got is None:
                 continue
             if best is None or (rank, score) > (best[0], best[1]):

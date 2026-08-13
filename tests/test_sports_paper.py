@@ -427,3 +427,35 @@ def test_pm_index_pages_past_the_100_row_cap(tmp_path, monkeypatch):
     rows = b.fetch_pm_index()
     assert seen[:4] == [0, 100, 200, 300]      # pages by 100, not 500
     assert len(rows) == 3                      # stops on the empty page
+
+
+def test_anchor_must_be_the_same_game(tmp_path, monkeypatch):
+    # a CITY is not a team: "Atlanta" is the Braves, Falcons, Hawks,
+    # United and Dream. Without an opponent check a wrong-SPORT row
+    # anchors an MLB market and manufactures phantom edge - which is
+    # what the first live entry (ATL @67c vs a 0.805 "fair") looked
+    # like on audit.
+    b = _bot(tmp_path, monkeypatch)
+    wrong_sport = [{"q": "Atlanta United vs. Inter Miami",
+                    "toks": sorted(sp._tokens("Atlanta United vs. Inter Miami")),
+                    "probs": {"Atlanta United": 0.81, "Inter Miami": 0.19}}]
+    mk = {"team": "Atlanta", "title": "Arizona vs Atlanta Winner?"}
+    assert b.anchor_prob(mk, wrong_sport) is None      # different game
+    # the right game still anchors
+    right = [{"q": "Arizona at Atlanta",
+              "toks": sorted(sp._tokens("Arizona at Atlanta")),
+              "probs": {"Atlanta": 0.62, "Arizona": 0.38}}]
+    assert b.anchor_prob(mk, right) == 0.62
+    # and a one-word city can't ride a per-team Yes/No row alone
+    per_team = [{"q": "Will the Atlanta Dream win on 2026-08-14?",
+                 "toks": sorted(sp._tokens(
+                     "Will the Atlanta Dream win on 2026-08-14?")),
+                 "probs": {"Yes": 0.81, "No": 0.19}}]
+    assert b.anchor_prob(mk, per_team) is None
+    # a distinctive multi-word name still works on that shape
+    mk2 = {"team": "Kansas City", "title": "Kansas City vs Detroit Winner?"}
+    kc = [{"q": "Will the Kansas City Royals win on 2026-08-14?",
+           "toks": sorted(sp._tokens(
+               "Will the Kansas City Royals win on 2026-08-14?")),
+           "probs": {"Yes": 0.58, "No": 0.42}}]
+    assert b.anchor_prob(mk2, kc) == 0.58
