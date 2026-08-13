@@ -244,6 +244,7 @@ def test_scan_filters_on_game_start_not_close_time(tmp_path, monkeypatch):
     # pitch, so a 36h close-time filter selected games ALREADY PLAYED
     # (dead books, no live anchor) and skipped tonight's slate entirely.
     b = _bot(tmp_path, monkeypatch)
+    monkeypatch.setattr(b, "_series_list", lambda: ["KXMLBGAME"])
     import datetime as _dt
     now = _dt.datetime.now(_dt.timezone.utc)
     soon = now + _dt.timedelta(hours=5)
@@ -282,8 +283,9 @@ def test_scan_filters_on_game_start_not_close_time(tmp_path, monkeypatch):
     out = b.fetch_kalshi_sports()
     assert [m["ticker"] for m in out] == ["T-SOON"]      # pre-game only
     assert 4.0 < out[0]["hrs"] < 6.0                     # hours to first pitch
-    # and the API window now covers the full expiry horizon
-    assert seen["max_close_ts"] - seen["min_close_ts"] > 36 * 3600
+    # and discovery asks per series, not by close-time window
+    assert seen["series_ticker"] == "KXMLBGAME"
+    assert "max_close_ts" not in seen
 
 
 def test_city_names_match_franchise_anchors(tmp_path, monkeypatch):
@@ -299,3 +301,129 @@ def test_city_names_match_franchise_anchors(tmp_path, monkeypatch):
         probs={"Yes": 0.86, "No": 0.14}))
     assert b.place([_mk(title="Kansas City vs Los Angeles A Winner?",
                         team="Los Angeles A", bid=76, ask=78)]) == 1
+
+
+# ---- 8/13 third root cause: global sweep never reached tonight ----
+
+def test_discovery_is_per_series_with_pagination(tmp_path, monkeypatch):
+    # verified live: KXMLBGAME page one is all Aug 15-16 games while
+    # tonight is Aug 13. A global sweep runs out of pages before it
+    # reaches today; per-series result sets are small enough to finish.
+    b = _bot(tmp_path, monkeypatch)
+    monkeypatch.setattr(b, "_series_list", lambda: ["KXMLBGAME"])
+    import datetime as _dt
+    now = _dt.datetime.now(_dt.timezone.utc)
+    soon = now + _dt.timedelta(hours=4)
+    ev = "KXMLBGAME-%sBOSNYA" % (
+        soon.astimezone(_dt.timezone(_dt.timedelta(hours=-4)))
+        .strftime("%y%b%d%H%M").upper())
+    page1 = [{"ticker": "T-FAR", "event_ticker": "KXMLBGAME-99DEC012000AB",
+              "title": "A vs B Winner?", "yes_sub_title": "A",
+              "yes_bid_dollars": "0.50", "yes_ask_dollars": "0.52"}]
+    page2 = [{"ticker": "T-TONIGHT", "event_ticker": ev,
+              "title": "Boston vs New York Y Winner?",
+              "yes_sub_title": "Boston",
+              "yes_bid_dollars": "0.53", "yes_ask_dollars": "0.55"}]
+    calls = []
+
+    class _R:
+        def __init__(self, d):
+            self._d = d
+
+        def json(self):
+            return self._d
+
+    def _get(url, params=None, timeout=None):
+        calls.append(dict(params or {}))
+        if (params or {}).get("cursor") == "c1":
+            return _R({"markets": page2, "cursor": None})
+        return _R({"markets": page1, "cursor": "c1"})
+
+    monkeypatch.setattr(sp, "requests", type("M", (), {
+        "get": staticmethod(_get)}))
+    out = b.fetch_kalshi_sports()
+    # the cursor was followed, so tonight's game (page 2) is found
+    assert [m["ticker"] for m in out] == ["T-TONIGHT"]
+    assert calls[0]["series_ticker"] == "KXMLBGAME"
+    assert b.scan_n == 2                    # both winner rows scanned
+
+
+def test_series_list_survives_a_dead_series_endpoint(tmp_path, monkeypatch):
+    # the core leagues must keep working even if /series is unreachable
+    b = _bot(tmp_path, monkeypatch)
+
+    def _boom(*a, **k):
+        raise RuntimeError("no network")
+
+    monkeypatch.setattr(sp, "requests", type("M", (), {
+        "get": staticmethod(_boom)}))
+    got = b._series_list()
+    assert "KXMLBGAME" in got and len(got) == len(sp.CORE_SERIES)
+    # and the result is cached, not refetched on every scan
+    assert b._series_cache["rows"] == got
+
+
+def test_sharp_consensus_can_anchor_alone(tmp_path, monkeypatch):
+    # 8/13: Kalshi lists far more games than Polymarket prices. A
+    # devigged DK/FanDuel consensus is a legitimate anchor on its own -
+    # tagged anchors=1 so the go-live dataset can judge the cohort.
+    b = _bot(tmp_path, monkeypatch)
+    monkeypatch.setattr(b, "fetch_pm_index", lambda: [])
+    monkeypatch.setattr(b, "fetch_sharp_index", lambda: _pm(
+        question="Arizona at Atlanta",
+        probs={"Atlanta": 0.81, "Arizona": 0.19}))
+    assert b.place([_mk(title="Arizona vs Atlanta Winner?",
+                        team="Atlanta", bid=66, ask=67)]) == 1
+    pos = b.bets[next(iter(b.bets))]
+    assert pos["anchors"] == 1 and pos["fair"] == 0.81
+    assert b.miss.get("sharp_only") == 1
+    # both anchors present and disagreeing still vetoes
+    b2 = _bot(tmp_path, monkeypatch)
+    monkeypatch.setattr(b2, "fetch_pm_index", lambda: _pm(
+        question="Arizona at Atlanta", probs={"Atlanta": 0.60,
+                                              "Arizona": 0.40}))
+    monkeypatch.setattr(b2, "fetch_sharp_index", lambda: _pm(
+        question="Arizona at Atlanta", probs={"Atlanta": 0.81,
+                                              "Arizona": 0.19}))
+    assert b2.place([_mk(title="Arizona vs Atlanta Winner?",
+                         team="Atlanta", bid=66, ask=67)]) == 0
+    assert b2.miss.get("anchor_disagree") == 1
+    # neither anchor -> refused, as before
+    b3 = _bot(tmp_path, monkeypatch)
+    monkeypatch.setattr(b3, "fetch_pm_index", lambda: [])
+    monkeypatch.setattr(b3, "fetch_sharp_index", lambda: [])
+    assert b3.place([_mk(team="Atlanta", bid=66, ask=67)]) == 0
+    assert b3.miss.get("no_anchor") == 1
+
+
+def test_pm_index_pages_past_the_100_row_cap(tmp_path, monkeypatch):
+    # gamma caps a page at 100 whatever `limit` says: the old
+    # limit=500 x2 saw only the top 200 by volume (all esports/soccer)
+    # and never reached the MLB moneylines
+    b = _bot(tmp_path, monkeypatch)
+    seen = []
+
+    class _R:
+        def __init__(self, d):
+            self._d = d
+
+        def json(self):
+            return self._d
+
+    def _get(url, params=None, timeout=None):
+        off = (params or {}).get("offset", 0)
+        seen.append(off)
+        if off >= 300:
+            return _R([])
+        return _R([{
+            "question": f"Team{off} vs Other",
+            "sportsMarketType": "moneyline", "volume": "50000",
+            "outcomes": json.dumps(["Team%d" % off, "Other"]),
+            "outcomePrices": json.dumps(["0.7", "0.3"])}])
+
+    monkeypatch.setattr(sp, "requests", type("M", (), {
+        "get": staticmethod(_get)}))
+    b._pm_cache = {"ts": None, "rows": []}
+    rows = b.fetch_pm_index()
+    assert seen[:4] == [0, 100, 200, 300]      # pages by 100, not 500
+    assert len(rows) == 3                      # stops on the empty page

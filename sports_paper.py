@@ -52,6 +52,14 @@ MAX_OPEN = int(os.environ.get("SPORTS_MAX_OPEN", "10"))
 SELL_LO_C = int(os.environ.get("SPORTS_SELL_LO", "97"))
 SELL_HI_C = int(os.environ.get("SPORTS_SELL_HI", "99"))
 CLOSE_H = float(os.environ.get("SPORTS_CLOSE_H", "36"))
+# 8/13: per-series discovery. The core leagues are hardcoded so the book
+# works even if /series is unreachable; anything else Kalshi lists as a
+# Sports GAME/MATCH series is appended.
+CORE_SERIES = ("KXMLBGAME", "KXNFLGAME", "KXNBAGAME", "KXNHLGAME",
+               "KXWNBAGAME", "KXMLSGAME", "KXEPLGAME", "KXUCLGAME")
+_SERIES_RE = re.compile(r"(GAME|MATCH)$")
+SERIES_MAX = int(os.environ.get("SPORTS_MAX_SERIES", "24"))
+SERIES_PAGES = int(os.environ.get("SPORTS_SERIES_PAGES", "3"))
 GATE_N = int(os.environ.get("SPORTS_GATE_N", "200"))
 PM_GAMMA = os.environ.get("SPORTS_PM_GAMMA",
                           "https://gamma-api.polymarket.com")
@@ -59,6 +67,7 @@ PM_GAMMA = os.environ.get("SPORTS_PM_GAMMA",
 # an anchor if it is LIQUID and SANE. Thin Polymarket markets can show
 # stale prints that manufacture phantom edge.
 PM_MIN_VOL = float(os.environ.get("SPORTS_PM_MIN_VOL", "10000"))
+PM_PAGES = int(os.environ.get("SPORTS_PM_PAGES", "10"))
 # 8/12 DUAL-ANCHOR VETO (the sharp-desk standard): Polymarket AND the
 # devigged DraftKings/FanDuel consensus (SharpAPI free tier) must agree
 # within VETO_DIFF or the trade is refused. When the sharp feed has no
@@ -237,6 +246,9 @@ class SportsPaper:
                  # 8/12: anchor-index sizes on the tracker - an EMPTY pm
                  # index (this launch bug) is now one glance, not a
                  # session of funnel archaeology
+                 "scan_n": getattr(self, "scan_n", None),
+                 "series_n": len((getattr(self, "_series_cache", None)
+                                  or {}).get("rows") or []),
                  "pm_idx": len(self._pm_cache.get("rows") or []),
                  "sharp_idx": len(self._sharp_cache.get("rows") or []),
                  "summary": {
@@ -276,37 +288,66 @@ class SportsPaper:
         self.miss[why] = self.miss.get(why, 0) + 1
 
     # ---- data feeds (each overridable in tests) ----
-    def fetch_kalshi_sports(self):
-        """Open Kalshi sports WINNER markets closing within CLOSE_H, with
-        live quotes. Discovery: events pages filtered to Sports."""
-        # 8/12 FIX (Adam caught the empty book): /events pagination never
-        # reaches tonight's games - page one is full of 2043-dated
-        # futures. Sweep /markets by CLOSE-TIME WINDOW instead, which is
-        # exactly the recycling question: what settles soon?
-        rows, cursor = [], None
+    def _series_list(self):
+        """Kalshi sports GAME/MATCH series, cached 6h.
+
+        8/13 (third and final root cause): the global /markets sweep
+        cannot reach tonight's slate. Kalshi returns game markets in an
+        order that puts games 2-3 DAYS OUT on page one - widening the
+        close-time window to cover the ~3-day expiry horizon made the
+        result set so large that 8 pages of 1000 ran out before
+        reaching today. Verified live: KXMLBGAME page one is all
+        Aug 15-16 while tonight is Aug 13. Fetching PER SERIES makes
+        the result set small enough that pagination actually terminates
+        on the games we want."""
+        c = getattr(self, "_series_cache", None)
+        if c and c.get("ts"):
+            try:
+                age = (datetime.datetime.now()
+                       - datetime.datetime.fromisoformat(c["ts"])
+                       ).total_seconds()
+                if age < 21600:
+                    return c["rows"]
+            except Exception:
+                pass
+        tickers = list(CORE_SERIES)
         try:
-            import time as _t
-            nowts = int(_t.time())
-            for _ in range(8):
-                # 8/13 ROOT-CAUSE FIX (book had placed ZERO since
-                # launch): a Kalshi game market's close_time is NOT the
-                # game - it is the last possible expiry, ~3 DAYS after
-                # first pitch ("stays open until a winner is declared,
-                # within two days"). Filtering close_time to the next
-                # 36h therefore selected games that had ALREADY BEEN
-                # PLAYED and were waiting to expire - dead books, wide
-                # spreads, no live Polymarket anchor. Hence 286
-                # no_anchor + 433 spread and not one entry. Ask for the
-                # whole expiry horizon here; the real pre-game filter
-                # is on GAME START below.
-                params = {"status": "open", "limit": 1000,
-                          "min_close_ts": nowts,
-                          "max_close_ts": nowts + int(
-                              (CLOSE_H + 168.0) * 3600)}
+            cursor = None
+            for _ in range(4):
+                params = {"category": "Sports", "limit": 200}
                 if cursor:
                     params["cursor"] = cursor
-                d = requests.get(we.KALSHI + "/markets", params=params,
-                                 timeout=25).json()
+                d = requests.get(we.KALSHI + "/series", params=params,
+                                 timeout=20).json()
+                for ser in d.get("series") or []:
+                    tk = (ser.get("ticker") or "").upper()
+                    if _SERIES_RE.search(tk) and tk not in tickers:
+                        tickers.append(tk)
+                cursor = d.get("cursor")
+                if not cursor:
+                    break
+        except Exception:
+            pass                      # core list still works offline
+        tickers = tickers[:SERIES_MAX]
+        self._series_cache = {"ts": now(), "rows": tickers}
+        return tickers
+
+    def fetch_kalshi_sports(self):
+        """Open Kalshi game-WINNER markets starting within CLOSE_H, with
+        live quotes. Discovery is PER SERIES (see _series_list)."""
+        rows = []
+        for series in self._series_list():
+            cursor = None
+            for _ in range(SERIES_PAGES):
+                params = {"series_ticker": series, "status": "open",
+                          "limit": 1000}
+                if cursor:
+                    params["cursor"] = cursor
+                try:
+                    d = requests.get(we.KALSHI + "/markets", params=params,
+                                     timeout=25).json()
+                except Exception:
+                    break
                 for mk in d.get("markets") or []:
                     tk = mk.get("ticker") or ""
                     # GAME WINNERS ONLY: no parlays/multi-game products
@@ -327,8 +368,7 @@ class SportsPaper:
                 cursor = d.get("cursor")
                 if not cursor:
                     break
-        except Exception:
-            return []
+        self.scan_n = len(rows)
         out, nowdt = [], datetime.datetime.now(datetime.timezone.utc)
         for ev, mk in rows:
             # hrs = hours to FIRST PITCH, read from the event ticker
@@ -384,17 +424,26 @@ class SportsPaper:
             # blind through thousands of futures.
             t0 = datetime.datetime.utcnow()
             t1 = t0 + datetime.timedelta(hours=CLOSE_H)
-            for offset in (0, 500):
+            # 8/13: gamma caps a page at 100 REGARDLESS of limit, so the
+            # old limit=500 x2 saw only the top 200 markets by volume -
+            # all esports and soccer. Tonight's MLB moneylines sit well
+            # below that cut (verified: 34 moneyline rows in the top
+            # 200 vs 87 across 1000). Page through properly instead.
+            for offset in range(0, PM_PAGES * 100, 100):
                 d = requests.get(
                     PM_GAMMA + "/markets",
-                    params={"closed": "false", "limit": 500,
+                    params={"closed": "false", "limit": 100,
                             "offset": offset,
+                            # most liquid first: with a 100-row page cap
+                            # the ordering decides WHICH markets we see
                             "order": "volumeNum", "ascending": "false",
                             "end_date_min":
                                 t0.strftime("%Y-%m-%dT%H:%M:%SZ"),
                             "end_date_max":
                                 t1.strftime("%Y-%m-%dT%H:%M:%SZ")},
                     timeout=20).json()
+                if not (d if isinstance(d, list) else []):
+                    break
                 for m in (d if isinstance(d, list) else []):
                     if m.get("sportsMarketType") != "moneyline":
                         continue    # games only: no futures/spreads/props
@@ -669,24 +718,34 @@ class SportsPaper:
             if ask - bid > MAX_SPREAD:
                 self._miss_add("spread")
                 continue
-            fair = self.anchor_prob(mk, pm_rows)
-            if fair is None:
+            pm_fair = self.anchor_prob(mk, pm_rows)
+            # 8/13: the devigged DK/FanDuel consensus is a legitimate
+            # anchor in its own right, not merely a veto - Kalshi lists
+            # far more games than Polymarket prices, and a sharp book is
+            # if anything the better reference. PM-only and sharp-only
+            # entries are both tagged anchors=1 so the go-live dataset
+            # can judge the single-anchor cohort separately.
+            sh_fair = (self.anchor_prob(mk, sharp_rows)
+                       if sharp_rows else None)
+            if pm_fair is None and sh_fair is None:
                 self._miss_add("no_anchor")
                 continue
+            anchors = 1
+            if pm_fair is None:
+                fair = sh_fair
+                self._miss_add("sharp_only")
+            elif sh_fair is None:
+                fair = pm_fair
+            else:
+                if abs(sh_fair - pm_fair) > VETO_DIFF:
+                    self._miss_add("anchor_disagree")
+                    continue
+                fair = (pm_fair + sh_fair) / 2.0
+                anchors = 2
             if not (FAIR_MIN <= fair <= FAIR_MAX):
                 self._miss_add("anchor_insane")
                 continue        # a 65-90c ask against a <50% or >98%
                                 # anchor is a mismatch, not an edge
-            # 8/12 dual-anchor veto: the sharp consensus must agree
-            sh_fair = (self.anchor_prob(mk, sharp_rows)
-                       if sharp_rows else None)
-            anchors = 1
-            if sh_fair is not None:
-                if abs(sh_fair - fair) > VETO_DIFF:
-                    self._miss_add("anchor_disagree")
-                    continue
-                fair = (fair + sh_fair) / 2.0
-                anchors = 2
             fee = fee_cents(ask, SIZE, taker=True)
             edge_c = fair * 100 - ask - fee / SIZE
             if edge_c < EDGE_MIN_C:
