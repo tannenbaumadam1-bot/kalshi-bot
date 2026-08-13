@@ -371,7 +371,7 @@ def test_dynamic_caps_track_nav(tmp_path, monkeypatch):
     # 8/13 holding-time-scaled: 85% deployed when everything flattens
     # before close (60% if DRIFT_LIVE_FLATTEN is off)
     assert b.max_open_c == int(20000 * dl.OPEN_PCT)
-    assert b.max_day_loss_c == 2000             # 10%
+    assert b.max_day_loss_c == int(20000 * dl.HALT_PCT)   # 8/13: 15%
     # filled positions count toward NAV at cost
     b.bets = {"T1": dict(_lvl_bet(), count=10)}     # +$8.20 basis
     b._refresh_caps(b.balance_c())
@@ -380,7 +380,7 @@ def test_dynamic_caps_track_nav(tmp_path, monkeypatch):
     b.bets = {}
     b.dry_balance_c = 3000
     b._refresh_caps(b.balance_c())
-    assert b.max_bet_c == 200 and b.max_day_loss_c == 300
+    assert b.max_bet_c == 200 and b.max_day_loss_c == int(3000 * dl.HALT_PCT)
     b.dry_balance_c = 1000
     b._refresh_caps(b.balance_c())
     assert b.max_bet_c == 200 and b.max_day_loss_c == 200   # floors
@@ -1419,7 +1419,8 @@ def test_resume_lifts_halt_without_touching_the_ledger(tmp_path,
     assert b.halt_base_c == -3559            # fresh budget from here
     assert b.place(mkts=[_mk(bid=87, ask=89)]) == 1
     # the fresh budget still binds: another full daily loss re-halts
-    b.day_pnl_c = -3559 - 1416
+    # (place() recomputes max_day_loss_c from NAV, so read it back)
+    b.day_pnl_c = b.halt_base_c - b.max_day_loss_c
     assert b.place(mkts=[_mk(tk="KXHIGHNY-26JUL-T87", bid=87, ask=89)]) == 0
     assert b.halted is True
     b._roll_day()                            # same token: no second lift

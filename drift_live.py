@@ -105,7 +105,13 @@ FLATTEN_ON = os.environ.get("DRIFT_LIVE_FLATTEN", "1") == "1"
 # bankroll, not the edge, was the binding constraint on compounding.
 OPEN_PCT = float(os.environ.get("DRIFT_LIVE_OPEN_PCT",
                                 "0.85" if FLATTEN_ON else "0.60"))
-HALT_PCT = float(os.environ.get("DRIFT_LIVE_HALT_PCT", "0.10"))  # day loss
+# 8/13 (Adam): 10%% was set when positions rode into settlement. Now
+# that everything flattens before close, a day's loss is intraday drift
+# plus fees rather than a settlement tail - and at ~99%% utilization a
+# 10%% stop trips on noise, ending sessions that would have recovered.
+# 15%% gives the book room to work a full day; the manual resume
+# (unhalt.txt) remains for the exceptional case.
+HALT_PCT = float(os.environ.get("DRIFT_LIVE_HALT_PCT", "0.15"))  # day loss
 BET_FLOOR_C = 200    # a probe must always be placeable
 HALT_FLOOR_C = 200
 # Leonard's era began at arming (7/23 19:10 UTC). The settlements endpoint
