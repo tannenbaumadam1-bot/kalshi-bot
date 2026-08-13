@@ -11,10 +11,11 @@ TODAY = _dt.date.today().isoformat()
 
 
 def _mk(tk="KXHIGHNY-26JUL-T86", bid=82, ask=85, city="new york",
-        is_low=False, strike=87, kind="ge", cap=None, date=None, vol=100.0):
+        is_low=False, strike=87, kind="ge", cap=None, date=None, vol=100.0,
+        hrs=10.0):
     return {"ticker": tk, "city": city, "is_low": is_low, "strike": strike,
             "kind": kind, "cap": cap, "yes_bid": bid, "yes_ask": ask,
-            "date": date or TODAY, "hrs": 10.0, "title": "", "sub": "",
+            "date": date or TODAY, "hrs": hrs, "title": "", "sub": "",
             "bid_size": 50.0, "ask_size": 50.0, "vol": vol}
 
 
@@ -953,7 +954,7 @@ def test_reentry_after_lift_same_market(tmp_path, monkeypatch):
 
 def test_dip_defaults():
     assert dl.DIP_ON is True and dl.DIP_DISCOUNT_C == 4
-    assert dl.DIP_MAX_PCT == 0.15
+    assert dl.DIP_MAX_PCT == 0.25   # 8/13: inventory is the constraint
 
 
 def _mkq(tk="KXHIGHNY-26JUL-T86", bid=87, ask=89, **kw):
@@ -1047,11 +1048,11 @@ def test_dip_total_cap(tmp_path, monkeypatch):
     b = _bot(tmp_path, monkeypatch)
     b.dry_balance_c = 10000                 # NAV $100 -> dip cap $15
     ms = [_mkq(tk=f"KXHIGHNY-26JUL-D{i}", bid=87, ask=89, city=f"c{i}",
-               strike=70 + i) for i in range(6)]
+               strike=70 + i) for i in range(10)]
     b.place(mkts=ms)                        # entries + dips on the way out
     dip_cost = sum(d["entry"] * d["count"] for d in b.dips.values())
-    assert dip_cost <= 1500                 # <= 15% of NAV
-    assert len(b.dips) < 6                  # the cap refused the rest
+    assert dip_cost <= 2500                 # <= 25% of NAV (8/13)
+    assert len(b.dips) < 10                 # the cap refused the rest
 
 
 # ---- 8/12 over-refusal fixes: filled-only caps, trim, orphan hygiene ----
@@ -1115,6 +1116,7 @@ class _FakeOrphanClient:
     def __init__(self, rows):
         self.rows = rows
         self.canceled = []
+        self.created = []
 
     def get_resting_orders(self):
         return list(self.rows)
@@ -1125,6 +1127,10 @@ class _FakeOrphanClient:
     def cancel_order(self, oid):
         self.canceled.append(oid)
         return {}
+
+    def create_order(self, tk, **kw):
+        self.created.append(dict(kw, ticker=tk))
+        return {"order": {"order_id": f"o-{len(self.created)}"}}
 
 
 def test_dead_book_entry_cancels_surviving_legs(tmp_path, monkeypatch):
@@ -1292,7 +1298,7 @@ def test_stale_exchange_quotes_on_held_ticker_are_canceled(tmp_path,
     b.bets[other] = dict(_stale_order(tk=other, entry=85, count=5), fee=0)
     b.offers[tk] = {"legs": [{"oid": "L1", "px": 97, "count": 22},
                              {"oid": "L2", "px": 99, "count": 22}],
-                    "count": 44, "ots": ""}
+                    "count": 44, "rungs": [97, 99], "ots": ""}
     b.pending["p1"] = dict(_stale_order(tk=other), exec="maker")
     b.dips["KXLOWTMIA-26AUG12-B77.5"] = {"oid": "D1"}
     b.k_resting = [
@@ -1306,3 +1312,84 @@ def test_stale_exchange_quotes_on_held_ticker_are_canceled(tmp_path,
     b.quote_offers()
     assert sorted(b.client.canceled) == ["STALE1", "STALE2"]
     assert b.exec_stats.get("stale_quotes_canceled") == 2
+
+
+# ---- 8/13 velocity build: flatten, time-decay ladder, turns ----
+
+def test_flatten_sells_everything_near_close(tmp_path, monkeypatch):
+    # the compounding change: capital comes back the same session, and
+    # settlement risk (the only place this book ever lost big) is gone
+    b = _bot(tmp_path, monkeypatch)
+    tk = "KXHIGHNY-26JUL-T86"
+    b.bets[tk] = dict(_stale_order(tk=tk, entry=85, count=10), fee=5)
+    b.offers[tk] = {"legs": [{"oid": "L1", "px": 97, "count": 10}],
+                    "count": 10, "rungs": [97], "ots": ""}
+    b.client = _FakeOrphanClient([])
+    n = b.flatten([_mk(tk=tk, bid=91, ask=93, hrs=0.5)])
+    assert n == 1 and tk not in b.bets and tk not in b.offers
+    assert "L1" in b.client.canceled          # own quote pulled first
+    assert b.exec_stats.get("flattened") == 1
+    # sold at the bid: (91-85)*10 - entry fee - exit fee, booked as a turn
+    assert b.turns["n"] == 1 and b.turns["kinds"]["flatten"] == 1
+    assert b.history[-1]["exit_px"] == 91 and b.history[-1]["sold"] is True
+
+
+def test_flatten_leaves_positions_with_time_left(tmp_path, monkeypatch):
+    b = _bot(tmp_path, monkeypatch)
+    tk = "KXHIGHNY-26JUL-T86"
+    b.bets[tk] = dict(_stale_order(tk=tk, entry=85, count=10), fee=5)
+    b.client = _FakeOrphanClient([])
+    assert b.flatten([_mk(tk=tk, bid=91, ask=93, hrs=6.0)]) == 0
+    assert tk in b.bets
+    # and a market with no honest bid is left to settle
+    assert b.flatten([_mk(tk=tk, bid=0, ask=0, hrs=0.2)]) == 0
+
+
+def test_sell_ladder_walks_down_as_close_approaches(tmp_path, monkeypatch):
+    b = _bot(tmp_path, monkeypatch)
+    pos = dict(_stale_order(entry=85, count=10), fee=0)
+    assert [r[0] for r in b._sell_rungs(pos, 8.0)] == [98, 99]
+    assert [r[0] for r in b._sell_rungs(pos, 3.0)] == [97, 99]
+    assert [r[0] for r in b._sell_rungs(pos, 1.0)] == [96, 97]
+    # never at or below cost
+    assert b._sell_rungs(dict(pos, entry=99), 1.0) is None
+
+
+def test_decay_requote_replaces_stale_rungs(tmp_path, monkeypatch):
+    b = _bot(tmp_path, monkeypatch)
+    tk = "KXHIGHNY-26JUL-T86"
+    b.bets[tk] = dict(_stale_order(tk=tk, entry=85, count=10), fee=0)
+    b.client = _FakeOrphanClient([])
+    b.quote_offers([_mk(tk=tk, hrs=8.0)])
+    assert b.offers[tk]["rungs"] == [98, 99]
+    b.quote_offers([_mk(tk=tk, hrs=1.0)])     # time ran on: walk it down
+    assert b.offers[tk]["rungs"] == [96, 97]
+    assert b.exec_stats.get("decay_requotes") == 1
+    assert "L1" not in b.client.canceled       # (old legs were of-* ids)
+
+
+def test_dips_no_longer_need_context(tmp_path, monkeypatch):
+    # inventory is the constraint: any scanned favorite can be bid for
+    b = _bot(tmp_path, monkeypatch)
+    b.last_nav_c = 10000
+    b.quote_dips([_mkq(tk="KXHIGHNY-26JUL-NEW", bid=88, ask=90,
+                       city="nowhere", strike=71)], 10000, {})
+    assert "KXHIGHNY-26JUL-NEW" in b.dips
+    monkeypatch.setattr(dl, "DIP_CONTEXT_ONLY", True)
+    b2 = _bot(tmp_path, monkeypatch)
+    b2.last_nav_c = 10000
+    b2.quote_dips([_mkq(tk="KXHIGHNY-26JUL-NEW2", bid=88, ask=90,
+                        city="nowhere", strike=72)], 10000, {})
+    assert not b2.dips                         # old behaviour still available
+
+
+def test_turn_stats_published(tmp_path, monkeypatch):
+    b = _bot(tmp_path, monkeypatch)
+    b._turn_add(120, "lift")
+    b._turn_add(-20, "flatten")
+    st = b._turn_stats()
+    assert st["n"] == 2 and st["net"] == 1.0 and st["per_turn"] == 0.5
+    assert st["today_n"] == 2 and st["kinds"] == {"lift": 1, "flatten": 1}
+    b.save()
+    import json as _json
+    assert _json.load(open(dl.STATE))["summary"]["turns"]["n"] == 2

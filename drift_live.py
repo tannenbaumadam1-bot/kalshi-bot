@@ -252,7 +252,7 @@ DIP_ON = os.environ.get("DRIFT_LIVE_DIPS", "1") == "1"
 DIP_DISCOUNT_C = int(os.environ.get("DRIFT_LIVE_DIP_DISCOUNT", "4"))
 DIP_MIN_ROOM_C = 2      # bid must sit >= 2c under the market bid
 DIP_REFRESH_C = int(os.environ.get("DRIFT_LIVE_DIP_REFRESH", "3"))
-DIP_MAX_PCT = float(os.environ.get("DRIFT_LIVE_DIP_MAX_PCT", "0.15"))
+DIP_MAX_PCT = float(os.environ.get("DRIFT_LIVE_DIP_MAX_PCT", "0.25"))
 SELL_MIN_C = int(os.environ.get("DRIFT_LIVE_SELL_MIN", "97"))
 NICKEL_SELL_MIN_C = int(os.environ.get("DRIFT_LIVE_NICKEL_SELL_MIN", "98"))
 SELL_MARKUP_C = int(os.environ.get("DRIFT_LIVE_SELL_MARKUP", "6"))
@@ -264,6 +264,20 @@ SELL_CAP_C = 99
 # settlement so the pricing argument is settled by the ledger, not
 # opinion. DRIFT_LIVE_SELL_LADDER=0 restores single-rung quoting.
 SELL_LADDER_ON = os.environ.get("DRIFT_LIVE_SELL_LADDER", "1") == "1"
+# ---- 8/13 velocity build (Adam: make the offer side go parabolic) ----
+# The offer engine earns ~37c per lift; the binding constraint is TURNS,
+# not edge or capital. Capital parked until settlement can't turn, and
+# settlement is also where the fat left tail lives (8/12 Miami: -$38.72
+# in one night). So: flatten everything before close, walk the quote
+# down as time runs out, and buy inventory in more markets.
+FLATTEN_ON = os.environ.get("DRIFT_LIVE_FLATTEN", "1") == "1"
+FLATTEN_H = float(os.environ.get("DRIFT_LIVE_FLATTEN_H", "1.0"))
+# time-decay rungs: (hours_left_at_least, low_rung, high_rung)
+DECAY_ON = os.environ.get("DRIFT_LIVE_SELL_DECAY", "1") == "1"
+DECAY_LADDER = ((6.0, 98, 99), (2.0, 97, 99), (0.0, 96, 97))
+# dip lane: context-only was the training-wheels version - inventory is
+# the constraint, so any scanned favorite is now fair game
+DIP_CONTEXT_ONLY = os.environ.get("DRIFT_LIVE_DIP_CONTEXT", "0") == "1"
 CYCLE_S = int(os.environ.get("DRIFT_LIVE_CYCLE_S", "600"))
 # 8/6: crypto sub-cycle - the crypto book scans every CRYPTO_SUB_S
 # seconds inside the drift book's CYCLE_S nap (hourly markets are too
@@ -396,6 +410,11 @@ class DriftLive:
         # 8/11 standing bid side: resting dip-bids, tk -> {oid, px,
         # count, city, strike, kind, cap, hl, date, pside, ots}
         self.dips = {}
+        # 8/13 velocity ledger: a TURN = inventory acquired and resold
+        # (lifted quote, pre-close flatten, or stop exit). Round trips -
+        # not settlements - are what compound the offer engine, so they
+        # get their own metric: {n, net_c, days:{d:{n,net_c}}, kinds:{}}
+        self.turns = {}
         self.load()
 
     # ---- persistence ----
@@ -412,7 +431,7 @@ class DriftLive:
                           "k_sold",
                           "day_nav0_c", "autopsy", "miss", "exec_stats",
                           "k_cum", "pnl_days", "recv", "recv_bal_c",
-                          "offers", "sold_log", "dips",
+                          "offers", "sold_log", "dips", "turns",
                           "k_positions", "k_resting", "dry_balance_c"):
                     if k in d:
                         setattr(self, k, d[k])
@@ -822,6 +841,7 @@ class DriftLive:
              "sold_log": self.sold_log[-200:],
              "dips": self.dips,
              "offers": self.offers,
+             "turns": self.turns,
              "pnl_days": self.pnl_days,
              "k_exit_realized_c": self.k_exit_realized_c,
              "autopsy": self.autopsy[-200:],
@@ -871,6 +891,8 @@ class DriftLive:
                                               for r in self.sold_log), 2),
                             "min": SELL_MIN_C,
                             "nickel_min": NICKEL_SELL_MIN_C},
+                 # 8/13 velocity: round trips are the compounding unit
+                 "turns": self._turn_stats(),
                  "dips": {"on": DIP_ON,
                           "resting": len(self.dips),
                           "cost": round(sum(d.get("entry", 0)
@@ -1199,6 +1221,156 @@ class DriftLive:
         oc += sum(o["entry"] * o["count"] for o in self.pending.values())
         return oc
 
+    def _turn_add(self, net_c, kind):
+        """Book one completed round trip. Settlements are NOT turns -
+        only inventory we bought and resold (lift, flatten, stop)."""
+        t = self.turns if isinstance(self.turns, dict) else {}
+        d = datetime.date.today().isoformat()
+        t["n"] = int(t.get("n", 0)) + 1
+        t["net_c"] = round(float(t.get("net_c", 0)) + net_c, 1)
+        day = t.setdefault("days", {}).setdefault(d, {"n": 0, "net_c": 0.0})
+        day["n"] = int(day.get("n", 0)) + 1
+        day["net_c"] = round(float(day.get("net_c", 0)) + net_c, 1)
+        k = t.setdefault("kinds", {})
+        k[kind] = int(k.get(kind, 0)) + 1
+        # keep the day map bounded
+        if len(t.get("days", {})) > 60:
+            for old in sorted(t["days"])[:-60]:
+                t["days"].pop(old, None)
+        self.turns = t
+
+    def _turn_stats(self):
+        t = self.turns if isinstance(self.turns, dict) else {}
+        d = datetime.date.today().isoformat()
+        day = (t.get("days") or {}).get(d, {"n": 0, "net_c": 0.0})
+        n = int(t.get("n", 0))
+        dn = int(day.get("n", 0))
+        return {"n": n,
+                "net": round(float(t.get("net_c", 0)) / 100.0, 2),
+                "per_turn": (round(float(t.get("net_c", 0)) / n / 100.0, 3)
+                             if n else None),
+                "today_n": dn,
+                "today_net": round(float(day.get("net_c", 0)) / 100.0, 2),
+                "today_per_turn": (round(float(day.get("net_c", 0))
+                                         / dn / 100.0, 3) if dn else None),
+                "kinds": dict(t.get("kinds") or {}),
+                "flatten_h": FLATTEN_H if FLATTEN_ON else None}
+
+    def _sell_rungs(self, b, hrs):
+        """8/13 time-decay ladder: hold out for 99c early, walk the ask
+        down as the close approaches. A quote that never lifts earns
+        nothing and locks the capital for the whole session - the last
+        hour is worth more as a completed turn than as a proud price.
+        Never quotes at or below cost."""
+        floor = (NICKEL_SELL_MIN_C if b.get("trig") == "nickel"
+                 else SELL_MIN_C)
+        lo_t, hi_t = SELL_MIN_C, SELL_CAP_C
+        if DECAY_ON and hrs is not None:
+            for h_min, lo_d, hi_d in DECAY_LADDER:
+                if hrs >= h_min:
+                    lo_t, hi_t = lo_d, hi_d
+                    break
+        lo_t = max(lo_t, floor if hrs is None or hrs >= 2.0 else 1)
+        entry = int(b["entry"])
+        px = min(SELL_CAP_C, max(lo_t, entry + SELL_MARKUP_C))
+        hi = max(px, min(SELL_CAP_C, hi_t))
+        if px <= entry:
+            return None
+        n_all = int(float(b["count"]))
+        if SELL_LADDER_ON and n_all >= 2 and px < hi:
+            lo_n = n_all - n_all // 2
+            return [(px, lo_n), (hi, n_all - lo_n)]
+        return [(px, n_all)]
+
+    def flatten(self, mkts=None):
+        """8/13 pre-close flatten: sell EVERY open position at the bid
+        once its market is within FLATTEN_H of close.
+
+        This is the velocity build's centrepiece. Two things it buys:
+        (1) the capital comes back the same session instead of being
+        locked to settlement, so it can turn again - that is what
+        compounds; (2) it removes settlement risk entirely, which is the
+        only place this book has ever taken a big loss (8/12 Miami
+        -$38.72 overnight). A held favorite risks 88c to make 12c; a
+        flattened one banks the spread and goes back to work."""
+        if not FLATTEN_ON or not self.bets:
+            return 0
+        by_tk = {m["ticker"]: m for m in (mkts or [])}
+        done = 0
+        for tk, b in list(self.bets.items()):
+            mk = by_tk.get(tk)
+            if mk is None:
+                continue
+            try:
+                hrs = float(mk.get("hrs"))
+            except (TypeError, ValueError):
+                continue
+            if hrs > FLATTEN_H:
+                continue
+            yb, ya = mk.get("yes_bid"), mk.get("yes_ask")
+            bid = yb if b["side"] == "yes" else (100 - ya if ya else 0)
+            if not bid or bid <= 0:
+                continue            # no honest exit: settlement decides
+            cnt = int(float(b.get("count", 0)))
+            if cnt < 1:
+                continue
+            # cancel our resting quotes first - selling into our own
+            # book would double-sell the position
+            off = self.offers.get(tk)
+            if off and self.client is not None:
+                for leg in (off.get("legs") or []):
+                    try:
+                        self.client.cancel_order(leg.get("oid"))
+                    except Exception:
+                        pass
+            self.offers.pop(tk, None)
+            if self.client is not None:
+                try:
+                    self.client.create_order(tk, action="sell",
+                                             side=b["side"], count=cnt,
+                                             price_cents=int(bid))
+                except Exception:
+                    continue
+            fee = fee_cents(int(bid), cnt, taker=True)
+            net = (int(bid) - b["entry"]) * cnt - b.get("fee", 0) - fee
+            self._k_sold_add(tk, int(bid) * cnt)
+            self.realized_c += net
+            self._day_add(net)
+            self.day_pnl_c += net
+            self.fees_c += fee
+            self._turn_add(net, "flatten")
+            self.exec_stats["flattened"] = (
+                self.exec_stats.get("flattened", 0) + 1)
+            if self.client is None:
+                self.dry_balance_c += int(bid) * cnt - fee
+            self.history.append({"tk": tk, "city": b["city"],
+                                 "strike": b["strike"],
+                                 "kind": b.get("kind", "ge"),
+                                 "cap": b.get("cap"), "hl": b["hl"],
+                                 "side": b["side"], "trig": b.get("trig"),
+                                 "pside": round(b.get("pside", 0), 3),
+                                 "entry": b["entry"], "count": cnt,
+                                 "outcome": None, "exited": True,
+                                 "sold": True, "exit_px": int(bid),
+                                 "pnl": round(net / 100.0, 2),
+                                 "ts": now(), "ots": b.get("ots", ""),
+                                 "era": ERA})
+            self.history = self.history[-400:]
+            self.autopsy.append({"tk": tk, "side": b["side"],
+                                 "entry": b["entry"], "count": cnt,
+                                 "fee": b.get("fee", 0),
+                                 "exit_pnl": round(net / 100.0, 2),
+                                 "kind": "FLATTEN", "trig": b.get("trig"),
+                                 "ts": now()})
+            self.autopsy = self.autopsy[-200:]
+            self._log([now(), "FLATTEN", self.mode, b["city"], b["strike"],
+                       b["hl"], b["side"], round(b.get("pside", 0), 3),
+                       int(bid), cnt, "", round(net / 100.0, 2),
+                       b.get("oid", "")])
+            del self.bets[tk]
+            done += 1
+        return done
+
     def _conc_cost_c(self, city, date):
         """FILLED city/date cost in cents: the MAX of our book and
         Kalshi's own position feed. 8/12 Miami lesson ($43 = 33% of NAV
@@ -1474,7 +1646,7 @@ class DriftLive:
             self._check_dips(resting_ids, fills_by_oid)
 
     # ---- 8/10 two-sided book: the OFFER side --------------------------
-    def quote_offers(self):
+    def quote_offers(self, mkts=None):
         """Rest a premium maker SELL against every held position. The
         entries (taker-first) are the bid side; this completes the book.
         A lifted offer = realized profit above entry AND same-day capital
@@ -1490,12 +1662,28 @@ class DriftLive:
                                              "count": off.get("count")}],
                                    "count": off.get("count"),
                                    "ots": off.get("ots", now())}
+        hrs_by_tk = {m["ticker"]: m.get("hrs") for m in (mkts or [])}
         # cleanup/resize pass: settled positions drop their quotes;
-        # resized positions (partial sell, pyramid add) requote fresh
+        # resized positions (partial sell, pyramid add) requote fresh,
+        # and 8/13 a quote whose TIME-DECAY target has moved is
+        # re-hung at the new rungs (a stale 99c on a market closing in
+        # an hour is just a locked position)
         for tk, off in list(self.offers.items()):
             b = self.bets.get(tk)
             if (b is not None and int(float(b.get("count", 0)))
                     == int(off.get("count", 0))):
+                want = self._sell_rungs(b, hrs_by_tk.get(tk))
+                if want is None or [r[0] for r in want] == off.get("rungs"):
+                    continue
+                if self.client is not None:
+                    for leg in (off.get("legs") or []):
+                        try:
+                            self.client.cancel_order(leg.get("oid"))
+                        except Exception:
+                            pass
+                del self.offers[tk]
+                self.exec_stats["decay_requotes"] = (
+                    self.exec_stats.get("decay_requotes", 0) + 1)
                 continue
             if self.client is not None:
                 for leg in off.get("legs") or []:
@@ -1541,20 +1729,10 @@ class DriftLive:
             # hold to settlement
             if tk in self.offers or int(float(b.get("count", 0))) < 1:
                 continue
-            floor = (NICKEL_SELL_MIN_C if b.get("trig") == "nickel"
-                     else SELL_MIN_C)
-            px = min(SELL_CAP_C, max(floor, int(b["entry"]) + SELL_MARKUP_C))
-            if px <= int(b["entry"]):
+            rungs = self._sell_rungs(b, hrs_by_tk.get(tk))
+            if not rungs:
                 continue        # never quote at or below cost
             n_all = int(float(b["count"]))
-            # 8/11 ladder: half at the low rung, half at 99 - unless the
-            # low rung already IS 99, the position is tiny, or laddering
-            # is off
-            if SELL_LADDER_ON and n_all >= 2 and px < SELL_CAP_C:
-                lo_n = n_all - n_all // 2
-                rungs = [(px, lo_n), (SELL_CAP_C, n_all - lo_n)]
-            else:
-                rungs = [(px, n_all)]
             legs = []
             for r_px, r_n in rungs:
                 oid = f"of-{self.placed + 1}"
@@ -1579,6 +1757,7 @@ class DriftLive:
                            "", "", oid])
             if legs:
                 self.offers[tk] = {"legs": legs, "count": n_all,
+                                   "rungs": [r[0] for r in rungs],
                                    "ots": now()}
 
     def _check_offers(self, resting_ids, fills_by_oid):
@@ -1654,6 +1833,7 @@ class DriftLive:
             self.exec_stats.get("offers_sold", 0) + 1)
         self.exec_stats["offers_sold_net_c"] = round(
             self.exec_stats.get("offers_sold_net_c", 0) + net, 1)
+        self._turn_add(net, "lift")       # 8/13: a lift IS a round trip
         self._k_sold_add(tk, px * sold)
         # 8/11 sold-vs-settled autopsy: every sale is graded against the
         # eventual settlement (sold_check), so "were we selling too
@@ -2266,8 +2446,12 @@ class DriftLive:
             tk = mk["ticker"]
             if tk in self.dips or tk in pend_tks:
                 continue
-            if tk not in self.bets and tk not in (self.k_sold or {}):
-                continue                    # no context: not our market
+            # 8/13: context-only was the training-wheels rule. Cheap
+            # inventory is what feeds the offer engine, so every scanned
+            # favorite is fair game now (caps still bound everything).
+            if DIP_CONTEXT_ONLY and tk not in self.bets and tk not in (
+                    self.k_sold or {}):
+                continue
             sq = side_quotes(mk)
             if not sq:
                 continue
@@ -2495,8 +2679,16 @@ class DriftLive:
         self.miss_check()            # grade unfilled cancels vs settlement
         self.sold_check()            # grade lifted offers vs settlement
         self.stop_check()
-        self.place()
-        self.quote_offers()          # 8/10: the offer side of the book
+        # 8/13 velocity build: one market scan feeds entries, the
+        # pre-close flatten and the time-decay ladder. Flatten runs
+        # BEFORE quoting so a position on its way out isn't re-hung.
+        try:
+            mkts = we.find_temp_markets(max_days=1)
+        except Exception:
+            mkts = None
+        self.place(mkts)
+        self.flatten(mkts)
+        self.quote_offers(mkts)      # 8/10: the offer side of the book
         try:
             bal = self.balance_c()
         except Exception:
