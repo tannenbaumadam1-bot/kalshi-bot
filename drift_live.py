@@ -95,7 +95,16 @@ BET_PCT_BOOST = float(os.environ.get("DRIFT_LIVE_BET_PCT_BOOST", "0.06"))
 # rate the step-down was days away; the machine keeps its aggression
 # while the caps (city/slate/open/halt) keep the tail bounded.
 BOOST_NAV_C = int(os.environ.get("DRIFT_LIVE_BOOST_NAV_C", "50000"))
-OPEN_PCT = float(os.environ.get("DRIFT_LIVE_OPEN_PCT", "0.60"))  # exposure
+# 8/13 pre-close flatten (defined here because the risk budget keys off
+# it): inventory that never reaches settlement carries a different risk
+# shape from inventory held overnight, so it earns a bigger allowance.
+FLATTEN_ON = os.environ.get("DRIFT_LIVE_FLATTEN", "1") == "1"
+# HOLDING-TIME-SCALED RISK: 85%% of NAV may be deployed when everything
+# is flattened before close (the tail that killed 8/12 can't happen),
+# 60%% when positions ride into settlement. Utilization was ~30%% - the
+# bankroll, not the edge, was the binding constraint on compounding.
+OPEN_PCT = float(os.environ.get("DRIFT_LIVE_OPEN_PCT",
+                                "0.85" if FLATTEN_ON else "0.60"))
 HALT_PCT = float(os.environ.get("DRIFT_LIVE_HALT_PCT", "0.10"))  # day loss
 BET_FLOOR_C = 200    # a probe must always be placeable
 HALT_FLOOR_C = 200
@@ -233,7 +242,8 @@ MIN_CONTRACTS = int(os.environ.get("DRIFT_LIVE_MIN_CONTRACTS", "5"))
 #   per-SLATE: open+pending cost per settlement date <= SLATE_CAP_PCT x NAV
 # Existing positions are never touched; caps only gate NEW risk.
 # Pyramid adds are exempt (already capped at 2 per position).
-CITY_CAP_PCT = float(os.environ.get("DRIFT_LIVE_CITY_CAP_PCT", "0.10"))
+CITY_CAP_PCT = float(os.environ.get("DRIFT_LIVE_CITY_CAP_PCT",
+                                    "0.15" if FLATTEN_ON else "0.10"))
 SLATE_CAP_PCT = float(os.environ.get("DRIFT_LIVE_SLATE_CAP_PCT", "0.40"))
 # --- 8/11 EARNED SIZING (Adam-approved): buckets the ledger has PROVEN
 # (half-Kelly lanes) size to PROVEN_BET_PCT of NAV; everything else
@@ -252,7 +262,10 @@ QUOTE_ON = os.environ.get("DRIFT_LIVE_QUOTES", "1") == "1"
 # below the 80c floor where entries measurably lose; city/slate/open
 # caps all apply at placement.
 DIP_ON = os.environ.get("DRIFT_LIVE_DIPS", "1") == "1"
-DIP_DISCOUNT_C = int(os.environ.get("DRIFT_LIVE_DIP_DISCOUNT", "4"))
+# 8/13: the miss ledger says 22 of 23 unfilled orders would have won
+# ($13.69 of lost edge vs $1.10 recovered) - at 30%% utilization a
+# tighter bid is the cheapest turn we can buy
+DIP_DISCOUNT_C = int(os.environ.get("DRIFT_LIVE_DIP_DISCOUNT", "2"))
 DIP_MIN_ROOM_C = 2      # bid must sit >= 2c under the market bid
 DIP_REFRESH_C = int(os.environ.get("DRIFT_LIVE_DIP_REFRESH", "3"))
 DIP_MAX_PCT = float(os.environ.get("DRIFT_LIVE_DIP_MAX_PCT", "0.25"))
@@ -273,7 +286,6 @@ SELL_LADDER_ON = os.environ.get("DRIFT_LIVE_SELL_LADDER", "1") == "1"
 # settlement is also where the fat left tail lives (8/12 Miami: -$38.72
 # in one night). So: flatten everything before close, walk the quote
 # down as time runs out, and buy inventory in more markets.
-FLATTEN_ON = os.environ.get("DRIFT_LIVE_FLATTEN", "1") == "1"
 FLATTEN_H = float(os.environ.get("DRIFT_LIVE_FLATTEN_H", "1.0"))
 # time-decay rungs: (hours_left_at_least, low_rung, high_rung)
 DECAY_ON = os.environ.get("DRIFT_LIVE_SELL_DECAY", "1") == "1"
@@ -282,6 +294,21 @@ DECAY_LADDER = ((6.0, 98, 99), (2.0, 97, 99), (0.0, 96, 97))
 # the constraint, so any scanned favorite is now fair game
 DIP_CONTEXT_ONLY = os.environ.get("DRIFT_LIVE_DIP_CONTEXT", "0") == "1"
 CYCLE_S = int(os.environ.get("DRIFT_LIVE_CYCLE_S", "600"))
+# 8/13 velocity: during US trading hours the book re-scans every
+# ACTIVE_CYCLE_S instead of the full nap - more requotes, more lifts,
+# faster reaction. 180s keeps the 45-page event sweep well inside
+# Kalshi's rate limits (~15 calls/min).
+ACTIVE_CYCLE_S = int(os.environ.get("DRIFT_LIVE_ACTIVE_CYCLE_S", "180"))
+ACTIVE_UTC_FROM = int(os.environ.get("DRIFT_LIVE_ACTIVE_FROM", "11"))
+ACTIVE_UTC_TO = int(os.environ.get("DRIFT_LIVE_ACTIVE_TO", "24"))
+
+
+def _cycle_s():
+    """Seconds to nap before the next drift cycle."""
+    h = datetime.datetime.now(datetime.timezone.utc).hour
+    if ACTIVE_UTC_FROM <= h < ACTIVE_UTC_TO:
+        return min(ACTIVE_CYCLE_S, CYCLE_S)
+    return CYCLE_S
 # 8/6: crypto sub-cycle - the crypto book scans every CRYPTO_SUB_S
 # seconds inside the drift book's CYCLE_S nap (hourly markets are too
 # short-lived for a 10-minute look interval).
@@ -899,8 +926,11 @@ class DriftLive:
                                               for r in self.sold_log), 2),
                             "min": SELL_MIN_C,
                             "nickel_min": NICKEL_SELL_MIN_C},
-                 # 8/13 velocity: round trips are the compounding unit
+                 # 8/13 velocity: round trips are the compounding unit,
+                 # and utilization says how much of the bankroll is
+                 # actually working (it was ~30%% - the real ceiling)
                  "turns": self._turn_stats(),
+                 "util": self._util_stats(),
                  "dips": {"on": DIP_ON,
                           "resting": len(self.dips),
                           "cost": round(sum(d.get("entry", 0)
@@ -1308,6 +1338,24 @@ class DriftLive:
             for old in sorted(t["days"])[:-60]:
                 t["days"].pop(old, None)
         self.turns = t
+
+    def _util_stats(self):
+        """How much of the risk budget is actually deployed. Growth =
+        edge/turn x turns/day x UTILIZATION, and the third term was the
+        one nobody could see."""
+        dep = self.open_cost_c()
+        dip = sum(d.get("entry", 0) * d.get("count", 0)
+                  for d in self.dips.values())
+        cap = max(1, self.max_open_c)
+        return {"deployed": round(dep / 100.0, 2),
+                "dips": round(dip / 100.0, 2),
+                "cap": round(self.max_open_c / 100.0, 2),
+                "pct": round(dep / cap, 3),
+                "pct_with_dips": round((dep + dip) / cap, 3),
+                "positions": len(self.bets),
+                "resting": len(self.pending),
+                "flatten_h": FLATTEN_H if FLATTEN_ON else None,
+                "cycle_s": _cycle_s()}
 
     def _turn_stats(self):
         t = self.turns if isinstance(self.turns, dict) else {}
@@ -2848,16 +2896,16 @@ def main():
         # 8/6: hourly crypto events live only ~60 min, so the crypto book
         # re-scans every CRYPTO_SUB_S during the drift book's 10-min nap
         # (direct series fetch = ~12 cheap calls, not the global sweep).
-        slept = 0
-        while slept < CYCLE_S:
-            nap = min(CRYPTO_SUB_S, CYCLE_S - slept)
+        slept, cyc = 0, _cycle_s()
+        while slept < cyc:
+            nap = min(CRYPTO_SUB_S, cyc - slept)
             time.sleep(nap)
             slept += nap
             if _code_changed():
                 print(f"[{now()}] new build on disk - restarting "
                       f"(systemd revives)")
                 return 0
-            if cl is not None and slept < CYCLE_S:
+            if cl is not None and slept < cyc:
                 try:
                     cl.step()
                 except Exception as e:

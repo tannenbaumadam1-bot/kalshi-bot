@@ -126,12 +126,12 @@ def test_weather_caps_use_alloc_and_peer(tmp_path, monkeypatch):
     # NAV, which still counts the winding-down crypto positions' cost
     assert dl.WX_ALLOC == 1.0
     assert b.max_bet_c == 600                         # 6% boost of $100
-    assert b.max_open_c == 6000                       # 60% of $100
+    assert b.max_open_c == int(10000 * dl.OPEN_PCT)   # 8/13: 85% w/ flatten
     assert b.max_day_loss_c == 1000                   # 10% of $100
     # the 50/50 era math still holds under the env rollback
     monkeypatch.setattr(dl, "WX_ALLOC", 0.5)
     b._refresh_caps(b.balance_c())
-    assert b.max_bet_c == 300 and b.max_open_c == 3000
+    assert b.max_bet_c == 300 and b.max_open_c == int(5000 * dl.OPEN_PCT)
 
 def test_kelly_ladder_compounds_on_evidence(tmp_path, monkeypatch):
     # gate lowered 100 -> 25 on 8/4 (Adam override at 34 settled 33W/1L);

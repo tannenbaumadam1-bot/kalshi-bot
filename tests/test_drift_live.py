@@ -368,12 +368,14 @@ def test_dynamic_caps_track_nav(tmp_path, monkeypatch):
     b.dry_balance_c = 20000                     # NAV $200, nothing filled
     b._refresh_caps(b.balance_c())
     assert b.max_bet_c == 1200                  # 6% boost (NAV < $300)
-    assert b.max_open_c == 12000                # 60%
+    # 8/13 holding-time-scaled: 85% deployed when everything flattens
+    # before close (60% if DRIFT_LIVE_FLATTEN is off)
+    assert b.max_open_c == int(20000 * dl.OPEN_PCT)
     assert b.max_day_loss_c == 2000             # 10%
     # filled positions count toward NAV at cost
     b.bets = {"T1": dict(_lvl_bet(), count=10)}     # +$8.20 basis
     b._refresh_caps(b.balance_c())
-    assert b.max_open_c == int(20820 * 0.60)
+    assert b.max_open_c == int(20820 * dl.OPEN_PCT)
     # drawdown shrinks caps; floors keep probes viable
     b.bets = {}
     b.dry_balance_c = 3000
@@ -854,15 +856,19 @@ def test_k_truth_v2_folds_sale_proceeds(tmp_path, monkeypatch):
 
 def test_city_cap_blocks_concentration(tmp_path, monkeypatch):
     # two strikes on one thermometer was the autopsy's #2 risk: the
-    # second same-city entry that would breach 10% of NAV is refused
+    # same-city entry that would breach the city cap is refused
+    # (8/13: cap is 15% of NAV while the pre-close flatten is on)
     b = _bot(tmp_path, monkeypatch)
-    b.dry_balance_c = 10000                      # NAV $100 -> city cap $10
+    b.dry_balance_c = 10000                      # NAV $100 -> city cap $15
     # low + high on one city pass the one-opinion key but share the cap
     assert b.place(mkts=[_mk(tk="KXLOWTCHI-26AUG11-B64.5", bid=87, ask=89,
                              city="chicago", strike=64,
                              is_low=True)]) == 1                 # ~$4.45
     assert b.place(mkts=[_mk(tk="KXHIGHCHI-26AUG11-B82.5", bid=87, ask=89,
                              city="chicago", strike=82)]) == 1   # ~$8.90 tot
+    assert b.place(mkts=[_mk(tk="KXLOWTCHI-26AUG11-B70.5", bid=87, ask=89,
+                             city="chicago", strike=70, is_low=True,
+                             date="2099-01-01")]) == 1           # ~$13.35
     assert b.place(mkts=[_mk(tk="KXLOWTCHI-26AUG12-B66.5", bid=87, ask=89,
                              city="chicago", strike=66, is_low=True,
                              date="2099-01-02")]) == 0           # breach
@@ -953,7 +959,7 @@ def test_reentry_after_lift_same_market(tmp_path, monkeypatch):
 # ---- 8/11 standing bid side ----
 
 def test_dip_defaults():
-    assert dl.DIP_ON is True and dl.DIP_DISCOUNT_C == 4
+    assert dl.DIP_ON is True and dl.DIP_DISCOUNT_C == 2   # 8/13: buy fills
     assert dl.DIP_MAX_PCT == 0.25   # 8/13: inventory is the constraint
 
 
@@ -968,7 +974,7 @@ def test_dip_bids_rest_on_context_markets(tmp_path, monkeypatch):
     tk = next(iter(b.bets))
     # place() already quoted the dip on the way out (held context)
     d = b.dips[tk]
-    assert d["px"] == 83 and d["count"] == 5 and d["side"] == "yes"
+    assert d["px"] == 85 and d["count"] == 5 and d["side"] == "yes"
     # no context, no dip: a market that never triggered an entry
     b.place(mkts=[_mkq(tk="KXHIGHNY-26JUL-X1", bid=70, ask=74,
                        city="elsewhere")])  # below the level trigger
@@ -983,7 +989,7 @@ def test_dip_bids_rest_on_context_markets(tmp_path, monkeypatch):
     b2._check_offers(set(), {legs[0]["oid"]: 3, legs[1]["oid"]: 2})
     assert tk2 not in b2.bets and tk2 in b2.k_sold
     b2.quote_dips([mkt], b2.dry_balance_c, b2._bucket_stats())
-    assert tk2 in b2.dips                   # rebuy bid resting at 83
+    assert tk2 in b2.dips                   # rebuy bid resting at 85
 
 
 def test_dip_floor_and_room(tmp_path, monkeypatch):
@@ -1006,7 +1012,7 @@ def test_dip_fill_merges_and_creates(tmp_path, monkeypatch):
     tk = next(iter(b.bets))
     n0, e0 = b.bets[tk]["count"], b.bets[tk]["entry"]
     oid = b.dips[tk]["oid"]
-    b._check_dips(set(), {oid: 5})          # wobble fills us at 83
+    b._check_dips(set(), {oid: 5})          # wobble fills us at 85
     assert b.bets[tk]["count"] == n0 + 5
     assert b.bets[tk]["entry"] < e0         # average cheapened
     assert b.exec_stats["dip_fills"] == 1
@@ -1021,7 +1027,7 @@ def test_dip_fill_merges_and_creates(tmp_path, monkeypatch):
     b2.quote_dips([_mkq()], b2.dry_balance_c, b2._bucket_stats())
     oid2 = b2.dips[tk2]["oid"]
     b2._check_dips(set(), {oid2: 5})
-    assert b2.bets[tk2]["trig"] == "dip" and b2.bets[tk2]["entry"] == 83
+    assert b2.bets[tk2]["trig"] == "dip" and b2.bets[tk2]["entry"] == 85
     # ...and the offer engine retails the dip inventory
     b2.quote_offers()
     assert tk2 in b2.offers
@@ -1029,17 +1035,17 @@ def test_dip_fill_merges_and_creates(tmp_path, monkeypatch):
 
 def test_dip_refresh_follows_market(tmp_path, monkeypatch):
     b = _bot(tmp_path, monkeypatch)
-    b.place(mkts=[_mkq()])                  # dip at 83 (bid 87)
+    b.place(mkts=[_mkq()])                  # dip at 85 (bid 87)
     tk = next(iter(b.bets))
-    assert b.dips[tk]["px"] == 83
-    # market runs up 4c: target 87, drift >= refresh threshold -> requote
+    assert b.dips[tk]["px"] == 85
+    # market runs up 4c: target 89, drift >= refresh threshold -> requote
     b.quote_dips([_mkq(bid=91, ask=93)], b.dry_balance_c,
                  b._bucket_stats())
-    assert b.dips[tk]["px"] == 87
+    assert b.dips[tk]["px"] == 89
     # small wiggle (2c): keep resting, no churn
     b.quote_dips([_mkq(bid=93, ask=95)], b.dry_balance_c,
                  b._bucket_stats())
-    assert b.dips[tk]["px"] == 87
+    assert b.dips[tk]["px"] == 89
 
 
 def test_dip_total_cap(tmp_path, monkeypatch):
@@ -1188,13 +1194,13 @@ def test_city_cap_sees_unbooked_exchange_position(tmp_path, monkeypatch):
     b = _bot(tmp_path, monkeypatch)
     b.dry_balance_c = 10000                    # NAV $100 -> city cap $10
     b.k_positions = [{"ticker": "KXLOWTMIA-26AUG12-B79.5", "side": "no",
-                      "count": 11, "entry": 88, "city": "miami",
+                      "count": 18, "entry": 88, "city": "miami",
                       "strike": 79, "kind": "band", "cap": 80, "hl": "lo",
-                      "date": TODAY}]           # $9.68 the book can't see
+                      "date": TODAY}]          # $15.84 the book can't see
     assert b.place(mkts=[_mk(tk="KXLOWTMIA-26AUG12-B75.5", bid=87, ask=89,
                              city="miami", strike=75, is_low=True)]) == 0
     assert b.exec_stats.get("city_capped") == 1
-    assert b.cap_refuse[-1]["city_c"] == 11 * 88
+    assert b.cap_refuse[-1]["city_c"] == 18 * 88
     # a settled leftover row must NOT block (positions API lags settles)
     b2 = _bot(tmp_path, monkeypatch)
     b2.dry_balance_c = 10000
@@ -1472,3 +1478,60 @@ def test_gate_counts_completed_turns(tmp_path, monkeypatch):
     b.history = sold + [_settled(0.01, outcome=0, pside=0.95, i=i)
                         for i in range(200, 210)]
     assert b._gate()[0] == "probe"
+
+
+# ---- 8/13 throughput package: utilization, budget, fills, cycle ----
+
+def test_utilization_published(tmp_path, monkeypatch):
+    # growth = edge/turn x turns/day x UTILIZATION, and the third term
+    # was invisible (~30% of the risk budget was actually working)
+    b = _bot(tmp_path, monkeypatch)
+    b.max_open_c = 10000
+    b.bets = {"T1": dict(_stale_order(entry=85, count=10), fee=0)}
+    b.dips = {"T2": {"entry": 80, "count": 5}}
+    u = b._util_stats()
+    assert u["deployed"] == 8.5 and u["cap"] == 100.0
+    assert u["pct"] == 0.085 and u["pct_with_dips"] == 0.125
+    assert u["positions"] == 1 and u["cycle_s"] in (dl.ACTIVE_CYCLE_S,
+                                                    dl.CYCLE_S)
+    b.save()
+    import json as _json
+    st = _json.load(open(dl.STATE))
+    assert st["summary"]["util"]["cap"] == 100.0
+
+
+def test_holding_time_scaled_budget():
+    # inventory that never reaches settlement earns a bigger allowance;
+    # turning the flatten off must restore the conservative budget
+    assert dl.FLATTEN_ON is True
+    assert dl.OPEN_PCT == 0.85 and dl.CITY_CAP_PCT == 0.15
+    import importlib
+    import os as _os
+    _os.environ["DRIFT_LIVE_FLATTEN"] = "0"
+    try:
+        m = importlib.reload(dl)
+        assert m.FLATTEN_ON is False
+        assert m.OPEN_PCT == 0.60 and m.CITY_CAP_PCT == 0.10
+    finally:
+        _os.environ.pop("DRIFT_LIVE_FLATTEN", None)
+        importlib.reload(dl)
+
+
+def test_active_hours_cycle_is_faster(monkeypatch):
+    import datetime as _d
+
+    class _FakeDT(_d.datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return cls(2026, 8, 13, 15, 0, tzinfo=tz)
+
+    monkeypatch.setattr(dl.datetime, "datetime", _FakeDT)
+    assert dl._cycle_s() == dl.ACTIVE_CYCLE_S == 180
+
+    class _FakeNight(_d.datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return cls(2026, 8, 13, 3, 0, tzinfo=tz)
+
+    monkeypatch.setattr(dl.datetime, "datetime", _FakeNight)
+    assert dl._cycle_s() == dl.CYCLE_S == 600
