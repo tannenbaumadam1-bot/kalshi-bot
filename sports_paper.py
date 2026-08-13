@@ -87,6 +87,89 @@ def _tokens(s):
     return set(_WORD.findall((s or "").lower()))
 
 
+_EV_TIME = re.compile(r"-(\d{2})([A-Z]{3})(\d{2})(\d{4})")
+_MONTHS = {"JAN": 1, "FEB": 2, "MAR": 3, "APR": 4, "MAY": 5, "JUN": 6,
+           "JUL": 7, "AUG": 8, "SEP": 9, "OCT": 10, "NOV": 11, "DEC": 12}
+
+
+def _game_start(ev_tk):
+    """First pitch/kickoff from the event ticker, UTC. Kalshi encodes it
+    as YYMMMDDHHMM in Eastern time: KXMLBGAME-26AUG152138KCLAA."""
+    m = _EV_TIME.search(ev_tk or "")
+    if not m:
+        return None
+    yy, mon, dd, hhmm = m.groups()
+    if mon not in _MONTHS:
+        return None
+    try:
+        naive = datetime.datetime(2000 + int(yy), _MONTHS[mon], int(dd),
+                                  int(hhmm[:2]), int(hhmm[2:]))
+    except ValueError:
+        return None
+    try:
+        from zoneinfo import ZoneInfo
+        return naive.replace(
+            tzinfo=ZoneInfo("America/New_York")).astimezone(
+                datetime.timezone.utc)
+    except Exception:
+        # no tz database: Eastern is UTC-4 in season, -5 in winter
+        off = 4 if 3 <= naive.month <= 11 else 5
+        return naive.replace(tzinfo=datetime.timezone(
+            datetime.timedelta(hours=-off))).astimezone(
+                datetime.timezone.utc)
+
+
+# 8/13: Kalshi names the CITY ("Kansas City", "Boston", "Texas");
+# Polymarket names the FRANCHISE ("Kansas City Royals", "Boston Red
+# Sox"). City tokens are a subset of PM's name, so most match straight
+# through - but Kalshi disambiguates same-city clubs with a trailing
+# initial ("Los Angeles A" = Angels, "Chicago W" = White Sox) and uses
+# "A's", none of which appear in PM's wording. Those need the map.
+TEAM_ALIAS = {
+    "a s": {"athletics"},
+    "los angeles a": {"angels"},
+    "los angeles d": {"dodgers"},
+    "new york y": {"yankees"},
+    "new york m": {"mets"},
+    "chicago w": {"white", "sox"},
+    "chicago c": {"cubs"},
+    "st louis": {"cardinals"},
+    "tampa bay": {"rays"},
+}
+
+
+def _alias_tokens(team):
+    """Kalshi team string -> tokens we can expect inside a Polymarket
+    question. Falls back to the plain tokens (the common case)."""
+    key = " ".join(_WORD.findall((team or "").lower()))
+    if key in TEAM_ALIAS:
+        return set(TEAM_ALIAS[key])
+    toks = _tokens(team)
+    # a lone trailing initial ("Los Angeles A") is a disambiguator, not
+    # a word PM will ever print - drop it rather than fail the match
+    if len(toks) > 1:
+        toks = {t for t in toks if len(t) > 1} or toks
+    return toks
+
+
+def _fallback_start(mk):
+    """No parseable ticker: expected expiry is ~game end, so back off a
+    typical game length rather than trading a game already in play."""
+    for key in ("expected_expiration_time", "occurrence_datetime"):
+        v = mk.get(key)
+        if not v:
+            continue
+        try:
+            dt0 = datetime.datetime.fromisoformat(
+                str(v).replace("Z", "+00:00"))
+        except ValueError:
+            continue
+        if dt0.tzinfo is None:
+            dt0 = dt0.replace(tzinfo=datetime.timezone.utc)
+        return dt0 - datetime.timedelta(hours=3)
+    return None
+
+
 def _wilson_lb(w, n, z=1.0):
     if n <= 0:
         return 0.0
@@ -205,9 +288,21 @@ class SportsPaper:
             import time as _t
             nowts = int(_t.time())
             for _ in range(8):
+                # 8/13 ROOT-CAUSE FIX (book had placed ZERO since
+                # launch): a Kalshi game market's close_time is NOT the
+                # game - it is the last possible expiry, ~3 DAYS after
+                # first pitch ("stays open until a winner is declared,
+                # within two days"). Filtering close_time to the next
+                # 36h therefore selected games that had ALREADY BEEN
+                # PLAYED and were waiting to expire - dead books, wide
+                # spreads, no live Polymarket anchor. Hence 286
+                # no_anchor + 433 spread and not one entry. Ask for the
+                # whole expiry horizon here; the real pre-game filter
+                # is on GAME START below.
                 params = {"status": "open", "limit": 1000,
                           "min_close_ts": nowts,
-                          "max_close_ts": nowts + int(CLOSE_H * 3600)}
+                          "max_close_ts": nowts + int(
+                              (CLOSE_H + 168.0) * 3600)}
                 if cursor:
                     params["cursor"] = cursor
                 d = requests.get(we.KALSHI + "/markets", params=params,
@@ -236,13 +331,16 @@ class SportsPaper:
             return []
         out, nowdt = [], datetime.datetime.now(datetime.timezone.utc)
         for ev, mk in rows:
-            try:
-                ct = mk.get("close_time") or ""
-                cdt = datetime.datetime.fromisoformat(
-                    ct.replace("Z", "+00:00"))
-                hrs = (cdt - nowdt).total_seconds() / 3600.0
-            except Exception:
+            # hrs = hours to FIRST PITCH, read from the event ticker
+            # (KXMLBGAME-26AUG152138KCLAA -> Aug 15 21:38 ET). Anchors
+            # are pre-game prices, so a game already under way is not
+            # our trade: hrs must be positive and inside CLOSE_H.
+            start = _game_start(ev.get("event_ticker"))
+            if start is None:
+                start = _fallback_start(mk)
+            if start is None:
                 continue
+            hrs = (start - nowdt).total_seconds() / 3600.0
             if hrs <= 0 or hrs > CLOSE_H:
                 continue
             def _px(m, key):
@@ -396,7 +494,7 @@ class SportsPaper:
     def anchor_prob(self, mk, pm_rows):
         """Polymarket-implied probability for this Kalshi market's YES
         team, or None when no confident match exists (skip, never guess)."""
-        team_t = _tokens(mk.get("team"))
+        team_t = _alias_tokens(mk.get("team"))
         title_t = _tokens(mk.get("title"))
         if not team_t:
             return None

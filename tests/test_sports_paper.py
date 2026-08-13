@@ -224,3 +224,78 @@ def test_anchor_needs_every_team_token(tmp_path, monkeypatch):
     assert b.place([_mk(title="Red Sox vs. Yankees Winner?",
                         team="Boston Red Sox")]) == 0
     assert b.miss.get("no_anchor") == 1
+
+
+# ---- 8/13 root cause: close_time is expiry, not game time ----
+
+def test_game_start_parsed_from_event_ticker():
+    # KXMLBGAME-26AUG152138KCLAA = Aug 15, 21:38 ET = 01:38 UTC next day
+    got = sp._game_start("KXMLBGAME-26AUG152138KCLAA")
+    assert got.isoformat() == "2026-08-16T01:38:00+00:00"
+    assert sp._game_start("KXMLBGAME-BADTICKER") is None
+    # fallback: expected expiry is ~game end, so back off 3h
+    fb = sp._fallback_start({"expected_expiration_time":
+                             "2026-08-16T04:38:00Z"})
+    assert fb.isoformat() == "2026-08-16T01:38:00+00:00"
+
+
+def test_scan_filters_on_game_start_not_close_time(tmp_path, monkeypatch):
+    # the launch bug: a game market's close_time is ~3 DAYS after first
+    # pitch, so a 36h close-time filter selected games ALREADY PLAYED
+    # (dead books, no live anchor) and skipped tonight's slate entirely.
+    b = _bot(tmp_path, monkeypatch)
+    import datetime as _dt
+    now = _dt.datetime.now(_dt.timezone.utc)
+    soon = now + _dt.timedelta(hours=5)
+    past = now - _dt.timedelta(hours=5)
+
+    def _ev(dtv):
+        return ("KXMLBGAME-%s%s"
+                % (dtv.astimezone(_dt.timezone(_dt.timedelta(hours=-4)))
+                   .strftime("%y%b%d%H%M").upper(), "NYABOS"))
+
+    rows = [
+        {"ticker": "T-SOON", "event_ticker": _ev(soon),
+         "title": "Boston vs New York Y Winner?", "yes_sub_title": "Boston",
+         "yes_bid_dollars": "0.5300", "yes_ask_dollars": "0.5500",
+         "close_time": (now + _dt.timedelta(days=3)).isoformat(),
+         "status": "active"},
+        {"ticker": "T-PLAYED", "event_ticker": _ev(past),
+         "title": "Texas vs A's Winner?", "yes_sub_title": "Texas",
+         "yes_bid_dollars": "0.9800", "yes_ask_dollars": "0.9900",
+         "close_time": (now + _dt.timedelta(days=2)).isoformat(),
+         "status": "active"},
+    ]
+
+    class _R:
+        def json(self):
+            return {"markets": rows, "cursor": None}
+
+    seen = {}
+
+    def _get(url, params=None, timeout=None):
+        seen.update(params or {})
+        return _R()
+
+    monkeypatch.setattr(sp, "requests", type("M", (), {
+        "get": staticmethod(_get)}))
+    out = b.fetch_kalshi_sports()
+    assert [m["ticker"] for m in out] == ["T-SOON"]      # pre-game only
+    assert 4.0 < out[0]["hrs"] < 6.0                     # hours to first pitch
+    # and the API window now covers the full expiry horizon
+    assert seen["max_close_ts"] - seen["min_close_ts"] > 36 * 3600
+
+
+def test_city_names_match_franchise_anchors(tmp_path, monkeypatch):
+    # Kalshi says "Boston" / "Los Angeles A"; Polymarket says "Boston Red
+    # Sox" / "Los Angeles Angels". Cities pass straight through; the
+    # trailing-initial and "A's" forms need the alias map.
+    assert sp._alias_tokens("A's") == {"athletics"}
+    assert sp._alias_tokens("Los Angeles A") == {"angels"}
+    assert sp._alias_tokens("Kansas City") == {"kansas", "city"}
+    b = _bot(tmp_path, monkeypatch)
+    monkeypatch.setattr(b, "fetch_pm_index", lambda: _pm(
+        question="Will the Los Angeles Angels win on 2026-08-15?",
+        probs={"Yes": 0.86, "No": 0.14}))
+    assert b.place([_mk(title="Kansas City vs Los Angeles A Winner?",
+                        team="Los Angeles A", bid=76, ask=78)]) == 1
