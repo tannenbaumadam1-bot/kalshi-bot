@@ -408,6 +408,16 @@ def build_data():
             out["sports"] = _sd
     except Exception:
         pass
+    # MID-BAND PAPER BOOK (8/13): 15-55c bands, graded on turns
+    try:
+        _mp = os.path.join("logs", "midband_paper_state.json")
+        if os.path.exists(_mp):
+            _md = json.load(open(_mp))
+            _md["history"] = (_md.get("history") or [])[-30:]
+            _md.pop("bets", None)
+            out["midband"] = _md
+    except Exception:
+        pass
     for key, fname in (("clive", "crypto_live_state.json"),):
         fpath = os.path.join("logs", fname)
         if os.path.exists(fpath):

@@ -592,6 +592,17 @@ def main():
         except Exception as e:
             print(f"sports paper book unavailable: {e}")
             sp_bot = None
+    # MID-BAND PAPER BOOK (8/13, Adam): 15-55c bands, exits on
+    # convergence or the pre-close flatten - the jjavi shape, tested on
+    # our own ledger before a dollar moves. PAPER_MIDBAND=0 kills it.
+    mb_bot = None
+    if os.environ.get("PAPER_MIDBAND", "1") == "1":
+        try:
+            import midband_paper
+            mb_bot = midband_paper.MidbandPaper()
+        except Exception as e:
+            print(f"midband paper book unavailable: {e}")
+            mb_bot = None
     dl_dry = None
     if drift_live is not None:
         try:
@@ -758,6 +769,17 @@ def main():
                               f"sold {sp_bot.sold}")
                 except Exception as e:
                     print(f"  sports paper step skipped: {e}")
+            if mb_bot is not None and n % 5 == 3:
+                try:
+                    no = mb_bot.step()
+                    t = mb_bot.turns
+                    if no or mb_bot.placed:
+                        print(f"  MIDBAND(paper): open {no} | "
+                              f"turns {t.get('n', 0)} "
+                              f"({t.get('wins', 0)}W) | "
+                              f"net ${mb_bot.realized_c / 100:+.2f}")
+                except Exception as e:
+                    print(f"  midband paper step skipped: {e}")
             if (dl_dry is not None and n % 20 == 17
                     and not os.path.exists(drift_live.ARM_FILE)
                     and os.environ.get("KALSHI_DRIFT_LIVE", "") != "1"):
