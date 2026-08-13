@@ -48,6 +48,9 @@ from weather_paper import fetch_result
 CONFIG = "config_live.yaml"
 STATE = os.path.join("logs", "drift_live_state.json")
 BETS = os.path.join("logs", "drift_live_bets.csv")
+# 8/13 manual resume switch (see _check_resume): repo file, not logs -
+# it ships with a git pull so a halt can be lifted without console access
+UNHALT_FILE = os.environ.get("DRIFT_LIVE_UNHALT_FILE", "unhalt.txt")
 ARM_FILE = os.path.join("logs", "DRIFT_LIVE_ARMED")
 LIVE_BASE = "https://api.elections.kalshi.com/trade-api/v2"
 DEMO_BASE = "https://demo-api.kalshi.co/trade-api/v2"
@@ -415,6 +418,8 @@ class DriftLive:
         # not settlements - are what compound the offer engine, so they
         # get their own metric: {n, net_c, days:{d:{n,net_c}}, kinds:{}}
         self.turns = {}
+        self.halt_base_c = 0.0   # halt measures loss since last resume
+        self.resume_token = ""   # the unhalt.txt date already consumed
         self.load()
 
     # ---- persistence ----
@@ -432,6 +437,7 @@ class DriftLive:
                           "day_nav0_c", "autopsy", "miss", "exec_stats",
                           "k_cum", "pnl_days", "recv", "recv_bal_c",
                           "offers", "sold_log", "dips", "turns",
+                          "halt_base_c", "resume_token",
                           "k_positions", "k_resting", "dry_balance_c"):
                     if k in d:
                         setattr(self, k, d[k])
@@ -842,6 +848,8 @@ class DriftLive:
              "dips": self.dips,
              "offers": self.offers,
              "turns": self.turns,
+             "halt_base_c": getattr(self, "halt_base_c", 0.0),
+             "resume_token": getattr(self, "resume_token", ""),
              "pnl_days": self.pnl_days,
              "k_exit_realized_c": self.k_exit_realized_c,
              "autopsy": self.autopsy[-200:],
@@ -950,6 +958,9 @@ class DriftLive:
                  "fees": round(self.fees_c / 100, 2),
                  "day_pnl": round(self.day_pnl_c / 100, 2),
                  "halted": self.halted,
+                 "halt_base": round(float(getattr(self, "halt_base_c", 0))
+                                    / 100.0, 2),
+                 "resumed": getattr(self, "resume_token", "") or None,
                  "gate": mode_gate, "gate_n": gate_n}}
         with open(STATE, "w") as f:
             json.dump(d, f)
@@ -1025,6 +1036,37 @@ class DriftLive:
             self.day_pnl_c = 0.0
             self.day_nav0_c = None   # re-anchor today's P&L off Kalshi NAV
             self.halted = False
+            self.halt_base_c = 0.0
+        self._check_resume()
+
+    def _check_resume(self):
+        """8/13 manual resume: `unhalt.txt` in the repo holding today's
+        date (YYYY-MM-DD) lifts a daily halt once, on the next cycle
+        after deploy. Deliberately file-based - it ships through the
+        normal git pull, needs no console, and leaves an auditable
+        record of who un-halted which day.
+
+        Resume does NOT erase the day's loss. It rebases the halt so the
+        book gets one more full daily budget (max_day_loss) from here;
+        if that budget is spent too, the halt fires again and the file
+        won't lift it twice."""
+        try:
+            with open(UNHALT_FILE) as f:
+                token = (f.read() or "").strip()[:10]
+        except Exception:
+            return
+        if not token or token != today():
+            return
+        if getattr(self, "resume_token", "") == token:
+            return                       # already consumed for this day
+        self.resume_token = token
+        self.halt_base_c = float(self.day_pnl_c)
+        self.halted = False
+        self.exec_stats["resumes"] = self.exec_stats.get("resumes", 0) + 1
+        self._log([now(), "RESUME", self.mode, "", "", "", "", "",
+                   "", "", "", round(self.day_pnl_c / 100.0, 2), token])
+        print(f"  RESUME {token}: halt lifted, fresh daily budget "
+              f"(day P&L stays {self.day_pnl_c / 100.0:+.2f})")
 
     def _day_anchor_c(self, bal):
         # day anchor = cash + BOTH books' open cost. 8/6 bug (Adam caught
@@ -2126,7 +2168,12 @@ class DriftLive:
         self.max_day_loss_c = max(HALT_FLOOR_C, int(nav_c * HALT_PCT))
 
     def place(self, mkts=None):
-        if self.day_pnl_c <= -self.max_day_loss_c:
+        # 8/13: the halt measures the day's loss FROM THE LAST RESUME,
+        # not from midnight. A manual resume (unhalt.txt) hands the book
+        # a fresh full-size daily budget without ever touching the P&L
+        # ledger - the day's true number stays honest on the tracker.
+        if (self.day_pnl_c - float(getattr(self, "halt_base_c", 0))
+                <= -self.max_day_loss_c):
             self.halted = True
             return 0
         try:

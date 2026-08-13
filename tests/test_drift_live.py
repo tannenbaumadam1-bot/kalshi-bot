@@ -1393,3 +1393,40 @@ def test_turn_stats_published(tmp_path, monkeypatch):
     b.save()
     import json as _json
     assert _json.load(open(dl.STATE))["summary"]["turns"]["n"] == 2
+
+
+# ---- 8/13 manual resume (unhalt.txt) ----
+
+def test_resume_lifts_halt_without_touching_the_ledger(tmp_path,
+                                                       monkeypatch):
+    b = _bot(tmp_path, monkeypatch)
+    b.max_day_loss_c = 1416
+    b.day_pnl_c = -3559                      # the 8/13 kind of day
+    assert b.place(mkts=[_mk(bid=87, ask=89)]) == 0
+    assert b.halted is True
+    f = tmp_path / "unhalt.txt"
+    f.write_text(dl.today())
+    monkeypatch.setattr(dl, "UNHALT_FILE", str(f))
+    b._roll_day()                            # cycle start reads the switch
+    assert b.halted is False
+    assert b.day_pnl_c == -3559              # ledger untouched
+    assert b.halt_base_c == -3559            # fresh budget from here
+    assert b.place(mkts=[_mk(bid=87, ask=89)]) == 1
+    # the fresh budget still binds: another full daily loss re-halts
+    b.day_pnl_c = -3559 - 1416
+    assert b.place(mkts=[_mk(tk="KXHIGHNY-26JUL-T87", bid=87, ask=89)]) == 0
+    assert b.halted is True
+    b._roll_day()                            # same token: no second lift
+    assert b.halted is True
+
+
+def test_resume_token_ignored_when_stale(tmp_path, monkeypatch):
+    b = _bot(tmp_path, monkeypatch)
+    b.max_day_loss_c = 1416
+    b.day_pnl_c = -3559
+    f = tmp_path / "unhalt.txt"
+    f.write_text("2020-01-01")               # yesterday's switch is dead
+    monkeypatch.setattr(dl, "UNHALT_FILE", str(f))
+    b._roll_day()
+    assert b.halt_base_c == 0.0
+    assert b.place(mkts=[_mk(bid=87, ask=89)]) == 0
