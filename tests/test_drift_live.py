@@ -1430,3 +1430,45 @@ def test_resume_token_ignored_when_stale(tmp_path, monkeypatch):
     b._roll_day()
     assert b.halt_base_c == 0.0
     assert b.place(mkts=[_mk(bid=87, ask=89)]) == 0
+
+
+# ---- 8/13 gate: measure chosen trades, and count turns ----
+
+def _settled(pnl, outcome=1, pside=0.88, trig="level", i=0):
+    return {"tk": f"S{i}", "ots": str(i), "trig": trig, "entry": 88,
+            "count": 5, "outcome": outcome, "pside": pside, "pnl": pnl,
+            "era": "dlive1"}
+
+
+def test_gate_ignores_adopted_positions(tmp_path, monkeypatch):
+    # 8/12 Miami: a 44-lot stack the bot never chose (bug artifact) put
+    # -$38.72 into the window and pinned sizing in probe. The loss stays
+    # in the ledger; it just doesn't get a vote on calibration.
+    b = _bot(tmp_path, monkeypatch)
+    b.history = [_settled(0.4, i=i) for i in range(40)]
+    assert b._gate()[0] == "scale"
+    b.history.append(dict(_settled(-38.72, outcome=0, i=99),
+                          trig="adopt"))
+    assert b._gate()[0] == "scale"          # artifact: no vote
+    # a chosen loss of the same size DOES demote - the gate still works
+    b.history.append(_settled(-38.72, outcome=0, i=98))
+    assert b._gate()[0] == "probe"
+
+
+def test_gate_counts_completed_turns(tmp_path, monkeypatch):
+    # with the pre-close flatten, most inventory never settles - a
+    # settlement-only window would freeze the gate wherever it stood
+    b = _bot(tmp_path, monkeypatch)
+    sold = [{"tk": f"F{i}", "ots": str(i), "trig": "level", "entry": 88,
+             "count": 5, "outcome": None, "sold": True, "exited": True,
+             "pnl": 0.3, "era": "dlive1"} for i in range(40)]
+    b.history = sold
+    assert b._gate() == ("scale", 40)       # turns alone can earn scale
+    # losing round trips demote just as settlements would
+    b.history = [dict(r, pnl=-0.3) for r in sold]
+    assert b._gate()[0] == "probe"
+    # calibration still judged on settled rows only (turns have no
+    # forecast to score), so an overconfident settled cohort demotes
+    b.history = sold + [_settled(0.01, outcome=0, pside=0.95, i=i)
+                        for i in range(200, 210)]
+    assert b._gate()[0] == "probe"

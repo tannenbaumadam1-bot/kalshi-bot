@@ -979,15 +979,43 @@ class DriftLive:
     # ---- shared gate math (same contract as the paper book: nickels are
     # their own experiment and never count toward the drift gate) ----
     def _gate(self):
-        cur = [h for h in self.history if h.get("outcome") in (0, 1)
-               and h.get("trig") != "nickel"][-60:]
+        """Scale vs probe sizing, graded on the last 60 CHOSEN outcomes.
+
+        8/13, two changes, both about measuring the strategy rather than
+        the accidents around it:
+
+        (1) `adopt` rows are excluded, exactly as _bucket_stats has
+        always excluded them. An adopted position is one the bot chose
+        neither the size, the price, nor the timing of - 8/12's Miami
+        44-lot stack was a bug artifact, and letting a -$38.72 row it
+        never decided on throttle every future bet measures the outage,
+        not the edge. The loss stays in the ledger, NAV and every P&L
+        number; it just doesn't get a vote on calibration.
+
+        (2) completed TURNS count alongside settlements. The pre-close
+        flatten means most inventory now exits before it ever settles,
+        so a settlement-only window would advance a few rows a week and
+        freeze the gate wherever it happened to be. A turn is graded on
+        realized P&L (no outcome to compare a forecast against), so it
+        votes on expectancy only - the calibration test stays settlement
+        -only, where a forecast can actually be scored."""
+        # only "nickel" (own lane, own guardrails) and "adopt" (never
+        # chosen) are excluded - an unlabelled row is still a decision
+        rows = [h for h in self.history
+                if h.get("trig") not in ("nickel", "adopt")]
+        cur = [h for h in rows
+               if h.get("outcome") in (0, 1) or h.get("sold")][-60:]
         n = len(cur)
         if n < GATE_MIN_N:
             return "probe", n
-        expectancy = sum(h["pnl"] for h in cur) / n
-        pred = sum(h["pside"] for h in cur) / n
-        act = sum(h["outcome"] for h in cur) / n
-        if expectancy > 0 and (pred - act) <= GATE_MAX_GAP:
+        expectancy = sum(h.get("pnl") or 0 for h in cur) / n
+        graded = [h for h in cur if h.get("outcome") in (0, 1)]
+        gap = 0.0
+        if graded:
+            pred = sum(h.get("pside") or 0 for h in graded) / len(graded)
+            act = sum(h["outcome"] for h in graded) / len(graded)
+            gap = pred - act
+        if expectancy > 0 and gap <= GATE_MAX_GAP:
             return "scale", n
         return "probe", n
 
