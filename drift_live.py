@@ -1518,6 +1518,19 @@ class DriftLive:
                 "today_per_turn": (round(float(day.get("net_c", 0))
                                          / dn / 100.0, 3) if dn else None),
                 "kinds": dict(t.get("kinds") or {}),
+                # 8/14: net and capital-hours BY KIND. `kinds` alone can't
+                # answer the only question that matters for the ladder -
+                # whether lifts and settlements earn differently per hour
+                # of capital locked. per_ch is the objective the decay
+                # ladder gets retuned against once these accumulate.
+                "kinds_net": {k: round(float(v) / 100.0, 2)
+                              for k, v in (t.get("kinds_net_c") or {}).items()},
+                "kinds_hold_h": dict(t.get("kinds_hold_h") or {}),
+                "per_ch": {
+                    k: round(float((t.get("kinds_net_c") or {}).get(k, 0))
+                             / 100.0 / h, 3)
+                    for k, h in (t.get("kinds_hold_h") or {}).items()
+                    if h and float(h) > 0},
                 "flatten_h": FLATTEN_H if FLATTEN_ON else None}
 
     def _sell_rungs(self, b, hrs):

@@ -1671,3 +1671,29 @@ def test_chase_ceiling_only_lifts_for_proven_buckets():
     assert b._bucket_is_proven("level", 91, blocked) is False
     # an unknown bucket is never proven
     assert b._bucket_is_proven("level", 82, {}) is False
+
+
+def test_turn_stats_publishes_capital_hour_objective():
+    """kinds alone cannot answer whether lifts and settlements earn
+    differently per HOUR of capital locked - which is the objective the
+    ladder gets retuned against. per_ch must reach the tracker."""
+    b = dl.DriftLive.__new__(dl.DriftLive)
+    b.turns = {}
+    b._turn_add(200.0, "lift", hold_h=2.0)      # $2.00 over 2h -> $1.00/h
+    b._turn_add(-100.0, "settle", hold_h=10.0)  # -$1.00 over 10h -> -$0.10/h
+    st = b._turn_stats()
+    assert st["kinds"] == {"lift": 1, "settle": 1}
+    assert st["kinds_net"]["lift"] == 2.0
+    assert st["kinds_net"]["settle"] == -1.0
+    assert st["kinds_hold_h"] == {"lift": 2.0, "settle": 10.0}
+    assert st["per_ch"]["lift"] == 1.0
+    assert st["per_ch"]["settle"] == -0.1
+
+
+def test_turn_stats_per_ch_never_divides_by_zero():
+    b = dl.DriftLive.__new__(dl.DriftLive)
+    b.turns = {}
+    b._turn_add(50.0, "lift", hold_h=0.0)
+    st = b._turn_stats()
+    assert "lift" not in st["per_ch"]
+    assert st["per_ch"] == {}
