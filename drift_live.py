@@ -494,6 +494,9 @@ class DriftLive:
         self.halt_base_c = 0.0   # halt measures loss since last resume
         self.week_halted = False  # 8/14 rolling-7-day circuit breaker
         self.week_halt_base_c = 0.0
+        self.last_nav_c = 0.0     # PERSISTED: arms the breaker on cycle 1
+        self.week_loss_c = None   # None = not yet evaluated this run
+        self.week_limit_c = None  # (never render an uncomputed 0 as a cap)
         self.resume_token = ""   # the unhalt.txt date already consumed
         self.load()
 
@@ -513,7 +516,7 @@ class DriftLive:
                           "k_cum", "pnl_days", "recv", "recv_bal_c",
                           "offers", "sold_log", "dips", "turns",
                           "halt_base_c", "resume_token",
-                          "week_halted", "week_halt_base_c",
+                          "week_halted", "week_halt_base_c", "last_nav_c",
                           "k_positions", "k_resting", "dry_balance_c"):
                     if k in d:
                         setattr(self, k, d[k])
@@ -1021,10 +1024,16 @@ class DriftLive:
                  # 8/14 WEEKLY CIRCUIT BREAKER state.
                  "week": {"halted": bool(getattr(self, "week_halted", False)),
                           "on": WEEK_HALT_ON,
-                          "loss": round(float(getattr(self, "week_loss_c", 0)
-                                              or 0) / 100.0, 2),
-                          "limit": round(float(getattr(self, "week_limit_c", 0)
-                                               or 0) / 100.0, 2),
+                          # armed = has actually evaluated and holds a real
+                          # cap. on=true + armed=false means enabled but
+                          # not yet measured - a meaningful difference.
+                          "armed": getattr(self, "week_limit_c", None) is not None,
+                          "loss": (round(float(self.week_loss_c) / 100.0, 2)
+                                   if getattr(self, "week_loss_c", None)
+                                   is not None else None),
+                          "limit": (round(float(self.week_limit_c) / 100.0, 2)
+                                    if getattr(self, "week_limit_c", None)
+                                    is not None else None),
                           "pct": WEEK_HALT_PCT},
                  "has_kalshi_truth": bool(self.k_settlements) or self.k_exit_realized_c != 0,
                  "exec": dict(self.exec_stats),
@@ -1478,6 +1487,12 @@ class DriftLive:
             return False
         nav_c = float(getattr(self, "last_nav_c", 0) or 0)
         if nav_c <= 0:
+            # NAV unknown (cold start, before _refresh_caps has run). Fail
+            # safe - but publish None, not 0.0: a limit of "0.00" on the
+            # tracker reads like an armed cap of zero when it actually
+            # means the breaker has not evaluated yet.
+            self.week_loss_c = None
+            self.week_limit_c = None
             return False
         limit_c = max(HALT_FLOOR_C, nav_c * WEEK_HALT_PCT)
         self.week_loss_c = round(wk_c - float(

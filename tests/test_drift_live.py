@@ -1697,3 +1697,35 @@ def test_turn_stats_per_ch_never_divides_by_zero():
     st = b._turn_stats()
     assert "lift" not in st["per_ch"]
     assert st["per_ch"] == {}
+
+
+def test_weekly_breaker_publishes_none_not_zero_when_unevaluated():
+    """A limit of 0.00 on the tracker reads like an armed cap of zero.
+    Uncomputed must be None + armed=false, never a plausible number."""
+    b = _wk_book()
+    b.last_nav_c = 0            # cold start, _refresh_caps hasn't run
+    assert b._week_loss_exceeded() is False
+    assert b.week_limit_c is None
+    assert b.week_loss_c is None
+
+
+def test_weekly_breaker_arms_once_nav_is_known():
+    import datetime as _d
+    b = _wk_book()
+    b.last_nav_c = 0
+    b._week_loss_exceeded()
+    assert b.week_limit_c is None
+    b.last_nav_c = 12000
+    b.pnl_days[_d.date.today().isoformat()] = -1.0
+    b._week_loss_exceeded()
+    assert b.week_limit_c == 1800.0
+    assert b.week_loss_c == -100.0
+
+
+def test_last_nav_c_is_persisted():
+    """If last_nav_c doesn't survive a restart the weekly breaker is
+    disarmed for the first cycle of every restart - which is exactly
+    when a crash-looping book most needs it."""
+    import inspect
+    src = inspect.getsource(dl.DriftLive)
+    assert '"last_nav_c"' in src

@@ -547,15 +547,27 @@ def build_data():
             try:
                 _dep = float((dv.get("summary") or {}).get("deposits") or 0)
                 _unreal = float(dv.get("unrealized") or 0)
+                # 8/14: when live marks are missing, `unrealized` falls back
+                # to 0.0 - which is INDISTINGUISHABLE from "genuinely flat".
+                # Splitting realized from unrealized on a silent zero would
+                # overstate realized_true by exactly the unmarked P&L, so
+                # when any open position is unmarked we publish the flag and
+                # withhold the split rather than print a confident wrong
+                # number. (roi_on_cash is safe either way: NAV at cost basis
+                # is conservative, not fabricated.)
+                _open = dv.get("open") or []
+                _stale = any(b.get("now") is None for b in _open)
                 if _dep > 0:
                     dv["deposits"] = _dep
                     dv["roi_on_cash"] = round((acct - _dep) / _dep * 100.0, 2)
-                    dv["realized_true"] = round(acct - _dep - _unreal, 2)
+                    dv["marks_stale"] = bool(_stale)
+                    dv["realized_true"] = (None if _stale
+                                           else round(acct - _dep - _unreal, 2))
                     # k_realized has been provably wrong (said -81 while
                     # NAV proved +21). Never render it as truth again
                     # without this flag beside it.
                     _kr = (dv.get("summary") or {}).get("k_realized")
-                    if _kr is not None:
+                    if _kr is not None and dv["realized_true"] is not None:
                         dv["k_realized_gap"] = round(
                             float(_kr) - dv["realized_true"], 2)
                         dv["k_realized_suspect"] = bool(
