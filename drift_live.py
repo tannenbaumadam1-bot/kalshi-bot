@@ -79,6 +79,11 @@ CHASE_MAX_E = int(os.environ.get("DRIFT_LIVE_CHASE_MAX_E", "97"))
 # self-blocked lanes keep the old ceiling. This is not a general
 # loosening; it is paying up only on lanes that already earned it.
 CHASE_MAX_E_PROVEN = int(os.environ.get("DRIFT_LIVE_CHASE_MAX_E_PROVEN", "99"))
+# 8/14 over-offer detection bands. Our exit ladder rests only at the
+# extremes; entry joins (80-95, projecting to 5-20 on the NO side) never
+# reach either. Used ONLY to detect selling more than we hold.
+_OFFER_HI_C = int(os.environ.get("DRIFT_LIVE_OFFER_HI_C", "90"))
+_OFFER_LO_C = int(os.environ.get("DRIFT_LIVE_OFFER_LO_C", "10"))
 # Nickel trail-bleed fix (7/25: trail exits cost -$5+ on a lane that was 3-0
 # at settlement - wobble papercuts exceeded the gap risk they insure against).
 # Live nickels now HOLD TO SETTLEMENT like the original design; the <50c
@@ -1562,18 +1567,48 @@ class DriftLive:
         self.orphan_legs = keep[-200:]
 
     def _over_offer_c(self):
-        """Contracts offered beyond what we actually hold, per ticker.
+        """Contracts offered beyond what we actually hold, per ticker,
+        measured against THE EXCHANGE - not our own books.
 
-        The invariant that matters is a QUANTITY one - offering more
-        than the position - so it is checked directly rather than
-        inferred from order bookkeeping. Published so the condition can
-        never again be invisible for two days.
+        8/14, second pass: the first version of this summed
+        self.offers[tk]["legs"], which is exactly the wrong source. A
+        stray leg is BY DEFINITION one that fell out of self.offers, so
+        that check could only ever confirm our bookkeeping agreed with
+        itself. It returned {} while NOLA held 10 with 30 contracts
+        resting. Read the mirror instead.
+
+        Kalshi's orders API is YES-PROJECTED and its action/side fields
+        must never be trusted (8/12 rule). Price is the reliable
+        discriminator instead, because our exit ladder only ever rests
+        at the extremes:
+          - holding YES -> our sell rests at 97-99 (projects unchanged)
+          - holding NO  -> our sell of NO at 97-99 projects to a YES
+                           buy at 1-3
+        Entry joins live at 80-95 (projecting to 5-20 on the NO side),
+        so they never fall inside either band. Detection only; nothing
+        is canceled off this.
         """
+        held_by_tk = {}
+        for tk, b in (self.bets or {}).items():
+            held_by_tk[tk] = (float(b.get("count", 0)), b.get("side"))
+        sold_by_tk = {}
+        for ro in (self.k_resting or []):
+            tk = ro.get("ticker")
+            if tk not in held_by_tk:
+                continue
+            try:
+                px = int(round(float(ro.get("entry") or 0)))
+                cnt = float(ro.get("count") or 0)
+            except (TypeError, ValueError):
+                continue
+            _held, side = held_by_tk[tk]
+            exiting = (px >= _OFFER_HI_C if side == "yes"
+                       else px <= _OFFER_LO_C)
+            if exiting and cnt > 0:
+                sold_by_tk[tk] = sold_by_tk.get(tk, 0.0) + cnt
         out = {}
-        for tk, off in (self.offers or {}).items():
-            held = float((self.bets.get(tk) or {}).get("count", 0))
-            offered = sum(float(l.get("count", 0))
-                          for l in (off.get("legs") or []))
+        for tk, offered in sold_by_tk.items():
+            held = held_by_tk[tk][0]
             if offered > held + 0.009:
                 out[tk] = round(offered - held, 2)
         return out

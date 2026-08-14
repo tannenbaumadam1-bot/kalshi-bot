@@ -1893,28 +1893,83 @@ def test_orphan_dropped_once_gone_from_the_exchange_book():
     assert b.exec_stats["orphan_cleared"] == 1
 
 
-def test_over_offer_detects_selling_more_than_we_hold():
-    """The invariant that matters is a QUANTITY one. NOLA held 10 and
-    offered 30 - that doesn't close a position, it flips it."""
-    b = _off_book()
-    b.bets = {"NOLA": {"count": 10}}
-    b.offers = {"NOLA": {"legs": [{"count": 10}, {"count": 10},
-                                  {"count": 10}]}}
+def _oo_book(bets, resting):
+    b = dl.DriftLive.__new__(dl.DriftLive)
+    b.bets = bets
+    b.k_resting = resting
+    return b
+
+
+def test_over_offer_reads_the_exchange_not_our_own_books():
+    """THE FALSE NEGATIVE: v1 summed self.offers[tk]['legs']. A stray leg
+    is by definition one that fell OUT of self.offers, so that check only
+    ever confirmed our bookkeeping agreed with itself - it returned {}
+    while NOLA held 10 with 30 contracts resting."""
+    b = _oo_book(
+        {"NOLA": {"count": 10.0, "side": "yes"}},
+        [{"ticker": "NOLA", "entry": 99, "count": 15},
+         {"ticker": "NOLA", "entry": 98, "count": 10},
+         {"ticker": "NOLA", "entry": 97, "count": 5}])
+    # self.offers is deliberately EMPTY - v1 would have said {}
+    b.offers = {}
     assert b._over_offer_c() == {"NOLA": 20.0}
 
 
+def test_over_offer_detects_no_side_exits_through_yes_projection():
+    """Holding NO, our 98c sell projects to a YES buy at 2c. The orders
+    API is yes-projected and action/side must never be trusted, so the
+    price band is what identifies an exit."""
+    b = _oo_book(
+        {"DC": {"count": 5.0, "side": "no"}},
+        [{"ticker": "DC", "entry": 1, "count": 2},
+         {"ticker": "DC", "entry": 2, "count": 6},
+         {"ticker": "DC", "entry": 3, "count": 2}])
+    assert b._over_offer_c() == {"DC": 5.0}
+
+
+def test_over_offer_ignores_entry_joins():
+    """An 89c NO entry join projects to a 11c yes row - it must not be
+    counted as an exit, or every pyramiding position reads as over-offered."""
+    b = _oo_book(
+        {"BOS": {"count": 5.0, "side": "no"}},
+        [{"ticker": "BOS", "entry": 11, "count": 5},   # entry join
+         {"ticker": "BOS", "entry": 2, "count": 5}])   # real exit, exact
+    assert b._over_offer_c() == {}
+
+    b2 = _oo_book(
+        {"DEN": {"count": 5.0, "side": "yes"}},
+        [{"ticker": "DEN", "entry": 85, "count": 5},   # entry join
+         {"ticker": "DEN", "entry": 99, "count": 5}])  # exit, exact
+    assert b2._over_offer_c() == {}
+
+
 def test_over_offer_clean_when_ladder_matches_position():
-    b = _off_book()
-    b.bets = {"HOU": {"count": 5}}
-    b.offers = {"HOU": {"legs": [{"count": 3}, {"count": 2}]}}
+    b = _oo_book(
+        {"HOU": {"count": 5.0, "side": "yes"}},
+        [{"ticker": "HOU", "entry": 99, "count": 3},
+         {"ticker": "HOU", "entry": 98, "count": 2}])
+    assert b._over_offer_c() == {}
+
+
+def test_over_offer_ignores_tickers_we_do_not_hold():
+    b = _oo_book({}, [{"ticker": "SFO", "entry": 99, "count": 50}])
     assert b._over_offer_c() == {}
 
 
 def test_over_offer_tolerates_fractional_dust():
-    b = _off_book()
-    b.bets = {"AUS": {"count": 1.28}}
-    b.offers = {"AUS": {"legs": [{"count": 1.28}]}}
+    b = _oo_book(
+        {"AUS": {"count": 1.28, "side": "yes"}},
+        [{"ticker": "AUS", "entry": 98, "count": 1.28}])
     assert b._over_offer_c() == {}
+
+
+def test_over_offer_survives_garbage_rows():
+    b = _oo_book(
+        {"NY": {"count": 5.0, "side": "yes"}},
+        [{"ticker": "NY", "entry": None, "count": None},
+         {"ticker": "NY", "entry": "junk", "count": 3},
+         {"ticker": "NY", "entry": 99, "count": 9}])
+    assert b._over_offer_c() == {"NY": 4.0}
 
 
 def test_util_splits_working_from_committed_capital():
