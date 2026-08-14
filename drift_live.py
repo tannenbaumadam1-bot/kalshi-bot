@@ -163,6 +163,14 @@ WSTOP_ON = os.environ.get("DRIFT_LIVE_STOP_ON", "0") == "1"
 # cells that aren't proven losers on the live ledger. ---
 BUCKET_GATE_ON = os.environ.get("DRIFT_LIVE_BUCKET_GATE", "1") == "1"
 BUCKET_MIN_N = int(os.environ.get("DRIFT_LIVE_BUCKET_MIN_N", "8"))
+# 8/14 STICKY BLOCKS. _bucket_stats() reads self.history, which TRIMS to
+# 400 rows - so a blocked lane's evidence decays. level:90-92 sat at
+# n=10 against a threshold of 8: three rows rolling off would have
+# dropped it to 7 and silently UNBLOCKED a lane that lost money, with no
+# alert. (Observed churn: level:80-84 fell 83 -> 47 in under two hours.)
+# A proven-negative lane now stays blocked in a persistent map. The
+# rolling window can still ADD blocks; it can no longer remove them.
+BUCKET_STICKY = os.environ.get("DRIFT_LIVE_BUCKET_STICKY", "1") == "1"
 # Evidence-weighted Kelly (7/28, Adam: 'increase positions as we
 # accumulate gains'): a bucket that has PROVEN itself on the live ledger
 # (n >= KELLY_PROVEN_N settled, net > 0) earns half-Kelly sizing; every
@@ -492,6 +500,7 @@ class DriftLive:
         # get their own metric: {n, net_c, days:{d:{n,net_c}}, kinds:{}}
         self.turns = {}
         self.halt_base_c = 0.0   # halt measures loss since last resume
+        self.bucket_blocked_cum = {}   # 8/14: bk -> evidence that blocked it
         self.week_halted = False  # 8/14 rolling-7-day circuit breaker
         self.week_halt_base_c = 0.0
         self.last_nav_c = 0.0     # PERSISTED: arms the breaker on cycle 1
@@ -517,6 +526,7 @@ class DriftLive:
                           "offers", "sold_log", "dips", "turns",
                           "halt_base_c", "resume_token",
                           "week_halted", "week_halt_base_c", "last_nav_c",
+                          "bucket_blocked_cum",
                           "k_positions", "k_resting", "dry_balance_c"):
                     if k in d:
                         setattr(self, k, d[k])
@@ -624,13 +634,31 @@ class DriftLive:
             p = h.get("pnl") or 0
             a["wins"] += 1 if p > 0 else 0
             a["net"] = round(a["net"] + p, 2)
+        if not isinstance(getattr(self, "bucket_blocked_cum", None), dict):
+            self.bucket_blocked_cum = {}
         for bk, a in agg.items():
-            a["blocked"] = bool(BUCKET_GATE_ON and a["n"] >= BUCKET_MIN_N
-                                and a["net"] < 0)
+            roll = bool(BUCKET_GATE_ON and a["n"] >= BUCKET_MIN_N
+                        and a["net"] < 0)
+            # latch the evidence the FIRST time a lane proves negative,
+            # so the reason survives the window that produced it
+            if roll and BUCKET_STICKY and bk not in self.bucket_blocked_cum:
+                self.bucket_blocked_cum[bk] = {
+                    "n": a["n"], "net": a["net"], "ts": now()}
+            a["sticky"] = bool(BUCKET_STICKY
+                               and bk in self.bucket_blocked_cum)
+            a["blocked"] = bool(BUCKET_GATE_ON and (roll or a["sticky"]))
         return agg
 
     def _bucket_blocked(self, bstats, trig, entry):
-        a = bstats.get(self._bucket_key(trig, entry))
+        bk = self._bucket_key(trig, entry)
+        # A lane whose rows have rolled off ENTIRELY vanishes from bstats,
+        # and `bstats.get(bk)` would return None -> not blocked. That is
+        # the same unblock-by-decay hole, one step further along, so the
+        # persistent map is consulted directly rather than via bstats.
+        if (BUCKET_STICKY
+                and bk in (getattr(self, "bucket_blocked_cum", None) or {})):
+            return bool(BUCKET_GATE_ON)
+        a = bstats.get(bk)
         return bool(a and a.get("blocked"))
 
     def _bucket_is_proven(self, trig, entry, bstats=None):
@@ -643,6 +671,8 @@ class DriftLive:
         """
         if bstats is None:
             bstats = self._bucket_stats()
+        if self._bucket_blocked(bstats, trig, entry):
+            return False        # a blocked lane can never be "proven"
         a = bstats.get(self._bucket_key(trig, entry))
         return bool(a and not a.get("blocked")
                     and a.get("n", 0) >= KELLY_PROVEN_N
@@ -1074,6 +1104,13 @@ class DriftLive:
                                               and v["net"] > 0))
                              for k, v in
                              sorted(self._bucket_stats().items())],
+                 # 8/14: lanes latched blocked by the persistent map, WITH
+                 # the evidence that blocked them. A lane whose rows have
+                 # rolled off entirely no longer appears in `buckets` at
+                 # all - without this it would look unblocked on the
+                 # tracker while still (correctly) refusing trades.
+                 "buckets_sticky": dict(
+                     getattr(self, "bucket_blocked_cum", None) or {}),
                  "open": len(self.bets), "resting": len(self.pending),
                  "placed": self.placed, "canceled": self.canceled,
                  "fees": round(self.fees_c / 100, 2),
@@ -1630,7 +1667,8 @@ class DriftLive:
             self._day_add(net)
             self.day_pnl_c += net
             self.fees_c += fee
-            self._turn_add(net, "flatten")
+            self._turn_add(net, "flatten",
+                           hold_h=_hold_hours(b.get("ots")))
             self.exec_stats["flattened"] = (
                 self.exec_stats.get("flattened", 0) + 1)
             if self.client is None:
@@ -2130,7 +2168,10 @@ class DriftLive:
             self.exec_stats.get("offers_sold", 0) + 1)
         self.exec_stats["offers_sold_net_c"] = round(
             self.exec_stats.get("offers_sold_net_c", 0) + net, 1)
-        self._turn_add(net, "lift")       # 8/13: a lift IS a round trip
+        # 8/13: a lift IS a round trip. 8/14: with capital-hours, so the
+        # decay ladder can be retuned on net-per-capital-hour - the only
+        # objective that makes sense on a capital-constrained book.
+        self._turn_add(net, "lift", hold_h=_hold_hours(b.get("ots")))
         self._k_sold_add(tk, px * sold)
         # 8/11 sold-vs-settled autopsy: every sale is graded against the
         # eventual settlement (sold_check), so "were we selling too

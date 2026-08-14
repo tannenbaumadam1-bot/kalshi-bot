@@ -1729,3 +1729,94 @@ def test_last_nav_c_is_persisted():
     import inspect
     src = inspect.getsource(dl.DriftLive)
     assert '"last_nav_c"' in src
+
+
+# ---- 8/14: sticky bucket blocks (unblock-by-decay hole) ------------
+
+def _bk_book(history):
+    b = dl.DriftLive.__new__(dl.DriftLive)
+    b.history = history
+    b.bucket_blocked_cum = {}
+    return b
+
+
+def _rows(trig, entry, n, pnl):
+    return [{"tk": f"T{i}", "ots": f"o{i}", "trig": trig,
+             "entry": entry, "pnl": pnl} for i in range(n)]
+
+
+def test_losing_lane_stays_blocked_when_its_history_decays():
+    """THE HOLE: _bucket_stats reads a 400-row window. level:90-92 sat at
+    n=10 against MIN_N=8 - three rows rolling off would drop it to 7 and
+    silently unblock a lane that lost money. Blocks must not decay."""
+    b = _bk_book(_rows("level", 91, 10, -0.10))
+    st = b._bucket_stats()
+    assert st["level:90-92"]["blocked"] is True
+    assert b._bucket_blocked(st, "level", 91) is True
+
+    # now the window rolls: only 5 rows survive, below MIN_N of 8
+    b.history = _rows("level", 91, 5, -0.10)
+    st2 = b._bucket_stats()
+    assert st2["level:90-92"]["blocked"] is True, "unblocked by decay!"
+    assert st2["level:90-92"]["sticky"] is True
+    assert b._bucket_blocked(st2, "level", 91) is True
+
+
+def test_lane_stays_blocked_after_rolling_out_of_stats_entirely():
+    """One step further: every row gone, so the bucket vanishes from
+    bstats and bstats.get() returns None. Must still refuse."""
+    b = _bk_book(_rows("level", 91, 10, -0.10))
+    b._bucket_stats()
+    b.history = []
+    st = b._bucket_stats()
+    assert "level:90-92" not in st
+    assert b._bucket_blocked(st, "level", 91) is True
+
+
+def test_sticky_block_records_the_evidence_that_caused_it():
+    b = _bk_book(_rows("level", 91, 10, -0.10))
+    b._bucket_stats()
+    ev = b.bucket_blocked_cum["level:90-92"]
+    assert ev["n"] == 10
+    assert ev["net"] < 0
+    assert ev["ts"]
+
+
+def test_healthy_lane_is_never_latched():
+    b = _bk_book(_rows("level", 82, 40, 0.20))
+    st = b._bucket_stats()
+    assert st["level:80-84"]["blocked"] is False
+    assert st["level:80-84"]["sticky"] is False
+    assert b.bucket_blocked_cum == {}
+
+
+def test_thin_negative_lane_is_not_latched_yet():
+    """Below MIN_N there isn't evidence yet - don't latch on noise."""
+    b = _bk_book(_rows("level", 91, 3, -0.10))
+    st = b._bucket_stats()
+    assert st["level:90-92"]["blocked"] is False
+    assert b.bucket_blocked_cum == {}
+
+
+def test_blocked_lane_can_never_be_proven():
+    """_bucket_is_proven gates the 99c chase ceiling. A latched lane must
+    never reach it, even if later rows look positive."""
+    b = _bk_book(_rows("level", 91, 10, -0.10))
+    b._bucket_stats()
+    b.history = _rows("level", 91, 40, 0.50)   # lane now looks great
+    st = b._bucket_stats()
+    assert b._bucket_blocked(st, "level", 91) is True
+    assert b._bucket_is_proven("level", 91, st) is False
+
+
+def test_hold_hours_wired_into_lift_and_flatten():
+    """per_ch stays empty forever unless lifts carry capital-hours - and
+    lifts are exactly what the ladder retune must measure."""
+    import inspect
+    src = inspect.getsource(dl.DriftLive)
+    assert '_turn_add(net, "lift", hold_h=' in src
+    assert 'hold_h=_hold_hours(b.get("ots")))' in src
+    for kind in ('"lift"', '"flatten"', '"settle"'):
+        idx = src.find(f'_turn_add(net, {kind}')
+        assert idx != -1, kind
+        assert "hold_h" in src[idx:idx + 200], f"{kind} missing hold_h"
