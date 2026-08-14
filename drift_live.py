@@ -66,7 +66,12 @@ DEMO_BASE = "https://demo-api.kalshi.co/trade-api/v2"
 # ladder didn't stem the leak (49->52 misses, $26.72, ALL would-won in
 # its first 20h). Cross at 30 min not 45, chase to 97c, and cross
 # one-sided books (see _cross_expiring).
-REST_MAX_H = float(os.environ.get("DRIFT_LIVE_REST_MAX_H", "0.5"))
+# 8/14: on 8/14 the book held $124.75 NAV with only $15.39 FILLED - the
+# other $86.84 sat in unfilled joins, and because caps.open counts
+# COMMITTED capital those idle bids were eating the entire risk budget
+# (4,739 slate refusals). A join that hasn't filled in 15 minutes is
+# priced at a market that has moved; recycling it beats holding it.
+REST_MAX_H = float(os.environ.get("DRIFT_LIVE_REST_MAX_H", "0.25"))
 CHASE_MAX_E = int(os.environ.get("DRIFT_LIVE_CHASE_MAX_E", "97"))
 # 8/14: 11 graded misses died at the 97c ceiling and EVERY graded miss
 # would have won (miss_would_won 107/107, miss_cost $54.60). PROVEN
@@ -501,6 +506,7 @@ class DriftLive:
         self.turns = {}
         self.halt_base_c = 0.0   # halt measures loss since last resume
         self.bucket_blocked_cum = {}   # 8/14: bk -> evidence that blocked it
+        self.orphan_legs = []     # 8/14: legs whose cancel FAILED
         self.week_halted = False  # 8/14 rolling-7-day circuit breaker
         self.week_halt_base_c = 0.0
         self.last_nav_c = 0.0     # PERSISTED: arms the breaker on cycle 1
@@ -526,7 +532,7 @@ class DriftLive:
                           "offers", "sold_log", "dips", "turns",
                           "halt_base_c", "resume_token",
                           "week_halted", "week_halt_base_c", "last_nav_c",
-                          "bucket_blocked_cum",
+                          "bucket_blocked_cum", "orphan_legs",
                           "k_positions", "k_resting", "dry_balance_c"):
                     if k in d:
                         setattr(self, k, d[k])
@@ -1111,6 +1117,11 @@ class DriftLive:
                  # tracker while still (correctly) refusing trades.
                  "buckets_sticky": dict(
                      getattr(self, "bucket_blocked_cum", None) or {}),
+                 # 8/14: contracts offered beyond the position, per
+                 # ticker. Must stay {} - anything here means we could
+                 # sell more than we hold and flip the position.
+                 "over_offer": self._over_offer_c(),
+                 "orphan_legs": len(getattr(self, "orphan_legs", None) or []),
                  "open": len(self.bets), "resting": len(self.pending),
                  "placed": self.placed, "canceled": self.canceled,
                  "fees": round(self.fees_c / 100, 2),
@@ -1500,6 +1511,73 @@ class DriftLive:
                 t["days"].pop(old, None)
         self.turns = t
 
+    def _cancel_leg(self, oid, tk):
+        """Cancel one resting leg. Returns True only if the exchange
+        actually took the cancel.
+
+        8/14 ROOT CAUSE of the over-offer bug: both offer-cleanup paths
+        did `except Exception: pass` and then deleted the book entry, so
+        a cancel that FAILED left a live sell leg on the exchange with
+        nothing tracking it. Those orphans accumulated until positions
+        were offered 2-3x over (NOLA held 10, offered 30). Selling more
+        than we hold does not merely close the position - it flips us
+        long the outcome we bet against.
+
+        A failed cancel is now remembered and retried every cycle
+        instead of being dropped on the floor.
+        """
+        if self.client is None:
+            return True
+        try:
+            self.client.cancel_order(oid)
+            return True
+        except Exception:
+            if not any(o.get("oid") == oid for o in self.orphan_legs):
+                self.orphan_legs.append({"oid": oid, "tk": tk,
+                                         "ts": now()})
+                self.exec_stats["orphan_legs"] = (
+                    self.exec_stats.get("orphan_legs", 0) + 1)
+            return False
+
+    def _retry_orphan_legs(self):
+        """Re-attempt every cancel that previously failed. Bounded, and
+        drops an orphan once the exchange no longer lists it (it either
+        canceled, filled, or the market settled)."""
+        if self.client is None or not self.orphan_legs:
+            return
+        live = {r.get("oid") for r in (self.k_resting or [])}
+        keep = []
+        for o in self.orphan_legs[:200]:
+            oid = o.get("oid")
+            if live and oid not in live:
+                self.exec_stats["orphan_cleared"] = (
+                    self.exec_stats.get("orphan_cleared", 0) + 1)
+                continue        # gone from the book: nothing to cancel
+            try:
+                self.client.cancel_order(oid)
+                self.exec_stats["orphan_cleared"] = (
+                    self.exec_stats.get("orphan_cleared", 0) + 1)
+            except Exception:
+                keep.append(o)
+        self.orphan_legs = keep[-200:]
+
+    def _over_offer_c(self):
+        """Contracts offered beyond what we actually hold, per ticker.
+
+        The invariant that matters is a QUANTITY one - offering more
+        than the position - so it is checked directly rather than
+        inferred from order bookkeeping. Published so the condition can
+        never again be invisible for two days.
+        """
+        out = {}
+        for tk, off in (self.offers or {}).items():
+            held = float((self.bets.get(tk) or {}).get("count", 0))
+            offered = sum(float(l.get("count", 0))
+                          for l in (off.get("legs") or []))
+            if offered > held + 0.009:
+                out[tk] = round(offered - held, 2)
+        return out
+
     def _week_loss_exceeded(self):
         """True when the rolling 7-day realized P&L is worse than
         WEEK_HALT_PCT of NAV, measured from the last weekly resume.
@@ -1545,7 +1623,20 @@ class DriftLive:
         dip = sum(d.get("entry", 0) * d.get("count", 0)
                   for d in self.dips.values())
         cap = max(1, self.max_open_c)
-        return {"deployed": round(dep / 100.0, 2),
+        # 8/14 WORKING vs COMMITTED. `deployed` sums FILLED positions AND
+        # unfilled resting joins, so 96% "utilization" hid the fact that
+        # only 12% of NAV was actually earning ($15.39 filled against
+        # $86.84 bid out and idle). Those are not the same thing for a
+        # compounding book: committed capital blocks new trades via
+        # caps.open without generating a cent. Split so the difference
+        # can never hide inside one number again.
+        work = sum(b["entry"] * b["count"] + b.get("fee", 0)
+                   for b in self.bets.values())
+        commit = max(0.0, dep - work)
+        return {"working": round(work / 100.0, 2),
+                "committed": round(commit / 100.0, 2),
+                "working_pct": round(work / cap, 3),
+                "deployed": round(dep / 100.0, 2),
                 "dips": round(dip / 100.0, 2),
                 "cap": round(self.max_open_c / 100.0, 2),
                 "pct": round(dep / cap, 3),
@@ -2011,22 +2102,28 @@ class DriftLive:
                 if want is None or [r[0] for r in want] == off.get("rungs"):
                     continue
                 if self.client is not None:
+                    ok = True
                     for leg in (off.get("legs") or []):
-                        try:
-                            self.client.cancel_order(leg.get("oid"))
-                        except Exception:
-                            pass
+                        ok = self._cancel_leg(leg.get("oid"), tk) and ok
+                    if not ok:
+                        continue    # keep the book entry until the
+                                    # exchange confirms; requote later
                 del self.offers[tk]
                 self.exec_stats["decay_requotes"] = (
                     self.exec_stats.get("decay_requotes", 0) + 1)
                 continue
             if self.client is not None:
                 for leg in off.get("legs") or []:
-                    try:
-                        self.client.cancel_order(leg.get("oid"))
-                    except Exception:
-                        pass    # settled markets kill their orders anyway
+                    # settled markets kill their own orders, but a
+                    # RESIZED position's legs do not die on their own -
+                    # a failed cancel here is exactly how the strays
+                    # were born, so it is retried rather than ignored
+                    self._cancel_leg(leg.get("oid"), tk)
             del self.offers[tk]
+        # 8/14: re-attempt cancels that failed on an earlier cycle
+        # BEFORE the guard runs, so a transient API error costs one
+        # cycle rather than leaving a live leg untracked forever.
+        self._retry_orphan_legs()
         # 8/12 OVER-OFFER GUARD (found live: MIA B79.5 held 44 lots with
         # 70 lots of sells resting - 22/22 current ladder PLUS a stale
         # 13/13 ladder from when the position was smaller). Selling more

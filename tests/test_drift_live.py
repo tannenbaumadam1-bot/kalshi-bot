@@ -321,7 +321,10 @@ def test_execution_defaults_widened():
     assert dl.STOP_C == 35 and dl.WSTOP_ON is False
     assert dl.ENTRY_FLOOR == 80          # 7/31: sub-80c entries killed
     # 8/4 pursuit escalation (52/52 misses would have won, $26.72):
-    assert dl.REST_MAX_H == 0.5          # cross at 30 min, not 45
+    # 8/14: 15 min, not 30. Only $15.39 of $124.75 NAV was FILLED; the
+    # other $86.84 sat in unfilled joins eating caps.open (4,739 slate
+    # refusals) without earning anything.
+    assert dl.REST_MAX_H == 0.25
     assert dl.CHASE_MAX_E == 97          # chase winners to 97c
     # 8/7: the stale-anchor chase cap is retired (0 = off, env rollback
     # only). Crossing is now decided by the edge left AT THE ASK.
@@ -1820,3 +1823,113 @@ def test_hold_hours_wired_into_lift_and_flatten():
         idx = src.find(f'_turn_add(net, {kind}')
         assert idx != -1, kind
         assert "hold_h" in src[idx:idx + 200], f"{kind} missing hold_h"
+
+
+# ---- 8/14: over-offer root cause, working capital, faster recycle ----
+
+class _FlakyClient:
+    """Cancels fail until `heal` flips - the exact condition that
+    orphaned live sell legs on the exchange."""
+    def __init__(self, heal=False):
+        self.heal = heal
+        self.canceled = []
+
+    def cancel_order(self, oid):
+        if not self.heal:
+            raise RuntimeError("exchange said no")
+        self.canceled.append(oid)
+
+
+def _off_book(heal=False):
+    b = dl.DriftLive.__new__(dl.DriftLive)
+    b.client = _FlakyClient(heal)
+    b.orphan_legs = []
+    b.exec_stats = {}
+    b.k_resting = []
+    b.offers = {}
+    b.bets = {}
+    return b
+
+
+def test_failed_cancel_is_remembered_not_dropped():
+    """ROOT CAUSE: `except Exception: pass` then delete left a LIVE sell
+    leg on the exchange with nothing tracking it. Those orphans are how
+    positions ended up offered 3x over."""
+    b = _off_book(heal=False)
+    assert b._cancel_leg("oid-1", "TK") is False
+    assert len(b.orphan_legs) == 1
+    assert b.orphan_legs[0]["oid"] == "oid-1"
+    assert b.exec_stats["orphan_legs"] == 1
+    # the same failure must not enqueue twice
+    b._cancel_leg("oid-1", "TK")
+    assert len(b.orphan_legs) == 1
+
+
+def test_successful_cancel_records_no_orphan():
+    b = _off_book(heal=True)
+    assert b._cancel_leg("oid-1", "TK") is True
+    assert b.orphan_legs == []
+
+
+def test_orphan_legs_are_retried_until_they_clear():
+    b = _off_book(heal=False)
+    b._cancel_leg("oid-1", "TK")
+    b.k_resting = [{"oid": "oid-1"}]      # still live on the exchange
+    b._retry_orphan_legs()
+    assert len(b.orphan_legs) == 1, "must keep retrying while it rests"
+    b.client.heal = True
+    b._retry_orphan_legs()
+    assert b.orphan_legs == []
+    assert "oid-1" in b.client.canceled
+
+
+def test_orphan_dropped_once_gone_from_the_exchange_book():
+    """Filled or settled: nothing left to cancel, stop retrying."""
+    b = _off_book(heal=False)
+    b._cancel_leg("oid-1", "TK")
+    b.k_resting = [{"oid": "someone-else"}]
+    b._retry_orphan_legs()
+    assert b.orphan_legs == []
+    assert b.exec_stats["orphan_cleared"] == 1
+
+
+def test_over_offer_detects_selling_more_than_we_hold():
+    """The invariant that matters is a QUANTITY one. NOLA held 10 and
+    offered 30 - that doesn't close a position, it flips it."""
+    b = _off_book()
+    b.bets = {"NOLA": {"count": 10}}
+    b.offers = {"NOLA": {"legs": [{"count": 10}, {"count": 10},
+                                  {"count": 10}]}}
+    assert b._over_offer_c() == {"NOLA": 20.0}
+
+
+def test_over_offer_clean_when_ladder_matches_position():
+    b = _off_book()
+    b.bets = {"HOU": {"count": 5}}
+    b.offers = {"HOU": {"legs": [{"count": 3}, {"count": 2}]}}
+    assert b._over_offer_c() == {}
+
+
+def test_over_offer_tolerates_fractional_dust():
+    b = _off_book()
+    b.bets = {"AUS": {"count": 1.28}}
+    b.offers = {"AUS": {"legs": [{"count": 1.28}]}}
+    assert b._over_offer_c() == {}
+
+
+def test_util_splits_working_from_committed_capital():
+    """96% 'utilization' hid that only 12% of NAV was earning: $15.39
+    filled vs $86.84 bid out and idle."""
+    b = dl.DriftLive.__new__(dl.DriftLive)
+    b.bets = {"A": {"entry": 80, "count": 5, "fee": 0}}      # $4.00 filled
+    b.pending = {"o1": {"entry": 90, "count": 10}}           # $9.00 idle
+    b.dips = {}
+    b.max_open_c = 10000                                     # $100 cap
+    u = b._util_stats()
+    assert u["working"] == 4.0
+    assert u["committed"] == 9.0
+    assert u["deployed"] == 13.0
+    assert u["working_pct"] == 0.04
+    assert u["pct"] == 0.13      # the old gauge, unchanged
+    # the whole point: deployed is 3x working
+    assert u["deployed"] > u["working"] * 3
