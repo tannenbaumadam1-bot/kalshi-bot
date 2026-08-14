@@ -50,7 +50,13 @@ BETS = os.path.join("logs", "crypto_live_bets.csv")
 PEER_STATE = os.environ.get("CRYPTO_PEER_STATE",
                             os.path.join("logs", "drift_live_state.json"))
 ERA = "clive1"
-CRYPTO_ON = os.environ.get("DRIFT_LIVE_CRYPTO", "1") == "1"
+# 8/14 (Adam): RETIRED, not merely paused. The book is flat (zero open,
+# zero pending) and finished at -$9.48, which is the only thing still
+# dragging the account total below the weather book's +$32. Default is
+# now OFF so a restart can never quietly re-arm it; set DRIFT_LIVE_CRYPTO=1
+# to bring it back deliberately. Wind-down paths (check_orders/settle/
+# mirror) still run so any straggler would still be reconciled.
+CRYPTO_ON = os.environ.get("DRIFT_LIVE_CRYPTO", "0") == "1"
 # 8/10 (Adam: "pause the crypto bot, it is clearly not working"): the
 # book is PAUSED, in wind-down. No new entries, no arb pairs, no shadow
 # notes - but check_orders/settle/mirror keep running so the open

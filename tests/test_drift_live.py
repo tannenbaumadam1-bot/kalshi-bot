@@ -1527,7 +1527,7 @@ def test_active_hours_cycle_is_faster(monkeypatch):
             return cls(2026, 8, 13, 15, 0, tzinfo=tz)
 
     monkeypatch.setattr(dl.datetime, "datetime", _FakeDT)
-    assert dl._cycle_s() == dl.ACTIVE_CYCLE_S == 180
+    assert dl._cycle_s() == dl.ACTIVE_CYCLE_S == 90
 
     class _FakeNight(_d.datetime):
         @classmethod
@@ -1536,3 +1536,138 @@ def test_active_hours_cycle_is_faster(monkeypatch):
 
     monkeypatch.setattr(dl.datetime, "datetime", _FakeNight)
     assert dl._cycle_s() == dl.CYCLE_S == 600
+
+
+# ===================================================================
+# 8/14 build: cash-in anchor, weekly circuit breaker, honest turns,
+# proven-bucket chase ceiling, capital-hour instrumentation.
+# ===================================================================
+
+
+def test_deposits_anchor_is_100_dollars():
+    """Every % must anchor to real cash in, not the 100.09 baseline
+    artifact. If this ever drifts from Adam's actual deposits, the
+    tracker starts lying again (the 8/13 -45%-vs-+22% argument)."""
+    assert dl.DEPOSITS_C == 10000
+
+
+def test_hold_hours_parses_and_rejects_garbage():
+    import datetime as _d
+    t = (_d.datetime.now() - _d.timedelta(hours=3)).isoformat()
+    got = dl._hold_hours(t)
+    assert got is not None and 2.9 < got < 3.1
+    # unmeasurable inputs must return None, never 0.0 - a silent zero
+    # would divide into an infinite per-capital-hour figure
+    assert dl._hold_hours(None) is None
+    assert dl._hold_hours("") is None
+    assert dl._hold_hours("not-a-timestamp") is None
+    # future timestamps (clock skew) and ancient rows are not measurable
+    future = (_d.datetime.now() + _d.timedelta(hours=5)).isoformat()
+    assert dl._hold_hours(future) is None
+    ancient = (_d.datetime.now() - _d.timedelta(days=30)).isoformat()
+    assert dl._hold_hours(ancient) is None
+
+
+def _wk_book():
+    b = dl.DriftLive.__new__(dl.DriftLive)
+    b.pnl_days = {}
+    b.last_nav_c = 12000        # $120 NAV
+    b.week_halt_base_c = 0.0
+    return b
+
+
+def test_weekly_breaker_units_are_dollars_not_cents():
+    """pnl_days is in DOLLARS; every other figure in the class is cents.
+    A -$5 week on a $120 NAV must NOT trip a 15% ($18) weekly limit -
+    if the conversion is dropped this reads as -500c and fires."""
+    import datetime as _d
+    b = _wk_book()
+    today = _d.date.today()
+    b.pnl_days[today.isoformat()] = -5.0
+    assert b._week_loss_exceeded() is False
+    assert b.week_loss_c == -500.0      # cents, converted
+    assert b.week_limit_c == 1800.0     # 15% of $120, in cents
+
+
+def test_weekly_breaker_fires_on_a_losing_streak():
+    """Three bad days that each clear the DAILY halt still compound past
+    the weekly limit. This is the case the daily halt cannot see."""
+    import datetime as _d
+    b = _wk_book()
+    today = _d.date.today()
+    for i in range(3):
+        b.pnl_days[(today - _d.timedelta(days=i)).isoformat()] = -7.0
+    assert b._week_loss_exceeded() is True
+
+
+def test_weekly_breaker_ignores_days_outside_the_window():
+    import datetime as _d
+    b = _wk_book()
+    today = _d.date.today()
+    b.pnl_days[(today - _d.timedelta(days=30)).isoformat()] = -500.0
+    assert b._week_loss_exceeded() is False
+
+
+def test_weekly_breaker_fails_safe_on_bad_data():
+    """A broken ledger must never halt a healthy book."""
+    b = _wk_book()
+    b.pnl_days = None
+    assert b._week_loss_exceeded() is False
+    b2 = _wk_book()
+    b2.last_nav_c = 0
+    assert b2._week_loss_exceeded() is False
+
+
+def test_weekly_base_rebases_so_resume_is_not_instantly_retripped():
+    import datetime as _d
+    b = _wk_book()
+    today = _d.date.today()
+    b.pnl_days[today.isoformat()] = -25.0
+    assert b._week_loss_exceeded() is True
+    b.week_halt_base_c = -2500.0      # what a resume sets
+    assert b._week_loss_exceeded() is False
+
+
+def test_settled_positions_count_as_turns():
+    """The turn ledger was kinds={lift} only - a winners-only sample that
+    made per_turn look far better than the book. Settlements are turns."""
+    b = dl.DriftLive.__new__(dl.DriftLive)
+    b.turns = {}
+    b._turn_add(120.0, "lift", hold_h=2.0)
+    b._turn_add(-40.0, "settle", hold_h=8.0)
+    assert b.turns["n"] == 2
+    assert b.turns["kinds"] == {"lift": 1, "settle": 1}
+    assert b.turns["kinds_net_c"]["lift"] == 120.0
+    assert b.turns["kinds_net_c"]["settle"] == -40.0
+    assert b.turns["net_c"] == 80.0
+    # capital-hours accumulate per kind for the per-capital-hour objective
+    assert b.turns["kinds_hold_h"] == {"lift": 2.0, "settle": 8.0}
+
+
+def test_turn_add_without_hold_hours_records_no_capital_hours():
+    b = dl.DriftLive.__new__(dl.DriftLive)
+    b.turns = {}
+    b._turn_add(50.0, "lift")
+    assert "kinds_hold_h" not in b.turns
+
+
+def test_chase_ceiling_only_lifts_for_proven_buckets():
+    assert dl.CHASE_MAX_E_PROVEN > dl.CHASE_MAX_E
+
+    b = dl.DriftLive.__new__(dl.DriftLive)
+    proven = {"level:80-84": {"n": 83, "wins": 69, "net": 9.87,
+                              "blocked": False}}
+    assert b._bucket_is_proven("level", 82, proven) is True
+    # thin evidence is not proof
+    thin = {"level:80-84": {"n": 3, "wins": 3, "net": 0.4, "blocked": False}}
+    assert b._bucket_is_proven("level", 82, thin) is False
+    # a losing lane is not proof
+    losing = {"level:90-92": {"n": 10, "wins": 9, "net": -0.86,
+                              "blocked": True}}
+    assert b._bucket_is_proven("level", 91, losing) is False
+    # a self-blocked lane can never chase, even if net were positive
+    blocked = {"level:90-92": {"n": 40, "wins": 30, "net": 5.0,
+                               "blocked": True}}
+    assert b._bucket_is_proven("level", 91, blocked) is False
+    # an unknown bucket is never proven
+    assert b._bucket_is_proven("level", 82, {}) is False

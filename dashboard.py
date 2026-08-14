@@ -539,6 +539,29 @@ def build_data():
             c_pnl += sum((b.get("upnl") or 0) for b in (cv.get("open") or []))
             dv["pnl_crypto"] = round(c_pnl, 2)
             dv["pnl_weather"] = round(dv["pnl_true"] - c_pnl, 2)
+            # 8/14 CASH-IN TRUTH. Deposits are the only honest anchor.
+            # realized_true is derived from the NAV identity
+            #   NAV = deposits + realized + unrealized
+            # which reconciles exactly (cash + open value = NAV), so it
+            # cannot drift the way the settlement ledger has.
+            try:
+                _dep = float((dv.get("summary") or {}).get("deposits") or 0)
+                _unreal = float(dv.get("unrealized") or 0)
+                if _dep > 0:
+                    dv["deposits"] = _dep
+                    dv["roi_on_cash"] = round((acct - _dep) / _dep * 100.0, 2)
+                    dv["realized_true"] = round(acct - _dep - _unreal, 2)
+                    # k_realized has been provably wrong (said -81 while
+                    # NAV proved +21). Never render it as truth again
+                    # without this flag beside it.
+                    _kr = (dv.get("summary") or {}).get("k_realized")
+                    if _kr is not None:
+                        dv["k_realized_gap"] = round(
+                            float(_kr) - dv["realized_true"], 2)
+                        dv["k_realized_suspect"] = bool(
+                            abs(dv["k_realized_gap"]) > 5.0)
+            except (TypeError, ValueError, ZeroDivisionError):
+                pass
     except Exception:
         pass
     # 8/3 PERFORMANCE BREAKOUT (Adam: weekly & monthly % by strategy):
@@ -928,7 +951,7 @@ async function load(){
       +'</span>';
     const bal=(L.balance_c!=null)?L.balance_c/100:null;
     if(L.pnl_true!=null&&L.marked_nav!=null){
-      const base=Number(L.baseline||100.09);
+      const base=Number(L.deposits||L.baseline||100.09);
       const retPct=base>0?(L.pnl_true/base*100):null;
       $('rmpnl').innerHTML=F(L.marked_nav)
         +' <span class="'+C(L.pnl_true)+'" style="font-size:22px">'+(retPct!=null?P(retPct):'')+'</span>'
@@ -942,7 +965,7 @@ async function load(){
     const todayTrue=(L.marked_nav!=null&&S.day_nav0!=null)?(L.marked_nav-S.day_nav0):null;
     // ACCOUNT row: the five numbers that matter, nothing else
     const cS=((d.clive||{}).summary)||{};
-    const base2=Number(L.baseline||100.09);
+    const base2=Number(L.deposits||L.baseline||100.09);
     const todayPct=(todayTrue!=null&&S.day_nav0>0)?(todayTrue/S.day_nav0*100):null;
     $('rmtiles').innerHTML=[
       tile('Weather book P&L',(L.pnl_weather!=null)?('<span class="'+C(L.pnl_weather)+'">'+M(L.pnl_weather)+'</span>'):NA,'era dlive1'+((L.pnl_weather!=null&&base2>0)?' &middot; '+P(L.pnl_weather/base2*100)+' of deposits':'')),

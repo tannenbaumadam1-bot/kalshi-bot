@@ -68,6 +68,12 @@ DEMO_BASE = "https://demo-api.kalshi.co/trade-api/v2"
 # one-sided books (see _cross_expiring).
 REST_MAX_H = float(os.environ.get("DRIFT_LIVE_REST_MAX_H", "0.5"))
 CHASE_MAX_E = int(os.environ.get("DRIFT_LIVE_CHASE_MAX_E", "97"))
+# 8/14: 11 graded misses died at the 97c ceiling and EVERY graded miss
+# would have won (miss_would_won 107/107, miss_cost $54.60). PROVEN
+# buckets - and only those - may chase two cents further. Unproven and
+# self-blocked lanes keep the old ceiling. This is not a general
+# loosening; it is paying up only on lanes that already earned it.
+CHASE_MAX_E_PROVEN = int(os.environ.get("DRIFT_LIVE_CHASE_MAX_E_PROVEN", "99"))
 # Nickel trail-bleed fix (7/25: trail exits cost -$5+ on a lane that was 3-0
 # at settlement - wobble papercuts exceeded the gap risk they insure against).
 # Live nickels now HOLD TO SETTLEMENT like the original design; the <50c
@@ -304,9 +310,43 @@ CYCLE_S = int(os.environ.get("DRIFT_LIVE_CYCLE_S", "600"))
 # ACTIVE_CYCLE_S instead of the full nap - more requotes, more lifts,
 # faster reaction. 180s keeps the 45-page event sweep well inside
 # Kalshi's rate limits (~15 calls/min).
-ACTIVE_CYCLE_S = int(os.environ.get("DRIFT_LIVE_ACTIVE_CYCLE_S", "180"))
+ACTIVE_CYCLE_S = int(os.environ.get("DRIFT_LIVE_ACTIVE_CYCLE_S", "90"))
 ACTIVE_UTC_FROM = int(os.environ.get("DRIFT_LIVE_ACTIVE_FROM", "11"))
 ACTIVE_UTC_TO = int(os.environ.get("DRIFT_LIVE_ACTIVE_TO", "24"))
+
+
+# 8/14 CASH-IN ANCHOR (Adam confirmed total deposits = $100). Every
+# percentage on the tracker anchors HERE, not to a `baseline` that
+# merely happened to start near $100. If Adam deposits more, bump this
+# (or set DRIFT_LIVE_DEPOSITS_C) or every % silently overstates.
+DEPOSITS_C = int(os.environ.get("DRIFT_LIVE_DEPOSITS_C", "10000"))
+
+# 8/14 WEEKLY CIRCUIT BREAKER (proposed 8/11, unbuilt until now). The
+# DAILY halt is 15% of NAV, so three bad days in a row trip nothing and
+# compound to ~-45%. This is the stop that survives a losing streak.
+# Resume is deliberately manual: same unhalt.txt token as the day halt.
+WEEK_HALT_PCT = float(os.environ.get("DRIFT_LIVE_WEEK_HALT_PCT", "0.15"))
+WEEK_HALT_ON = os.environ.get("DRIFT_LIVE_WEEK_HALT", "1") == "1"
+
+
+def _hold_hours(ots):
+    """Hours of capital locked between order time and now. Returns None
+    when the entry timestamp is missing or unparseable - callers treat
+    None as 'not measurable' rather than zero, so a bad parse can never
+    silently inflate a per-capital-hour figure."""
+    if not ots:
+        return None
+    try:
+        t0 = datetime.datetime.fromisoformat(str(ots).replace("Z", ""))
+    except (ValueError, TypeError):
+        return None
+    try:
+        dh = (datetime.datetime.now() - t0).total_seconds() / 3600.0
+    except (TypeError, OverflowError):
+        return None
+    if dh < 0 or dh > 24 * 14:
+        return None          # clock skew or a stale row: not measurable
+    return round(dh, 3)
 
 
 def _cycle_s():
@@ -452,6 +492,8 @@ class DriftLive:
         # get their own metric: {n, net_c, days:{d:{n,net_c}}, kinds:{}}
         self.turns = {}
         self.halt_base_c = 0.0   # halt measures loss since last resume
+        self.week_halted = False  # 8/14 rolling-7-day circuit breaker
+        self.week_halt_base_c = 0.0
         self.resume_token = ""   # the unhalt.txt date already consumed
         self.load()
 
@@ -471,6 +513,7 @@ class DriftLive:
                           "k_cum", "pnl_days", "recv", "recv_bal_c",
                           "offers", "sold_log", "dips", "turns",
                           "halt_base_c", "resume_token",
+                          "week_halted", "week_halt_base_c",
                           "k_positions", "k_resting", "dry_balance_c"):
                     if k in d:
                         setattr(self, k, d[k])
@@ -587,6 +630,21 @@ class DriftLive:
         a = bstats.get(self._bucket_key(trig, entry))
         return bool(a and a.get("blocked"))
 
+    def _bucket_is_proven(self, trig, entry, bstats=None):
+        """Has this trigger x band actually earned the right to pay up?
+
+        Same bar _kelly_frac already uses for half-Kelly (n >= proven
+        threshold AND positive net), so 'proven' means one thing in this
+        codebase. Used by the 8/14 chase ceiling: only lanes with live
+        positive evidence may chase past CHASE_MAX_E.
+        """
+        if bstats is None:
+            bstats = self._bucket_stats()
+        a = bstats.get(self._bucket_key(trig, entry))
+        return bool(a and not a.get("blocked")
+                    and a.get("n", 0) >= KELLY_PROVEN_N
+                    and a.get("net", 0) > 0)
+
     def _kelly_frac(self, bstats, trig, entry):
         """Evidence-weighted Kelly: proven buckets earn half-Kelly."""
         a = bstats.get(self._bucket_key(trig, entry))
@@ -673,8 +731,14 @@ class DriftLive:
             bid_s, ask_s = ((100 - ya) if ya else 0), 100 - yb
         smid = (bid_s + ask_s) / 2.0 if bid_s else float(ask_s)
         self._cross_ask = int(ask_s)
-        max_e = (dp.NICKEL_MAX_ENTRY if o.get("trig") == "nickel"
-                 else CHASE_MAX_E)
+        if o.get("trig") == "nickel":
+            max_e = dp.NICKEL_MAX_ENTRY
+        else:
+            # proven-bucket ceiling only. _bucket_blocked below still has
+            # the final say, so a blocked lane can never reach this price.
+            max_e = (CHASE_MAX_E_PROVEN
+                     if self._bucket_is_proven(o.get("trig"), int(ask_s))
+                     else CHASE_MAX_E)
         if ask_s <= 0:
             self._cross_why = "no_ask"
             return False
@@ -950,6 +1014,18 @@ class DriftLive:
                           "max_pct": DIP_MAX_PCT},
                  "day_nav0": (round(self.day_nav0_c / 100.0, 2)
                               if self.day_nav0_c is not None else None),
+                 # 8/14 CASH-IN ANCHOR. `baseline` (100.09) only LOOKS
+                 # like the deposit - it is a launch artifact. This is the
+                 # real money in; the dashboard anchors every % here.
+                 "deposits": round(DEPOSITS_C / 100.0, 2),
+                 # 8/14 WEEKLY CIRCUIT BREAKER state.
+                 "week": {"halted": bool(getattr(self, "week_halted", False)),
+                          "on": WEEK_HALT_ON,
+                          "loss": round(float(getattr(self, "week_loss_c", 0)
+                                              or 0) / 100.0, 2),
+                          "limit": round(float(getattr(self, "week_limit_c", 0)
+                                               or 0) / 100.0, 2),
+                          "pct": WEEK_HALT_PCT},
                  "has_kalshi_truth": bool(self.k_settlements) or self.k_exit_realized_c != 0,
                  "exec": dict(self.exec_stats),
                  # mirror counts + fees straight from Kalshi's records
@@ -1126,6 +1202,18 @@ class DriftLive:
         self.resume_token = token
         self.halt_base_c = float(self.day_pnl_c)
         self.halted = False
+        # 8/14: one resume clears BOTH breakers. The weekly base rebases
+        # to the current 7-day total so the next week's budget is fresh
+        # rather than instantly re-tripping on the same losses.
+        try:
+            today_d = datetime.date.today()
+            self.week_halt_base_c = sum(
+                float(self.pnl_days.get(
+                    (today_d - datetime.timedelta(days=i)).isoformat()) or 0)
+                for i in range(7)) * 100.0
+        except (TypeError, ValueError, OverflowError, AttributeError):
+            self.week_halt_base_c = 0.0
+        self.week_halted = False
         self.exec_stats["resumes"] = self.exec_stats.get("resumes", 0) + 1
         self._log([now(), "RESUME", self.mode, "", "", "", "", "",
                    "", "", "", round(self.day_pnl_c / 100.0, 2), token])
@@ -1327,9 +1415,24 @@ class DriftLive:
         oc += sum(o["entry"] * o["count"] for o in self.pending.values())
         return oc
 
-    def _turn_add(self, net_c, kind):
-        """Book one completed round trip. Settlements are NOT turns -
-        only inventory we bought and resold (lift, flatten, stop)."""
+    def _turn_add(self, net_c, kind, hold_h=None):
+        """Book one completed round trip.
+
+        8/14: settlements ARE turns now. The old ledger counted only
+        inventory we bought and resold (lift/flatten/stop), which made
+        `per_turn` a WINNERS-ONLY sample - positions that never lifted
+        and rode to settlement never appeared in the denominator. That
+        is the same class of flattering gauge as the $100 baseline, and
+        it nearly justified scaling. kinds/kinds_net_c keep the lift-only
+        view available so the two can still be compared.
+
+        hold_h (item 5 groundwork): capital-hours locked by this turn.
+        On a capital-constrained book the objective is net per
+        CAPITAL-HOUR, not net per turn - a 97c ask that lifts in 2h beats
+        a 99c ask that lifts in 9h. Nothing tunes on this yet; it only
+        starts accumulating the data so the ladder can be retuned on
+        evidence instead of instinct.
+        """
         t = self.turns if isinstance(self.turns, dict) else {}
         d = datetime.date.today().isoformat()
         t["n"] = int(t.get("n", 0)) + 1
@@ -1339,11 +1442,48 @@ class DriftLive:
         day["net_c"] = round(float(day.get("net_c", 0)) + net_c, 1)
         k = t.setdefault("kinds", {})
         k[kind] = int(k.get(kind, 0)) + 1
+        kn = t.setdefault("kinds_net_c", {})
+        kn[kind] = round(float(kn.get(kind, 0)) + net_c, 1)
+        # capital-hours, per kind, for the per-capital-hour objective
+        if hold_h is not None and hold_h >= 0:
+            kh = t.setdefault("kinds_hold_h", {})
+            kh[kind] = round(float(kh.get(kind, 0)) + float(hold_h), 2)
         # keep the day map bounded
         if len(t.get("days", {})) > 60:
             for old in sorted(t["days"])[:-60]:
                 t["days"].pop(old, None)
         self.turns = t
+
+    def _week_loss_exceeded(self):
+        """True when the rolling 7-day realized P&L is worse than
+        WEEK_HALT_PCT of NAV, measured from the last weekly resume.
+
+        Reads the persistent daily ledger (pnl_days), which is never
+        trimmed, so this survives restarts. Returns False on any missing
+        or unparseable data - a broken ledger must never halt a healthy
+        book, and must never be mistaken for a healthy one either (the
+        `week` block on the tracker publishes what it actually saw).
+        """
+        if not isinstance(getattr(self, "pnl_days", None), dict):
+            return False
+        try:
+            today = datetime.date.today()
+            win = [(today - datetime.timedelta(days=i)).isoformat()
+                   for i in range(7)]
+            # pnl_days is in DOLLARS (see _day_add); everything else in
+            # this class is cents. Convert once, here, explicitly.
+            wk_c = sum(float(self.pnl_days.get(d) or 0)
+                       for d in win) * 100.0
+        except (TypeError, ValueError, OverflowError):
+            return False
+        nav_c = float(getattr(self, "last_nav_c", 0) or 0)
+        if nav_c <= 0:
+            return False
+        limit_c = max(HALT_FLOOR_C, nav_c * WEEK_HALT_PCT)
+        self.week_loss_c = round(wk_c - float(
+            getattr(self, "week_halt_base_c", 0) or 0), 1)
+        self.week_limit_c = round(limit_c, 1)
+        return self.week_loss_c <= -limit_c
 
     def _util_stats(self):
         """How much of the risk budget is actually deployed. Growth =
@@ -1698,6 +1838,11 @@ class DriftLive:
                     fills_by_oid[fo] = fills_by_oid.get(fo, 0) + fc
             except Exception:
                 fills_by_oid = None         # fills unknown this cycle
+                # 8/14: when the fills API is down we ASSUME the rest
+                # filled (below), which silently invents fills. Count it
+                # so a bad API day can never masquerade as clean data.
+                self.exec_stats["fills_api_down"] = (
+                    self.exec_stats.get("fills_api_down", 0) + 1)
         nowdt = datetime.datetime.now()
         for oid, o in list(self.pending.items()):
             seen = float(o.get("filled_seen", 0))
@@ -2145,6 +2290,10 @@ class DriftLive:
             self._log([now(), "SETTLE", self.mode, b["city"], b["strike"], b["hl"],
                        b["side"], round(b["pside"], 3), b["entry"], b["count"],
                        1 if won else 0, round(net / 100, 2), b.get("oid", "")])
+            # 8/14: a position that rode to settlement is a completed
+            # round trip too - book it so per_turn stops being a
+            # winners-only sample.
+            self._turn_add(net, "settle", hold_h=_hold_hours(b.get("ots")))
             del self.bets[tk]
 
     # ---- momentum stop + trailing exit (taker sells, same rules as paper) ----
@@ -2248,6 +2397,7 @@ class DriftLive:
                                 int(nav_c * PROVEN_BET_PCT))
         self.max_open_c = int(nav_c * OPEN_PCT)
         self.max_day_loss_c = max(HALT_FLOOR_C, int(nav_c * HALT_PCT))
+        self.last_nav_c = nav_c      # 8/14: weekly breaker measures on this
 
     def place(self, mkts=None):
         # 8/13: the halt measures the day's loss FROM THE LAST RESUME,
@@ -2257,6 +2407,13 @@ class DriftLive:
         if (self.day_pnl_c - float(getattr(self, "halt_base_c", 0))
                 <= -self.max_day_loss_c):
             self.halted = True
+            return 0
+        # 8/14 WEEKLY CIRCUIT BREAKER: the daily halt is 15% of NAV, so a
+        # three-day losing streak trips nothing and compounds to ~-45%.
+        # This measures the rolling 7-day realized P&L against the same
+        # percentage of NAV and stops the book until a human resumes.
+        if WEEK_HALT_ON and self._week_loss_exceeded():
+            self.week_halted = True
             return 0
         try:
             balance_c = self.balance_c()

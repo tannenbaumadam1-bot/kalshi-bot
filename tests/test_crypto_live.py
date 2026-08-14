@@ -998,3 +998,13 @@ def test_shadow_retired_by_default(tmp_path, monkeypatch):
     b.dry_balance_c = 20000
     b.place(mkts=[_mk(tk="H1", ev="EH1", bid=93, ask=95)])
     assert not b.shadow
+
+
+def test_crypto_book_is_retired_by_default():
+    """8/14: the crypto book finished at -$9.48 and is flat. Default OFF
+    so a restart can never quietly re-arm it; DRIFT_LIVE_CRYPTO=1 brings
+    it back deliberately."""
+    import importlib
+    import crypto_live as cl
+    importlib.reload(cl)
+    assert cl.CRYPTO_ON is False
