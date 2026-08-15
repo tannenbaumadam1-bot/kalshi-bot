@@ -886,15 +886,24 @@ def test_city_cap_blocks_concentration(tmp_path, monkeypatch):
 
 def test_slate_cap_blocks_same_morning_pileup(tmp_path, monkeypatch):
     # all-8-positions-settling-one-morning was risk #1: one settlement
-    # date may not hold more than 40% of NAV
+    # date may not hold more than SLATE_CAP_PCT of NAV.
+    # 8/15: DERIVED from the constant instead of hardcoded to 40%. The
+    # slate cap is now a measured experiment (0.40 -> 0.60 and, if the
+    # week behaves, region slates after) and a magic number here breaks
+    # the suite every time the dial moves - which teaches us to edit the
+    # assert rather than think. What must hold at ANY setting is the
+    # relationship: N five-lots fit under the cap and the next is
+    # refused, and a different settlement date is untouched.
     b = _bot(tmp_path, monkeypatch)
-    b.dry_balance_c = 10000                      # NAV $100 -> slate cap $40
+    b.dry_balance_c = 10000                      # NAV $100
+    cost_c = 89 * dl.MIN_CONTRACTS               # taker entry x 5-lot floor
+    fit = int(10000 * dl.SLATE_CAP_PCT) // cost_c
+    assert fit >= 2                              # cap too small to test
     placed = 0
-    for i in range(12):
+    for i in range(fit + 4):
         placed += b.place(mkts=[_mk(tk=f"KXHIGHNY-26JUL-S{i}", bid=87,
                                     ask=89, city=f"c{i}", strike=60 + i)])
-    # ~$4.45 each: 8 fit under $40, the 9th breaches
-    assert placed == 8
+    assert placed == fit
     assert b.exec_stats.get("slate_capped", 0) >= 1
     # a different settlement date is unaffected
     assert b.place(mkts=[_mk(tk="KXHIGHNY-26JUL-S99", bid=87, ask=89,

@@ -274,7 +274,26 @@ MIN_CONTRACTS = int(os.environ.get("DRIFT_LIVE_MIN_CONTRACTS", "5"))
 # Pyramid adds are exempt (already capped at 2 per position).
 CITY_CAP_PCT = float(os.environ.get("DRIFT_LIVE_CITY_CAP_PCT",
                                     "0.15" if FLATTEN_ON else "0.10"))
-SLATE_CAP_PCT = float(os.environ.get("DRIFT_LIVE_SLATE_CAP_PCT", "0.40"))
+# 8/15 (Adam): 0.40 -> 0.60, a ONE-WEEK MEASURED EXPERIMENT. Every
+# weather market on a slate shares ONE settlement date, so the date-slate
+# was never a diversification rule - it was a hard global ceiling on
+# working capital. The 8/15 autopsy: NAV $125.72, slate ceiling $50.29,
+# filled cost $48.15 = 95.7% of the ceiling, 7,914 slate refusals, and
+# $77.79 (61% of the account) idle in cash. NOTHING else was binding -
+# open cap sat at 89%, and the last five refusals were DAL/SFO/LV/PHIL/
+# ATL at 83-86c with city_c at or near ZERO. The cap alone held the
+# powder. 60% lifts the ceiling to ~$75 (working capital +57%) and is
+# the smallest change that tests whether 40% was ever the right number.
+# Cost of being wrong, on the observed bust rate (30-40% of a slate,
+# never once a full one - level:80-84 is 23/24 and level:85-89 is
+# 57/60): a bad day goes from ~13-16% to ~20-24% of NAV. The 15% city
+# cap still bounds any single thermometer and the 15% day / 15% week
+# breakers are untouched. REVERT = put this back to 0.40, or export
+# DRIFT_LIVE_SLATE_CAP_PCT=0.40 on the droplet; nothing else reads it.
+# The wrong-AXIS fix (region slates - Dallas and Philly are not one bet
+# just because they settle the same evening) is the real answer and
+# stays queued BEHIND this measurement, deliberately.
+SLATE_CAP_PCT = float(os.environ.get("DRIFT_LIVE_SLATE_CAP_PCT", "0.60"))
 # --- 8/11 EARNED SIZING (Adam-approved): buckets the ledger has PROVEN
 # (half-Kelly lanes) size to PROVEN_BET_PCT of NAV; everything else
 # stays at the base pct. Aggression is earned per bucket, never global.
@@ -540,6 +559,13 @@ class DriftLive:
         self.bucket_blocked_cum = {}   # 8/14: bk -> evidence that blocked it
         self.orphan_legs = []     # 8/14: legs whose cancel FAILED
         self.nav_days = {}        # 8/15: date -> peak NAV (cents) that day
+        # 8/15 slate experiment: date -> [peak slate cost (cents) seen
+        # that day, cumulative slate_capped count at that moment]. The
+        # 40->60 raise is only worth what we can measure, and the two
+        # numbers that decide it are "did working capital actually grow"
+        # and "did refusals actually stop". Daily refusals = the cum
+        # delta between consecutive days.
+        self.slate_days = {}
         self.rung_stats = {}      # 8/15: ask px -> placed/lifted/net/hold
         self.rebid = {}           # 8/15: tk -> ts of the lift that freed it
         self.week_halted = False  # 8/14 rolling-7-day circuit breaker
@@ -568,6 +594,7 @@ class DriftLive:
                           "halt_base_c", "resume_token",
                           "week_halted", "week_halt_base_c", "last_nav_c",
                           "bucket_blocked_cum", "orphan_legs", "nav_days",
+                          "slate_days",
                           "rung_stats", "rebid",
                           "k_positions", "k_resting", "dry_balance_c"):
                     if k in d:
@@ -1764,6 +1791,35 @@ class DriftLive:
         work = sum(b["entry"] * b["count"] + b.get("fee", 0)
                    for b in self.bets.values())
         commit = max(0.0, dep - work)
+        # 8/15 SLATE TELEMETRY (the 40->60 experiment's scoreboard). The
+        # binding cap was invisible from outside: `pct` read 89% against
+        # max_open while the thing actually refusing trades was the
+        # per-DATE ceiling, and no published field showed how close we
+        # sat to it. Pure read over self.bets - no hot-path cost.
+        by_date = {}
+        for b in self.bets.values():
+            by_date[b.get("date", "")] = (by_date.get(b.get("date", ""), 0)
+                                          + b.get("entry", 0)
+                                          * b.get("count", 0))
+        top_d, top_c = "", 0
+        for d0, c0 in by_date.items():
+            if c0 > top_c:
+                top_d, top_c = d0, c0
+        nav_c = float(getattr(self, "last_nav_c", 0) or 0)
+        slate_cap_c = nav_c * SLATE_CAP_PCT
+        try:                       # daily peak + refusal cum, for the week
+            d = today()
+            if not isinstance(getattr(self, "slate_days", None), dict):
+                self.slate_days = {}
+            prev = self.slate_days.get(d) or [0, 0]
+            self.slate_days[d] = [
+                max(float(prev[0] or 0), float(top_c)),
+                int((self.exec_stats or {}).get("slate_capped", 0) or 0)]
+            if len(self.slate_days) > 60:
+                for old in sorted(self.slate_days)[:-60]:
+                    self.slate_days.pop(old, None)
+        except (TypeError, ValueError, AttributeError):
+            pass
         return {"working": round(work / 100.0, 2),
                 "committed": round(commit / 100.0, 2),
                 "working_pct": round(work / cap, 3),
@@ -1774,6 +1830,13 @@ class DriftLive:
                 "pct_with_dips": round((dep + dip) / cap, 3),
                 "positions": len(self.bets),
                 "resting": len(self.pending),
+                # the experiment's scoreboard
+                "slate_pct": SLATE_CAP_PCT,
+                "slate_cap": round(slate_cap_c / 100.0, 2),
+                "slate_top": round(top_c / 100.0, 2),
+                "slate_top_date": top_d,
+                "slate_used": (round(top_c / slate_cap_c, 3)
+                               if slate_cap_c > 0 else None),
                 "flatten_h": FLATTEN_H if FLATTEN_ON else None,
                 "cycle_s": _cycle_s()}
 
