@@ -1054,6 +1054,17 @@ class DriftLive:
              "autopsy": self.autopsy[-200:],
              "miss": self.miss[-200:],
              "exec_stats": self.exec_stats,
+             # 8/15 BUG: nav_days was in the LOAD whitelist but was never
+             # written here, so the rolling 7-day NAV peak reset to
+             # "today" on every restart - and this book restarts on every
+             # deploy. The weekly circuit breaker measures drawdown from
+             # that peak (v2, same day), which means it has been
+             # effectively disarmed beyond a single day since it shipped:
+             # it can only ever have seen the peaks accumulated since the
+             # last push. Caught while verifying the slate raise, whose
+             # risk case leans on this breaker being real.
+             "nav_days": getattr(self, "nav_days", None) or {},
+             "slate_days": getattr(self, "slate_days", None) or {},
              "k_positions": self.k_positions,
              "k_resting": self.k_resting,
              "nickel": self._nickel_stats(),

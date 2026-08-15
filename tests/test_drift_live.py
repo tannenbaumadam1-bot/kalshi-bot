@@ -1783,6 +1783,29 @@ def test_last_nav_c_is_persisted():
     assert '"last_nav_c"' in src
 
 
+def test_day_dicts_survive_a_restart(tmp_path, monkeypatch):
+    """8/15 REAL round trip, not a source grep.
+
+    nav_days was in the LOAD whitelist and absent from save() for a full
+    day, so the weekly breaker's rolling 7-day NAV peak silently reset on
+    every deploy - and a grep-style test PASSES that bug, because the
+    string is present (in the load list). Only a save->reload round trip
+    catches it. Any per-day dict the breakers or the slate experiment
+    depend on goes here.
+    """
+    b = _bot(tmp_path, monkeypatch)
+    # dated in the past on purpose: save() runs a fresh _util_stats(),
+    # which legitimately rewrites TODAY's row with the live counters.
+    # Prior days must come back untouched.
+    b.nav_days = {"2026-08-13": 12000.0, "2026-08-14": 12572.0}
+    b.slate_days = {"2026-08-14": [4791.8, 7914]}
+    b.save(balance_c=7779)
+
+    b2 = dl.DriftLive(None, mode="DRY")          # same STATE path
+    assert b2.nav_days == {"2026-08-13": 12000.0, "2026-08-14": 12572.0}
+    assert b2.slate_days["2026-08-14"] == [4791.8, 7914]
+
+
 # ---- 8/14: sticky bucket blocks (unblock-by-decay hole) ------------
 
 def _bk_book(history):
