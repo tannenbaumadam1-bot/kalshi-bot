@@ -67,13 +67,16 @@ def test_nickel_entry_band_and_lanes(tmp_path, monkeypatch):
     # 97c entry: above NICKEL_MAX_ENTRY -> no payoff left, skip
     assert b.place(mkts=[_mk(bid=97, ask=99)]) == 0
     # lane cap: 5 concurrent nickels max
+    # 8/15: 10 candidates so the lane CAP (now 8) is what binds,
+    # not the size of the fixture.
     ms = [_mk(tk=f"KXHIGHNY-26JUL-N{i}", bid=95, ask=97, city=f"c{i}",
-              strike=i) for i in range(7)]
+              strike=i) for i in range(10)]
     b2 = _bot(tmp_path, monkeypatch)
     b2.max_open_c = 100000
     b2.dry_balance_c = 100000
     b2.place(mkts=ms)
-    assert sum(1 for x in b2.bets.values() if x["trig"] == "nickel") == 5
+    assert sum(1 for x in b2.bets.values()
+               if x["trig"] == "nickel") == dl.dp.NICKEL_MAX_OPEN == 8
 
 
 def test_nickel_size_steps_on_proof(tmp_path, monkeypatch):
@@ -1359,7 +1362,12 @@ def test_sell_ladder_walks_down_as_close_approaches(tmp_path, monkeypatch):
     pos = dict(_stale_order(entry=85, count=10), fee=0)
     assert [r[0] for r in b._sell_rungs(pos, 8.0)] == [98, 99]
     assert [r[0] for r in b._sell_rungs(pos, 3.0)] == [97, 99]
-    assert [r[0] for r in b._sell_rungs(pos, 1.0)] == [96, 97]
+    # 8/15 finer ladder: 1.0h now lands on the 0.5h rung (95/97),
+    # and 2.0h on the new 1.5h rung (96/98)
+    assert [r[0] for r in b._sell_rungs(pos, 1.0)] == [95, 97]
+    # at 2.0h the SELL_MIN_C floor (97) still binds over the 96 rung -
+    # this position's lane is not proven, so it keeps the old floor
+    assert [r[0] for r in b._sell_rungs(pos, 2.0)] == [97, 98]
     # never at or below cost
     assert b._sell_rungs(dict(pos, entry=99), 1.0) is None
 
@@ -1372,7 +1380,7 @@ def test_decay_requote_replaces_stale_rungs(tmp_path, monkeypatch):
     b.quote_offers([_mk(tk=tk, hrs=8.0)])
     assert b.offers[tk]["rungs"] == [98, 99]
     b.quote_offers([_mk(tk=tk, hrs=1.0)])     # time ran on: walk it down
-    assert b.offers[tk]["rungs"] == [96, 97]
+    assert b.offers[tk]["rungs"] == [95, 97]
     assert b.exec_stats.get("decay_requotes") == 1
     assert "L1" not in b.client.canceled       # (old legs were of-* ids)
 
@@ -1574,60 +1582,91 @@ def test_hold_hours_parses_and_rejects_garbage():
 def _wk_book():
     b = dl.DriftLive.__new__(dl.DriftLive)
     b.pnl_days = {}
+    b.nav_days = {}
     b.last_nav_c = 12000        # $120 NAV
     b.week_halt_base_c = 0.0
+    b.week_loss_c = None
+    b.week_limit_c = None
     return b
 
 
-def test_weekly_breaker_units_are_dollars_not_cents():
-    """pnl_days is in DOLLARS; every other figure in the class is cents.
-    A -$5 week on a $120 NAV must NOT trip a 15% ($18) weekly limit -
-    if the conversion is dropped this reads as -500c and fires."""
+def _nav_on(b, days_ago, nav_c):
     import datetime as _d
+    d = (_d.date.today() - _d.timedelta(days=days_ago)).isoformat()
+    b.nav_days[d] = nav_c
+
+
+def test_breaker_cannot_halt_a_book_at_an_all_time_high():
+    """THE v1 BUG. v1 summed realized P&L, so writing off dust while
+    marks climbed read as bleeding: it sat at $16.74 of a $19.66 limit
+    during a +23.7% ALL-TIME-HIGH week. At a high, drawdown is zero by
+    definition and the breaker must be silent."""
     b = _wk_book()
-    today = _d.date.today()
-    b.pnl_days[today.isoformat()] = -5.0
+    for i, nav in enumerate([12000, 11500, 11000, 10500]):
+        _nav_on(b, i, nav)
+    b.last_nav_c = 12000        # today IS the peak
     assert b._week_loss_exceeded() is False
-    assert b.week_loss_c == -500.0      # cents, converted
-    assert b.week_limit_c == 1800.0     # 15% of $120, in cents
+    assert b.week_loss_c == 0.0
 
 
-def test_weekly_breaker_fires_on_a_losing_streak():
-    """Three bad days that each clear the DAILY halt still compound past
-    the weekly limit. This is the case the daily halt cannot see."""
-    import datetime as _d
+def test_breaker_fires_on_a_real_peak_to_trough_drawdown():
+    """Three compounding bad days off a peak - the case the DAILY halt
+    cannot see, and the reason this breaker exists."""
     b = _wk_book()
-    today = _d.date.today()
-    for i in range(3):
-        b.pnl_days[(today - _d.timedelta(days=i)).isoformat()] = -7.0
+    _nav_on(b, 3, 14000)        # peak $140 three days ago
+    _nav_on(b, 0, 11800)
+    b.last_nav_c = 11800        # -$22 from peak, limit is 15% of 118 = 17.70
     assert b._week_loss_exceeded() is True
+    assert b.week_loss_c == -2200.0
+    assert b.week_limit_c == 1770.0
 
 
-def test_weekly_breaker_ignores_days_outside_the_window():
-    import datetime as _d
+def test_breaker_tolerates_a_drawdown_inside_the_limit():
     b = _wk_book()
-    today = _d.date.today()
-    b.pnl_days[(today - _d.timedelta(days=30)).isoformat()] = -500.0
+    _nav_on(b, 2, 12500)
+    b.last_nav_c = 12000        # -$5 against a $18 limit
+    assert b._week_loss_exceeded() is False
+    assert b.week_loss_c == -500.0
+
+
+def test_breaker_ignores_peaks_older_than_the_window():
+    """An 8-day-old high must not keep the book halted forever."""
+    b = _wk_book()
+    _nav_on(b, 30, 40000)       # ancient $400 peak
+    _nav_on(b, 1, 12100)
+    b.last_nav_c = 12000
     assert b._week_loss_exceeded() is False
 
 
-def test_weekly_breaker_fails_safe_on_bad_data():
-    """A broken ledger must never halt a healthy book."""
+def test_breaker_fails_safe_when_nav_is_unknown():
+    """Cold start before _refresh_caps has run. Must not halt, and must
+    publish None rather than a plausible-looking 0.00 cap."""
     b = _wk_book()
-    b.pnl_days = None
+    b.last_nav_c = 0
     assert b._week_loss_exceeded() is False
+    assert b.week_limit_c is None and b.week_loss_c is None
+
+
+def test_breaker_fails_safe_on_a_broken_nav_ledger():
+    b = _wk_book()
+    b.nav_days = None
+    assert b._week_loss_exceeded() is False
+    assert b.week_limit_c is None
     b2 = _wk_book()
-    b2.last_nav_c = 0
+    b2.nav_days = {}
     assert b2._week_loss_exceeded() is False
 
 
-def test_weekly_base_rebases_so_resume_is_not_instantly_retripped():
+def test_breaker_uses_nav_not_realized_pnl():
+    """Explicit regression guard: a week of ugly REALIZED P&L must not
+    halt a book whose NAV never fell. This is exactly what v1 got wrong."""
     import datetime as _d
     b = _wk_book()
     today = _d.date.today()
-    b.pnl_days[today.isoformat()] = -25.0
-    assert b._week_loss_exceeded() is True
-    b.week_halt_base_c = -2500.0      # what a resume sets
+    for i in range(7):
+        b.pnl_days[(today - _d.timedelta(days=i)).isoformat()] = -50.0
+    _nav_on(b, 0, 12000)
+    b.last_nav_c = 12000
     assert b._week_loss_exceeded() is False
 
 
@@ -1713,15 +1752,16 @@ def test_weekly_breaker_publishes_none_not_zero_when_unevaluated():
 
 
 def test_weekly_breaker_arms_once_nav_is_known():
-    import datetime as _d
+    """on=true but armed=false is a real state: enabled, not yet
+    measured. It must not read as an armed cap of zero."""
     b = _wk_book()
     b.last_nav_c = 0
     b._week_loss_exceeded()
-    assert b.week_limit_c is None
+    assert b.week_limit_c is None          # not armed
     b.last_nav_c = 12000
-    b.pnl_days[_d.date.today().isoformat()] = -1.0
+    _nav_on(b, 0, 12100)
     b._week_loss_exceeded()
-    assert b.week_limit_c == 1800.0
+    assert b.week_limit_c == 1800.0        # 15% of $120
     assert b.week_loss_c == -100.0
 
 
@@ -1988,3 +2028,146 @@ def test_util_splits_working_from_committed_capital():
     assert u["pct"] == 0.13      # the old gauge, unchanged
     # the whole point: deployed is 3x working
     assert u["deployed"] > u["working"] * 3
+
+
+# ===== 8/15 offer-engine build =====================================
+
+def test_rung_telemetry_measures_real_conversion():
+    """offers_placed also counts every decay requote, so the '20%
+    conversion' figure was never a conversion rate. This is."""
+    b = dl.DriftLive.__new__(dl.DriftLive)
+    b.rung_stats = {}
+    for _ in range(10):
+        b._rung_place(97)
+    for _ in range(4):
+        b._rung_place(99)
+    b._rung_lift(97, 90.0, 3.0)
+    b._rung_lift(97, 110.0, 2.0)
+    b._rung_lift(99, 30.0, 9.0)
+    r = b._rung_summary()
+    assert r["97"]["placed"] == 10 and r["97"]["lifted"] == 2
+    assert r["97"]["conv"] == 0.2
+    assert r["97"]["net"] == 2.0
+    assert r["97"]["per_lift"] == 1.0
+    assert r["97"]["per_ch"] == 0.4          # $2.00 over 5 capital-hours
+    assert r["99"]["conv"] == 0.25
+    assert r["99"]["per_ch"] == round(0.30 / 9.0, 4)
+
+
+def test_rung_summary_handles_never_lifted_and_zero_hold():
+    b = dl.DriftLive.__new__(dl.DriftLive)
+    b.rung_stats = {}
+    b._rung_place(99)
+    r = b._rung_summary()
+    assert r["99"]["conv"] == 0.0
+    assert r["99"]["per_lift"] is None
+    assert r["99"]["per_ch"] is None         # never divide by zero hold
+
+
+def test_rung_lift_tolerates_unmeasurable_hold():
+    b = dl.DriftLive.__new__(dl.DriftLive)
+    b.rung_stats = {}
+    b._rung_place(97)
+    b._rung_lift(97, 50.0, None)
+    r = b._rung_summary()
+    assert r["97"]["lifted"] == 1 and r["97"]["hold_h"] == 0.0
+    assert r["97"]["per_ch"] is None
+
+
+def _dust_book(bets):
+    b = dl.DriftLive.__new__(dl.DriftLive)
+    b.bets = bets
+    b.pending = {}
+    return b
+
+
+def test_dust_is_excluded_from_the_risk_budget():
+    """16 of 25 slots held 1-2c residue while slate caps refused 6,828
+    fresh entries. Dust cannot be quoted, so it must not consume the
+    open-cap budget live inventory needs."""
+    b = _dust_book({
+        "LIVE": {"entry": 88, "count": 5, "fee": 0},     # $4.40 real
+        "DUST1": {"entry": 2, "count": 30, "fee": 0},    # $0.60 residue
+        "DUST2": {"entry": 1, "count": 10, "fee": 0},    # $0.10 residue
+    })
+    assert b.open_cost_c() == 88 * 5
+    assert b.dust_c() == 2 * 30 + 1 * 10
+
+
+def test_dust_threshold_is_inclusive_and_survives_garbage():
+    b = _dust_book({"A": {"entry": 3, "count": 5},
+                    "B": {"entry": 4, "count": 5},
+                    "C": {"entry": None, "count": 5}})
+    assert b._is_dust(b.bets["A"]) is True      # 3c is dust
+    assert b._is_dust(b.bets["B"]) is False     # 4c is not
+    assert b._is_dust(b.bets["C"]) is False     # unparseable != dust
+
+
+def _rungs_book():
+    b = dl.DriftLive.__new__(dl.DriftLive)
+    b.bucket_blocked_cum = {}
+    return b
+
+
+def test_proven_lane_may_quote_a_cent_lower():
+    """96 on proven lanes only. Nickels stay 98 - never loosen a 21-0
+    lane. Unproven lanes keep 97, so this is a probe on earned ground."""
+    b = _rungs_book()
+    proven = {"level:80-84": {"n": 47, "wins": 43, "net": 13.5,
+                              "blocked": False}}
+    b.history = [{"tk": f"T{i}", "ots": f"o{i}", "trig": "level",
+                  "entry": 82, "pnl": 0.29} for i in range(47)]
+    pos = {"entry": 82, "count": 4, "trig": "level"}
+    # far from close the ladder's own 98 rung dominates either way
+    assert b._sell_rungs(pos, 8.0)[0][0] == 98
+    # NOTE: below 2h the floor deliberately relaxes to 1 so the book can
+    # flatten, so the lane floor only bites at >= 2h. At 2.0h the ladder
+    # offers 96 and a PROVEN lane is allowed to take it.
+    got = [r[0] for r in b._sell_rungs(pos, 2.0)]
+    assert got[0] == 96, got
+
+    b2 = _rungs_book()
+    b2.history = [{"tk": "x", "ots": "o", "trig": "level",
+                   "entry": 82, "pnl": 0.1}]        # thin: not proven
+    assert [r[0] for r in b2._sell_rungs(pos, 2.0)][0] == 97
+
+
+def test_nickel_floor_is_never_loosened():
+    b = _rungs_book()
+    b.history = []
+    pos = {"entry": 94, "count": 4, "trig": "nickel"}
+    for hrs in (8.0, 3.0, 1.0, 0.4, 0.0):
+        rungs = b._sell_rungs(pos, hrs)
+        if rungs:
+            assert min(r[0] for r in rungs) >= dl.NICKEL_SELL_MIN_C, hrs
+
+
+def test_decay_ladder_is_monotonic_and_walks_to_the_floor():
+    prev_lo = 100
+    for h_min, lo, hi in dl.DECAY_LADDER:
+        assert lo <= hi <= dl.SELL_CAP_C
+        assert lo <= prev_lo, "rungs must not step UP as close approaches"
+        prev_lo = lo
+    assert len(dl.DECAY_LADDER) == 5
+
+
+def test_lift_marks_the_market_for_a_rebid():
+    """One market can pay more than once: the band settles at 100
+    essentially always, so a market we sold at 96-99 is the same trade
+    again if it dips back."""
+    b = dl.DriftLive.__new__(dl.DriftLive)
+    b.rebid = {}
+    b.rung_stats = {}
+    b.turns = {}
+    assert "TK1" not in b.rebid
+    b.rebid["TK1"] = dl.now()
+    assert "TK1" in b.rebid
+
+
+def test_rebid_map_stays_bounded():
+    b = dl.DriftLive.__new__(dl.DriftLive)
+    b.rebid = {f"T{i}": f"2026-08-15T00:00:{i:02d}" for i in range(250)}
+    if len(b.rebid) > 200:
+        for k in sorted(b.rebid, key=lambda x: b.rebid[x])[:50]:
+            b.rebid.pop(k, None)
+    assert len(b.rebid) == 200

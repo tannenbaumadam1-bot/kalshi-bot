@@ -300,6 +300,19 @@ DIP_MIN_ROOM_C = 2      # bid must sit >= 2c under the market bid
 DIP_REFRESH_C = int(os.environ.get("DRIFT_LIVE_DIP_REFRESH", "3"))
 DIP_MAX_PCT = float(os.environ.get("DRIFT_LIVE_DIP_MAX_PCT", "0.25"))
 SELL_MIN_C = int(os.environ.get("DRIFT_LIVE_SELL_MIN", "97"))
+# 8/15: a cent lower on PROVEN lanes only. Per capital-hour, selling
+# early already beats holding 2.5x (3.4%/hr vs 1.36%/hr) - the binding
+# constraint is that most quotes never lift at all. 96c cuts per-turn
+# ~11%; it wins if conversion rises more than that, which the per-rung
+# telemetry shipped alongside is there to answer. Nickels stay at 98
+# (21-0 - do not touch a perfect lane).
+SELL_MIN_PROVEN_C = int(os.environ.get("DRIFT_LIVE_SELL_MIN_PROVEN", "96"))
+# 8/15 DUST. Expired residue bought at 1-3c (adopt stubs, losing tails
+# awaiting settlement) occupied 16 of 25 position slots while slate caps
+# refused fresh entries 6,828 times. It totals ~$2 and cannot be quoted
+# (below every sell floor), so it must not consume the open-cap budget
+# that live inventory needs. It still settles normally.
+DUST_MAX_ENTRY_C = int(os.environ.get("DRIFT_LIVE_DUST_ENTRY_C", "3"))
 NICKEL_SELL_MIN_C = int(os.environ.get("DRIFT_LIVE_NICKEL_SELL_MIN", "98"))
 SELL_MARKUP_C = int(os.environ.get("DRIFT_LIVE_SELL_MARKUP", "6"))
 SELL_CAP_C = 99
@@ -319,7 +332,13 @@ SELL_LADDER_ON = os.environ.get("DRIFT_LIVE_SELL_LADDER", "1") == "1"
 FLATTEN_H = float(os.environ.get("DRIFT_LIVE_FLATTEN_H", "1.0"))
 # time-decay rungs: (hours_left_at_least, low_rung, high_rung)
 DECAY_ON = os.environ.get("DRIFT_LIVE_SELL_DECAY", "1") == "1"
-DECAY_LADDER = ((6.0, 98, 99), (2.0, 97, 99), (0.0, 96, 97))
+# 8/15: five rungs, not three. At a 90s cycle the old ladder left an ask
+# parked at 98 for four hours while its market drifted underneath. Finer
+# steps track the clock closely enough to behave like a continuous walk.
+# The lane floor in _sell_rungs still binds, so a nickel never quotes
+# below 98 no matter what this table says.
+DECAY_LADDER = ((6.0, 98, 99), (3.0, 97, 99), (1.5, 96, 98),
+                (0.5, 95, 97), (0.0, 94, 96))
 # dip lane: context-only was the training-wheels version - inventory is
 # the constraint, so any scanned favorite is now fair game
 DIP_CONTEXT_ONLY = os.environ.get("DRIFT_LIVE_DIP_CONTEXT", "0") == "1"
@@ -345,6 +364,14 @@ DEPOSITS_C = int(os.environ.get("DRIFT_LIVE_DEPOSITS_C", "10000"))
 # Resume is deliberately manual: same unhalt.txt token as the day halt.
 WEEK_HALT_PCT = float(os.environ.get("DRIFT_LIVE_WEEK_HALT_PCT", "0.15"))
 WEEK_HALT_ON = os.environ.get("DRIFT_LIVE_WEEK_HALT", "1") == "1"
+# 8/15 v2: measure DRAWDOWN FROM A ROLLING 7-DAY NAV PEAK, not realized
+# P&L. v1 summed pnl_days, which is realized-only - so a book that
+# writes off dust and flattens stragglers while its marks climb reads as
+# bleeding. It sat at $16.74 of a $19.66 limit during a week that was
+# +23.7% AT AN ALL-TIME HIGH, i.e. about to halt a winning book.
+# Peak-to-trough is what the rule was always trying to express: a
+# winning week cannot trip it (drawdown is 0 at a high by definition),
+# and three compounding bad days trip it exactly as intended.
 
 
 def _hold_hours(ots):
@@ -512,6 +539,9 @@ class DriftLive:
         self.halt_base_c = 0.0   # halt measures loss since last resume
         self.bucket_blocked_cum = {}   # 8/14: bk -> evidence that blocked it
         self.orphan_legs = []     # 8/14: legs whose cancel FAILED
+        self.nav_days = {}        # 8/15: date -> peak NAV (cents) that day
+        self.rung_stats = {}      # 8/15: ask px -> placed/lifted/net/hold
+        self.rebid = {}           # 8/15: tk -> ts of the lift that freed it
         self.week_halted = False  # 8/14 rolling-7-day circuit breaker
         self.week_halt_base_c = 0.0
         self.last_nav_c = 0.0     # PERSISTED: arms the breaker on cycle 1
@@ -537,7 +567,8 @@ class DriftLive:
                           "offers", "sold_log", "dips", "turns",
                           "halt_base_c", "resume_token",
                           "week_halted", "week_halt_base_c", "last_nav_c",
-                          "bucket_blocked_cum", "orphan_legs",
+                          "bucket_blocked_cum", "orphan_legs", "nav_days",
+                          "rung_stats", "rebid",
                           "k_positions", "k_resting", "dry_balance_c"):
                     if k in d:
                         setattr(self, k, d[k])
@@ -1127,6 +1158,12 @@ class DriftLive:
                  # sell more than we hold and flip the position.
                  "over_offer": self._over_offer_c(),
                  "orphan_legs": len(getattr(self, "orphan_legs", None) or []),
+                 # 8/15: per-ask-price conversion. offers_placed also
+                 # counts decay requotes, so the "20% conversion" figure
+                 # was never real - this is.
+                 "rungs": self._rung_summary(),
+                 "dust": round(self.dust_c() / 100.0, 2),
+                 "rebid_n": len(getattr(self, "rebid", None) or {}),
                  "open": len(self.bets), "resting": len(self.pending),
                  "placed": self.placed, "canceled": self.canceled,
                  "fees": round(self.fees_c / 100, 2),
@@ -1471,9 +1508,22 @@ class DriftLive:
         except Exception:
             pass
 
+    def _is_dust(self, b):
+        """Residue we cannot quote and cannot sell: entered at or below
+        DUST_MAX_ENTRY_C. Still settles normally - it just stops
+        counting against the risk budget."""
+        try:
+            return int(b.get("entry", 99)) <= DUST_MAX_ENTRY_C
+        except (TypeError, ValueError):
+            return False
+
+    def dust_c(self):
+        return sum(b["entry"] * b["count"]
+                   for b in self.bets.values() if self._is_dust(b))
+
     def open_cost_c(self):
         oc = sum(b["entry"] * b["count"] + b.get("fee", 0)
-                 for b in self.bets.values())
+                 for b in self.bets.values() if not self._is_dust(b))
         oc += sum(o["entry"] * o["count"] for o in self.pending.values())
         return oc
 
@@ -1566,6 +1616,48 @@ class DriftLive:
                 keep.append(o)
         self.orphan_legs = keep[-200:]
 
+    def _rung_place(self, px):
+        """One offer leg posted at `px`."""
+        if not isinstance(getattr(self, "rung_stats", None), dict):
+            self.rung_stats = {}
+        r = self.rung_stats.setdefault(str(int(px)),
+                                       {"placed": 0, "lifted": 0,
+                                        "net_c": 0.0, "hold_h": 0.0})
+        r["placed"] = int(r.get("placed", 0)) + 1
+
+    def _rung_lift(self, px, net_c, hold_h):
+        """That leg lifted. THE question this answers: which ask prices
+        actually trade, and how long the capital was locked to get
+        there. Conversion cannot be read off offers_placed because that
+        counter also increments on every decay requote - so the 20%
+        figure everyone quoted was never a real conversion rate. Without
+        this, the most important price in the system is set blind."""
+        if not isinstance(getattr(self, "rung_stats", None), dict):
+            self.rung_stats = {}
+        r = self.rung_stats.setdefault(str(int(px)),
+                                       {"placed": 0, "lifted": 0,
+                                        "net_c": 0.0, "hold_h": 0.0})
+        r["lifted"] = int(r.get("lifted", 0)) + 1
+        r["net_c"] = round(float(r.get("net_c", 0)) + float(net_c), 1)
+        if hold_h is not None and hold_h >= 0:
+            r["hold_h"] = round(float(r.get("hold_h", 0)) + float(hold_h), 2)
+
+    def _rung_summary(self):
+        """Per ask price: conversion, net per lift, and net per
+        capital-hour - the objective the ladder gets tuned against."""
+        out = {}
+        for px, r in sorted((getattr(self, "rung_stats", None) or {}).items()):
+            pl, lf = int(r.get("placed", 0)), int(r.get("lifted", 0))
+            hh, net = float(r.get("hold_h", 0)), float(r.get("net_c", 0))
+            out[px] = {
+                "placed": pl, "lifted": lf,
+                "conv": round(lf / pl, 3) if pl else None,
+                "net": round(net / 100.0, 2),
+                "per_lift": round(net / lf / 100.0, 3) if lf else None,
+                "hold_h": round(hh, 2),
+                "per_ch": round(net / hh / 100.0, 4) if hh > 0 else None}
+        return out
+
     def _over_offer_c(self):
         """Contracts offered beyond what we actually hold, per ticker,
         measured against THE EXCHANGE - not our own books.
@@ -1614,33 +1706,37 @@ class DriftLive:
         return out
 
     def _week_loss_exceeded(self):
-        """True when the rolling 7-day realized P&L is worse than
-        WEEK_HALT_PCT of NAV, measured from the last weekly resume.
+        """True when NAV has fallen WEEK_HALT_PCT below its highest
+        point in the trailing 7 days.
 
-        Reads the persistent daily ledger (pnl_days), which is never
-        trimmed, so this survives restarts. Returns False on any missing
-        or unparseable data - a broken ledger must never halt a healthy
-        book, and must never be mistaken for a healthy one either (the
-        `week` block on the tracker publishes what it actually saw).
+        8/15 v2. v1 summed realized P&L (pnl_days) and was wrong: it read
+        -$16.74 against a $19.66 limit during a +23.7% all-time-high
+        week, because realizing small losses while marks climb looks
+        identical to bleeding. Drawdown from a rolling peak is what the
+        rule always meant - a book at a high has zero drawdown by
+        definition and can never be halted for winning, while three
+        compounding bad days trip it exactly as intended.
+
+        Fails safe (False) on missing or unparseable data: a broken
+        ledger must never halt a healthy book. `week` on the tracker
+        publishes armed=false in that case so it is never mistaken for
+        a healthy one either.
         """
-        if not isinstance(getattr(self, "pnl_days", None), dict):
+        nav_c = float(getattr(self, "last_nav_c", 0) or 0)
+        if nav_c <= 0 or not isinstance(getattr(self, "nav_days", None),
+                                        dict) or not self.nav_days:
+            self.week_loss_c = None
+            self.week_limit_c = None
             return False
         try:
-            today = datetime.date.today()
-            win = [(today - datetime.timedelta(days=i)).isoformat()
+            tday = datetime.date.today()
+            win = [(tday - datetime.timedelta(days=i)).isoformat()
                    for i in range(7)]
-            # pnl_days is in DOLLARS (see _day_add); everything else in
-            # this class is cents. Convert once, here, explicitly.
-            wk_c = sum(float(self.pnl_days.get(d) or 0)
-                       for d in win) * 100.0
+            peaks = [float(self.nav_days.get(d) or 0) for d in win]
+            peak_c = max(peaks + [nav_c])
+            # negative = drawdown, to match the old sign convention
+            wk_c = nav_c - peak_c
         except (TypeError, ValueError, OverflowError):
-            return False
-        nav_c = float(getattr(self, "last_nav_c", 0) or 0)
-        if nav_c <= 0:
-            # NAV unknown (cold start, before _refresh_caps has run). Fail
-            # safe - but publish None, not 0.0: a limit of "0.00" on the
-            # tracker reads like an armed cap of zero when it actually
-            # means the breaker has not evaluated yet.
             self.week_loss_c = None
             self.week_limit_c = None
             return False
@@ -1717,9 +1813,16 @@ class DriftLive:
         nothing and locks the capital for the whole session - the last
         hour is worth more as a completed turn than as a proud price.
         Never quotes at or below cost."""
-        floor = (NICKEL_SELL_MIN_C if b.get("trig") == "nickel"
-                 else SELL_MIN_C)
-        lo_t, hi_t = SELL_MIN_C, SELL_CAP_C
+        # 8/15 lane-aware floor. Nickels hold 98 (21-0). Proven lanes
+        # may quote a cent lower to lift more often; unproven lanes keep
+        # 97, so this is a probe on earned ground, not a loosening.
+        if b.get("trig") == "nickel":
+            floor = NICKEL_SELL_MIN_C
+        elif self._bucket_is_proven(b.get("trig"), int(b.get("entry", 0))):
+            floor = SELL_MIN_PROVEN_C
+        else:
+            floor = SELL_MIN_C
+        lo_t, hi_t = floor, SELL_CAP_C
         if DECAY_ON and hrs is not None:
             for h_min, lo_d, hi_d in DECAY_LADDER:
                 if hrs >= h_min:
@@ -2215,6 +2318,7 @@ class DriftLive:
                     except Exception:
                         continue
                 legs.append({"oid": oid, "px": r_px, "count": r_n})
+                self._rung_place(r_px)
                 self.placed += 1
                 self.exec_stats["offers_placed"] = (
                     self.exec_stats.get("offers_placed", 0) + 1)
@@ -2303,7 +2407,21 @@ class DriftLive:
         # 8/13: a lift IS a round trip. 8/14: with capital-hours, so the
         # decay ladder can be retuned on net-per-capital-hour - the only
         # objective that makes sense on a capital-constrained book.
-        self._turn_add(net, "lift", hold_h=_hold_hours(b.get("ots")))
+        _hh = _hold_hours(b.get("ots"))
+        self._turn_add(net, "lift", hold_h=_hh)
+        self._rung_lift(px, net, _hh)
+        # 8/15 TWO-SIDED: the market we just sold at 96-99 is the same
+        # trade again if it dips back. The calibration table says this
+        # band settles at 100 essentially always, so one market can pay
+        # more than once. Mark it so quote_dips bids it FIRST - the dip
+        # lane already allowed re-entry, it just lost the race for
+        # capital whenever the caps bound.
+        if not isinstance(getattr(self, "rebid", None), dict):
+            self.rebid = {}
+        self.rebid[tk] = now()
+        if len(self.rebid) > 200:
+            for k in sorted(self.rebid, key=lambda x: self.rebid[x])[:50]:
+                self.rebid.pop(k, None)
         self._k_sold_add(tk, px * sold)
         # 8/11 sold-vs-settled autopsy: every sale is graded against the
         # eventual settlement (sold_check), so "were we selling too
@@ -2599,6 +2717,18 @@ class DriftLive:
         self.max_open_c = int(nav_c * OPEN_PCT)
         self.max_day_loss_c = max(HALT_FLOOR_C, int(nav_c * HALT_PCT))
         self.last_nav_c = nav_c      # 8/14: weekly breaker measures on this
+        # 8/15: daily NAV high-water marks feed the drawdown breaker
+        try:
+            d = today()
+            if not isinstance(self.nav_days, dict):
+                self.nav_days = {}
+            self.nav_days[d] = max(float(self.nav_days.get(d, 0) or 0),
+                                   float(nav_c))
+            if len(self.nav_days) > 60:
+                for old in sorted(self.nav_days)[:-60]:
+                    self.nav_days.pop(old, None)
+        except (TypeError, ValueError, AttributeError):
+            pass
 
     def place(self, mkts=None):
         # 8/13: the halt measures the day's loss FROM THE LAST RESUME,
@@ -2929,7 +3059,11 @@ class DriftLive:
                 except Exception:
                     continue
             del self.dips[tk]
-        for mk in mkts:
+        # 8/15: markets we just lifted go to the front of the queue.
+        # Every cap below is a first-come budget, so ordering IS
+        # allocation - a proven round-trip should outrank a cold market.
+        _rb = getattr(self, "rebid", None) or {}
+        for mk in sorted(mkts, key=lambda m: 0 if m["ticker"] in _rb else 1):
             tk = mk["ticker"]
             if tk in self.dips or tk in pend_tks:
                 continue

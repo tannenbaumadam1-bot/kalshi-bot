@@ -79,7 +79,9 @@ NICKEL_COUNT = int(os.environ.get("DRIFT_NICKEL_COUNT", "10"))   # Adam's size
 # wins so far are all old 98c entries, so the <=96c era must earn its own
 # scale: 10ct base -> 15ct after 10 settled <=96c nickels net-positive ->
 # 20ct after 20. Auto, no redeploy needed.
-NICKEL_MAX_OPEN = int(os.environ.get("DRIFT_NICKEL_MAX_OPEN", "5"))
+# 8/15: 5 -> 8. Nickel lane is 21-0 with the highest net per bet in the
+# book ($0.394) and ran 2 open against a cap of 5. Raised on evidence.
+NICKEL_MAX_OPEN = int(os.environ.get("DRIFT_NICKEL_MAX_OPEN", "8"))
 NICKEL_STEP1_N = int(os.environ.get("DRIFT_NICKEL_STEP1_N", "10"))
 NICKEL_STEP1_CT = int(os.environ.get("DRIFT_NICKEL_STEP1_CT", "15"))
 NICKEL_STEP2_N = int(os.environ.get("DRIFT_NICKEL_STEP2_N", "20"))

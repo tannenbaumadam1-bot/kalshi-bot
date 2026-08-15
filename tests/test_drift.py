@@ -509,4 +509,6 @@ def test_nickel_size_steps_up_on_proof(tmp_path, monkeypatch):
 
 
 def test_nickel_lanes_widened_to_five(tmp_path, monkeypatch):
-    assert dp.NICKEL_MAX_OPEN == 5
+    # 8/15: 5 -> 8. Lane is 21-0 with the best net per bet in the
+    # book and was running 2 open against a cap of 5.
+    assert dp.NICKEL_MAX_OPEN == 8
