@@ -705,7 +705,7 @@ def test_settlement_receivable_bridges_nav(tmp_path, monkeypatch):
 
 def test_offer_defaults():
     assert dl.QUOTE_ON is True
-    assert dl.SELL_MIN_C == 97 and dl.NICKEL_SELL_MIN_C == 98
+    assert dl.SELL_MIN_C == 98 and dl.NICKEL_SELL_MIN_C == 98
     assert dl.SELL_CAP_C == 99
 
 
@@ -715,9 +715,9 @@ def test_premium_offers_quote_all_inventory(tmp_path, monkeypatch):
     b.quote_offers()
     tk = next(iter(b.bets))
     off = b.offers[tk]
-    # 8/11 ladder: 5 lots split - 3 at the 97 rung, 2 at 99
+    # 8/11 ladder: 5 lots split - 3 at the low rung (98 since 8/17), 2 at 99
     assert off["count"] == b.bets[tk]["count"] == 5
-    assert [(l["px"], l["count"]) for l in off["legs"]] == [(97, 3), (99, 2)]
+    assert [(l["px"], l["count"]) for l in off["legs"]] == [(98, 3), (99, 2)]
     # nickel entry 95: low rung min(99, max(98, 101)) = 99 -> single rung
     monkeypatch.setattr(dl, 'WX_ALLOC', 1.0)
     b2 = _bot(tmp_path, monkeypatch)
@@ -738,7 +738,7 @@ def test_premium_offers_quote_all_inventory(tmp_path, monkeypatch):
     b3.place(mkts=[_mk(bid=82, ask=85)])
     b3.quote_offers()
     l3 = b3.offers[next(iter(b3.bets))]["legs"]
-    assert len(l3) == 1 and l3[0]["px"] == 97 and l3[0]["count"] == 5
+    assert len(l3) == 1 and l3[0]["px"] == 98 and l3[0]["count"] == 5
 
 
 def test_offer_fill_books_premium_and_recycles(tmp_path, monkeypatch):
@@ -748,11 +748,11 @@ def test_offer_fill_books_premium_and_recycles(tmp_path, monkeypatch):
     r0, day0 = b.realized_c, b.day_pnl_c
     b.quote_offers()
     legs = b.offers[tk]["legs"]
-    # both rungs lift: 3 @ 97 and 2 @ 99
+    # both rungs lift: 3 @ 98 and 2 @ 99
     b._check_offers(set(), {legs[0]["oid"]: 3, legs[1]["oid"]: 2})
     assert tk not in b.bets and tk not in b.offers
     assert b.realized_c > r0 and b.day_pnl_c > day0
-    assert b.history[-1]["exit_px"] == 99 and b.history[-2]["exit_px"] == 97
+    assert b.history[-1]["exit_px"] == 99 and b.history[-2]["exit_px"] == 98
     assert all(h["pnl"] > 0 and h.get("sold") for h in b.history[-2:])
     # 8/11 sold autopsy: grades against eventual settlement
     monkeypatch.setattr(dl, "fetch_result", lambda tk: "yes")
@@ -771,14 +771,14 @@ def test_offer_partial_fill_shrinks_and_requotes(tmp_path, monkeypatch):
     assert n == 5                                # 8/10 floor
     b.quote_offers()
     legs = b.offers[tk]["legs"]
-    # 2 of the 97-rung's 3 lift; the 99 leg keeps resting
+    # 2 of the low rung's 3 lift; the 99 leg keeps resting
     b._check_offers({legs[1]["oid"]}, {legs[0]["oid"]: 2})
     assert b.bets[tk]["count"] == 3
     assert len(b.offers[tk]["legs"]) == 1        # surviving 99 leg
     b.quote_offers()                             # resize: requote at 3
     off = b.offers[tk]
     assert off["count"] == 3
-    assert [(l["px"], l["count"]) for l in off["legs"]] == [(97, 2), (99, 1)]
+    assert [(l["px"], l["count"]) for l in off["legs"]] == [(98, 2), (99, 1)]
     # position settles before the quote lifts: stale offer dropped
     del b.bets[tk]
     b.quote_offers()
@@ -855,7 +855,7 @@ def test_k_truth_v2_folds_sale_proceeds(tmp_path, monkeypatch):
     b3.quote_offers()
     lg = b3.offers[tk]["legs"]
     b3._check_offers(set(), {lg[0]["oid"]: 3, lg[1]["oid"]: 2})
-    assert b3.k_sold.get(tk) == 97 * 3 + 99 * 2
+    assert b3.k_sold.get(tk) == 98 * 3 + 99 * 2
 
 
 # ---- 8/11 approved queue: caps, earned sizing, sync detail, re-entry ----
@@ -894,6 +894,9 @@ def test_slate_cap_blocks_same_morning_pileup(tmp_path, monkeypatch):
     # assert rather than think. What must hold at ANY setting is the
     # relationship: N five-lots fit under the cap and the next is
     # refused, and a different settlement date is untouched.
+    # 8/17: isolate the SLATE axis - the metric-slate cap (0.30) now
+    # binds first on an all-highs pileup, which is ITS test, not this one
+    monkeypatch.setattr(dl, "METRIC_SLATE_PCT", 1.0)
     b = _bot(tmp_path, monkeypatch)
     b.dry_balance_c = 10000                      # NAV $100
     cost_c = 89 * dl.MIN_CONTRACTS               # taker entry x 5-lot floor
@@ -1317,9 +1320,9 @@ def test_stale_exchange_quotes_on_held_ticker_are_canceled(tmp_path,
     tk, other = "KXLOWTMIA-26AUG12-B79.5", "KXHIGHNY-26JUL-T86"
     b.bets[tk] = dict(_stale_order(tk=tk, entry=88, count=44), fee=0)
     b.bets[other] = dict(_stale_order(tk=other, entry=85, count=5), fee=0)
-    b.offers[tk] = {"legs": [{"oid": "L1", "px": 97, "count": 22},
+    b.offers[tk] = {"legs": [{"oid": "L1", "px": 98, "count": 22},
                              {"oid": "L2", "px": 99, "count": 22}],
-                    "count": 44, "rungs": [97, 99], "ots": ""}
+                    "count": 44, "rungs": [98, 99], "ots": ""}
     b.pending["p1"] = dict(_stale_order(tk=other), exec="maker")
     b.dips["KXLOWTMIA-26AUG12-B77.5"] = {"oid": "D1"}
     b.k_resting = [
@@ -1370,13 +1373,14 @@ def test_sell_ladder_walks_down_as_close_approaches(tmp_path, monkeypatch):
     b = _bot(tmp_path, monkeypatch)
     pos = dict(_stale_order(entry=85, count=10), fee=0)
     assert [r[0] for r in b._sell_rungs(pos, 8.0)] == [98, 99]
-    assert [r[0] for r in b._sell_rungs(pos, 3.0)] == [97, 99]
+    assert [r[0] for r in b._sell_rungs(pos, 3.0)] == [98, 99]
     # 8/15 finer ladder: 1.0h now lands on the 0.5h rung (95/97),
     # and 2.0h on the new 1.5h rung (96/98)
     assert [r[0] for r in b._sell_rungs(pos, 1.0)] == [95, 97]
-    # at 2.0h the SELL_MIN_C floor (97) still binds over the 96 rung -
-    # this position's lane is not proven, so it keeps the old floor
-    assert [r[0] for r in b._sell_rungs(pos, 2.0)] == [97, 98]
+    # at 2.0h the SELL_MIN_C floor (98 since 8/17) binds over the 96
+    # rung AND meets the tier's 98 ceiling, so the two rungs collapse
+    # into one full-size 98 leg (unproven lane keeps the floor)
+    assert [r[0] for r in b._sell_rungs(pos, 2.0)] == [98]
     # never at or below cost
     assert b._sell_rungs(dict(pos, entry=99), 1.0) is None
 
@@ -2143,7 +2147,8 @@ def _rungs_book():
 
 def test_proven_lane_may_quote_a_cent_lower():
     """96 on proven lanes only. Nickels stay 98 - never loosen a 21-0
-    lane. Unproven lanes keep 97, so this is a probe on earned ground."""
+    lane. Unproven lanes keep the 98 floor (8/17: the 97 rung is
+    retired), so this is a probe on earned ground."""
     b = _rungs_book()
     proven = {"level:80-84": {"n": 47, "wins": 43, "net": 13.5,
                               "blocked": False}}
@@ -2161,7 +2166,7 @@ def test_proven_lane_may_quote_a_cent_lower():
     b2 = _rungs_book()
     b2.history = [{"tk": "x", "ots": "o", "trig": "level",
                    "entry": 82, "pnl": 0.1}]        # thin: not proven
-    assert [r[0] for r in b2._sell_rungs(pos, 2.0)][0] == 97
+    assert [r[0] for r in b2._sell_rungs(pos, 2.0)][0] == 98
 
 
 def test_nickel_floor_is_never_loosened():

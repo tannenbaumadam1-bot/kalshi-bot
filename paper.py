@@ -595,8 +595,12 @@ def main():
     # MID-BAND PAPER BOOK (8/13, Adam): 15-55c bands, exits on
     # convergence or the pre-close flatten - the jjavi shape, tested on
     # our own ledger before a dollar moves. PAPER_MIDBAND=0 kills it.
+    # 8/17 RETIRED (Adam: drop what isn't working): frozen at max_open
+    # since 8/14 with stale inventory, 4 turns against a 200-turn gate -
+    # it stopped generating evidence. State preserved; revive with
+    # PAPER_MIDBAND=1.
     mb_bot = None
-    if os.environ.get("PAPER_MIDBAND", "1") == "1":
+    if os.environ.get("PAPER_MIDBAND", "0") == "1":
         try:
             import midband_paper
             mb_bot = midband_paper.MidbandPaper()

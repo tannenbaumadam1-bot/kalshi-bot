@@ -294,6 +294,18 @@ CITY_CAP_PCT = float(os.environ.get("DRIFT_LIVE_CITY_CAP_PCT",
 # just because they settle the same evening) is the real answer and
 # stays queued BEHIND this measurement, deliberately.
 SLATE_CAP_PCT = float(os.environ.get("DRIFT_LIVE_SLATE_CAP_PCT", "0.60"))
+# --- 8/17 METRIC-SLATE CAP (Adam-approved after the 8/17 morning): the
+# city cap (15%) and slate cap (60%) BOTH held on 8/17 and the book
+# still lost $17.67 of marks in one night, because five LOW-temp NO
+# positions across five cities broke on ONE warm air mass. Correlation
+# runs along the METRIC (all lows / all highs of a slate move on the
+# same synoptic pattern), not just the city or the date. This caps
+# filled cost per (metric, settlement-date) - "all lows settling
+# tomorrow" - at METRIC_SLATE_PCT of NAV. 8/17's low-side book was ~26%
+# of NAV; 0.30 trims the tail without touching the proven lanes' bread
+# and butter. REVERT: export DRIFT_LIVE_METRIC_SLATE_PCT=1.0.
+METRIC_SLATE_PCT = float(os.environ.get("DRIFT_LIVE_METRIC_SLATE_PCT",
+                                        "0.30"))
 # --- 8/11 EARNED SIZING (Adam-approved): buckets the ledger has PROVEN
 # (half-Kelly lanes) size to PROVEN_BET_PCT of NAV; everything else
 # stays at the base pct. Aggression is earned per bucket, never global.
@@ -318,7 +330,13 @@ DIP_DISCOUNT_C = int(os.environ.get("DRIFT_LIVE_DIP_DISCOUNT", "2"))
 DIP_MIN_ROOM_C = 2      # bid must sit >= 2c under the market bid
 DIP_REFRESH_C = int(os.environ.get("DRIFT_LIVE_DIP_REFRESH", "3"))
 DIP_MAX_PCT = float(os.environ.get("DRIFT_LIVE_DIP_MAX_PCT", "0.25"))
-SELL_MIN_C = int(os.environ.get("DRIFT_LIVE_SELL_MIN", "97"))
+# 8/17 RUNG REWEIGHT: the telemetry finally reported and 97 is a dead
+# rung - 8 placed / 1 lifted (12.5% conv), $0.0032 per capital-hour vs
+# 98's 57.6% conv at $0.0301 and 99's $0.0344. Every quote parked at 97
+# was inventory NOT working at 98/99. Base ladder floor moves 97 -> 98;
+# the decay tiers below 2h keep their lower floors so endgame inventory
+# can still flatten. REVERT: export DRIFT_LIVE_SELL_MIN=97.
+SELL_MIN_C = int(os.environ.get("DRIFT_LIVE_SELL_MIN", "98"))
 # 8/15: a cent lower on PROVEN lanes only. Per capital-hour, selling
 # early already beats holding 2.5x (3.4%/hr vs 1.36%/hr) - the binding
 # constraint is that most quotes never lift at all. 96c cuts per-turn
@@ -356,7 +374,7 @@ DECAY_ON = os.environ.get("DRIFT_LIVE_SELL_DECAY", "1") == "1"
 # steps track the clock closely enough to behave like a continuous walk.
 # The lane floor in _sell_rungs still binds, so a nickel never quotes
 # below 98 no matter what this table says.
-DECAY_LADDER = ((6.0, 98, 99), (3.0, 97, 99), (1.5, 96, 98),
+DECAY_LADDER = ((6.0, 98, 99), (3.0, 98, 99), (1.5, 96, 98),
                 (0.5, 95, 97), (0.0, 94, 96))
 # dip lane: context-only was the training-wheels version - inventory is
 # the constraint, so any scanned favorite is now fair game
@@ -391,6 +409,33 @@ WEEK_HALT_ON = os.environ.get("DRIFT_LIVE_WEEK_HALT", "1") == "1"
 # Peak-to-trough is what the rule was always trying to express: a
 # winning week cannot trip it (drawdown is 0 at a high by definition),
 # and three compounding bad days trip it exactly as intended.
+# --- 8/17 BREAKER v3: MARKED NAV, not cost basis. The 8/17 morning
+# proved v2 blind in the exact scenario it exists for: five low-temp
+# positions collapsed 85c->5c (-$23 of marks, NAV 132->117) and the
+# breaker read loss -$4.30, because last_nav_c = cash + ENTRY COST of
+# positions - a number that cannot move when marks move. v3 marks the
+# book to the exchange every cycle (our-side bid = liquidation value)
+# and measures drawdown on THAT. Cost-basis NAV still drives sizing
+# caps (marks are jumpy; sizing should not whipsaw), and the breaker
+# falls back to it whenever marks are stale - fails safe, never blind
+# by construction again. REVERT: export DRIFT_LIVE_MNAV=0.
+MNAV_ON = os.environ.get("DRIFT_LIVE_MNAV", "1") == "1"
+MNAV_FRESH_S = int(os.environ.get("DRIFT_LIVE_MNAV_FRESH_S", "900"))
+MNAV_MIN_COV = float(os.environ.get("DRIFT_LIVE_MNAV_COV", "0.5"))
+# --- 8/17 DOWNSIDE EXIT (Adam-approved): the ladder only sells HIGH.
+# On 8/17 the losers rode 88c -> 5c with no exit rule at all (the old
+# 35c stop was retired 8/10). CUT sells a position into the bid once
+# its own-side mid has been at/below CUT_C for CUT_CONFIRM consecutive
+# cycles (~3 min at 90s) - a band that has genuinely broken, not a
+# flicker. Only positions entered >= CUT_MIN_ENTRY_C (the level/nickel
+# lanes; dust and 1c adopts are lottery tickets, cutting them is pure
+# fee burn). Every cut is graded against settlement in the exit
+# autopsy (kind=CUT) so the rule is retuned on evidence.
+# REVERT: export DRIFT_LIVE_CUT=0.
+CUT_ON = os.environ.get("DRIFT_LIVE_CUT", "1") == "1"
+CUT_C = float(os.environ.get("DRIFT_LIVE_CUT_C", "50"))
+CUT_CONFIRM = int(os.environ.get("DRIFT_LIVE_CUT_CONFIRM", "2"))
+CUT_MIN_ENTRY_C = int(os.environ.get("DRIFT_LIVE_CUT_MIN_ENTRY", "80"))
 
 
 def _hold_hours(ots):
@@ -571,6 +616,8 @@ class DriftLive:
         self.week_halted = False  # 8/14 rolling-7-day circuit breaker
         self.week_halt_base_c = 0.0
         self.last_nav_c = 0.0     # PERSISTED: arms the breaker on cycle 1
+        self.last_mnav_c = 0.0    # 8/17 v3: MARKED nav (cash + liq value)
+        self.mnav_ts = 0.0        # epoch of last good mark pass
         self.week_loss_c = None   # None = not yet evaluated this run
         self.week_limit_c = None  # (never render an uncomputed 0 as a cap)
         self.resume_token = ""   # the unhalt.txt date already consumed
@@ -593,6 +640,7 @@ class DriftLive:
                           "offers", "sold_log", "dips", "turns",
                           "halt_base_c", "resume_token",
                           "week_halted", "week_halt_base_c", "last_nav_c",
+                          "last_mnav_c", "mnav_ts",
                           "bucket_blocked_cum", "orphan_legs", "nav_days",
                           "slate_days",
                           "rung_stats", "rebid",
@@ -1064,6 +1112,8 @@ class DriftLive:
              # last push. Caught while verifying the slate raise, whose
              # risk case leans on this breaker being real.
              "nav_days": getattr(self, "nav_days", None) or {},
+             "last_mnav_c": getattr(self, "last_mnav_c", 0.0),
+             "mnav_ts": getattr(self, "mnav_ts", 0.0),
              "slate_days": getattr(self, "slate_days", None) or {},
              "k_positions": self.k_positions,
              "k_resting": self.k_resting,
@@ -1144,7 +1194,14 @@ class DriftLive:
                           "limit": (round(float(self.week_limit_c) / 100.0, 2)
                                     if getattr(self, "week_limit_c", None)
                                     is not None else None),
-                          "pct": WEEK_HALT_PCT},
+                          "pct": WEEK_HALT_PCT,
+                          # 8/17 v3: which NAV the breaker measured on
+                          # this cycle - "marked" is the honest one;
+                          # "cost" means marks were too stale/thin.
+                          "basis": getattr(self, "week_basis", "cost"),
+                          "mnav": (round(float(self.last_mnav_c) / 100.0, 2)
+                                   if getattr(self, "last_mnav_c", 0)
+                                   else None)},
                  "has_kalshi_truth": bool(self.k_settlements) or self.k_exit_realized_c != 0,
                  "exec": dict(self.exec_stats),
                  # mirror counts + fees straight from Kalshi's records
@@ -1167,6 +1224,8 @@ class DriftLive:
                           "open": round(self.max_open_c / 100.0, 2),
                           "halt": round(self.max_day_loss_c / 100.0, 2),
                           "city": CITY_CAP_PCT, "slate": SLATE_CAP_PCT,
+                          "mslate": METRIC_SLATE_PCT,
+                          "cut": (CUT_C if CUT_ON else None),
                           "dyn": DYN_CAPS, "floor": ENTRY_FLOOR,
                           "chase": CHASE_MAX_E, "rest_h": REST_MAX_H,
                           "min_ct": MIN_CONTRACTS,
@@ -1743,6 +1802,76 @@ class DriftLive:
                 out[tk] = round(offered - held, 2)
         return out
 
+    def _mark_nav(self, mkts):
+        """8/17 BREAKER v3: mark the book to the exchange.
+
+        Marked NAV = cash + liquidation value of every position (our-side
+        BID - the price the book could actually get, not the mid). This
+        is the number the breaker must see: cost-basis NAV (last_nav_c)
+        is blind to mark damage BY CONSTRUCTION, which is how 8/17's
+        -$23 of marks read as loss -$4.30.
+
+        Marks are cached per position (mk_px/mk_ts on the bet) so a
+        ticker missing from one scan keeps its last honest mark instead
+        of snapping back to entry cost. The pass only publishes when at
+        least MNAV_MIN_COV of non-dust position cost carries a real mark
+        - a thin overnight scan must not fake a healthy NAV. Dust
+        (entry <= 3c) marks at entry: its mark noise is bigger than its
+        value. Fails silent on any error - the cost-basis fallback in
+        _week_loss_exceeded is the safety net, and week.basis on the
+        tracker says which number the breaker is actually using."""
+        if not MNAV_ON or not mkts:
+            return
+        try:
+            balance_c = self.balance_c()
+        except Exception:
+            return
+        by_tk = {m["ticker"]: m for m in mkts}
+        t_now = time.time()
+        tot_c = cov_c = mark_c = 0
+        for tk, b in self.bets.items():
+            cnt = int(float(b.get("count", 0)))
+            cost = b.get("entry", 0) * cnt
+            if cnt < 1:
+                continue
+            if self._is_dust(b):
+                mark_c += cost
+                continue
+            tot_c += cost
+            mk = by_tk.get(tk)
+            px = None
+            if mk is not None:
+                yb, ya = mk.get("yes_bid"), mk.get("yes_ask")
+                if b.get("side") == "yes":
+                    px = yb if yb else None
+                else:
+                    px = (100 - ya) if ya else None
+            if px is not None and 0 < px < 100:
+                b["mk_px"], b["mk_ts"] = int(px), t_now
+            elif b.get("mk_px") is not None:
+                px = b["mk_px"]          # last honest mark, not entry
+            if px is not None and 0 < px < 100:
+                mark_c += int(px) * cnt
+                cov_c += cost
+            else:
+                mark_c += cost           # never marked: entry cost
+        if tot_c > 0 and cov_c / tot_c < MNAV_MIN_COV:
+            return                       # too thin to trust; keep last
+        nav_c = int((balance_c + mark_c + _crypto_cost_c()) * WX_ALLOC)
+        if nav_c <= 0:
+            return
+        self.last_mnav_c = float(nav_c)
+        self.mnav_ts = t_now
+        # marked NAV feeds the same rolling-peak ledger the breaker reads
+        try:
+            d = today()
+            if not isinstance(self.nav_days, dict):
+                self.nav_days = {}
+            self.nav_days[d] = max(float(self.nav_days.get(d, 0) or 0),
+                                   float(nav_c))
+        except (TypeError, ValueError, AttributeError):
+            pass
+
     def _week_loss_exceeded(self):
         """True when NAV has fallen WEEK_HALT_PCT below its highest
         point in the trailing 7 days.
@@ -1760,7 +1889,15 @@ class DriftLive:
         publishes armed=false in that case so it is never mistaken for
         a healthy one either.
         """
-        nav_c = float(getattr(self, "last_nav_c", 0) or 0)
+        # 8/17 v3: prefer MARKED nav when the mark pass is fresh; the
+        # cost-basis number is the fallback, never the primary (it is
+        # structurally blind to mark damage). week.basis publishes which.
+        m_c = float(getattr(self, "last_mnav_c", 0) or 0)
+        m_ts = float(getattr(self, "mnav_ts", 0) or 0)
+        m_fresh = (MNAV_ON and m_c > 0
+                   and (time.time() - m_ts) < MNAV_FRESH_S)
+        nav_c = m_c if m_fresh else float(getattr(self, "last_nav_c", 0) or 0)
+        self.week_basis = "marked" if m_fresh else "cost"
         if nav_c <= 0 or not isinstance(getattr(self, "nav_days", None),
                                         dict) or not self.nav_days:
             self.week_loss_c = None
@@ -2004,7 +2141,112 @@ class DriftLive:
             done += 1
         return done
 
-    def _conc_cost_c(self, city, date):
+    def cut_check(self, mkts):
+        """8/17 DOWNSIDE EXIT: sell a broken band into the bid.
+
+        The ladder sells high and the flatten sells the last hour;
+        nothing sold a LOSER between entry and settlement since the 35c
+        stop retired 8/10 - which is how 8/17's five low-temp positions
+        rode 85c to 5c untouched. A position whose own-side mid holds
+        at/below CUT_C for CUT_CONFIRM consecutive cycles has broken its
+        band (confirmation kills the one-cycle flicker); salvage the bid
+        rather than ride 50c to 0. Level/nickel entries only
+        (entry >= CUT_MIN_ENTRY_C): dust and 1c adopts are already
+        lottery tickets. Resting offers are canceled FIRST (the
+        over_offer lesson: selling alongside your own resting sell
+        double-sells the position). Graded in the exit autopsy as CUT so
+        the ledger - not instinct - decides if 50 is the right line."""
+        if not CUT_ON or not self.bets:
+            return 0
+        by_tk = {m["ticker"]: m for m in (mkts or [])}
+        done = 0
+        for tk, b in list(self.bets.items()):
+            if b.get("entry", 0) < CUT_MIN_ENTRY_C or self._is_dust(b):
+                continue
+            mk = by_tk.get(tk)
+            if mk is None:
+                continue
+            try:
+                hrs = float(mk.get("hrs"))
+            except (TypeError, ValueError):
+                hrs = None
+            if hrs is not None and hrs <= FLATTEN_H:
+                continue                  # the flatten pass owns endgame
+            yb, ya = mk.get("yes_bid"), mk.get("yes_ask")
+            if not yb or not ya:
+                continue
+            mid = (yb + ya) / 2.0
+            smid = mid if b["side"] == "yes" else 100 - mid
+            if smid > CUT_C:
+                if b.get("cut_n"):
+                    b["cut_n"] = 0        # recovered: reset confirmation
+                continue
+            b["cut_n"] = int(b.get("cut_n", 0)) + 1
+            if b["cut_n"] < CUT_CONFIRM:
+                continue
+            bid = yb if b["side"] == "yes" else (100 - ya if ya else 0)
+            if not bid or bid <= 0:
+                continue                  # no honest exit: settle decides
+            cnt = int(float(b.get("count", 0)))
+            if cnt < 1:
+                continue
+            # cancel our resting quotes first - selling into our own
+            # book would double-sell the position (over_offer class)
+            off = self.offers.get(tk)
+            if off and self.client is not None:
+                ok = True
+                for leg in (off.get("legs") or []):
+                    ok = self._cancel_leg(leg.get("oid"), tk) and ok
+                if not ok:
+                    continue              # exchange unconfirmed: retry
+            self.offers.pop(tk, None)
+            if self.client is not None:
+                try:
+                    self.client.create_order(tk, action="sell",
+                                             side=b["side"], count=cnt,
+                                             price_cents=int(bid))
+                except Exception:
+                    continue
+            fee = fee_cents(int(bid), cnt, taker=True)
+            net = (int(bid) - b["entry"]) * cnt - b.get("fee", 0) - fee
+            self._k_sold_add(tk, int(bid) * cnt)
+            self.realized_c += net
+            self._day_add(net)
+            self.day_pnl_c += net
+            self.fees_c += fee
+            self._turn_add(net, "cut", hold_h=_hold_hours(b.get("ots")))
+            self.exec_stats["cuts"] = self.exec_stats.get("cuts", 0) + 1
+            if self.client is None:
+                self.dry_balance_c += int(bid) * cnt - fee
+            self.history.append({"tk": tk, "city": b["city"],
+                                 "strike": b["strike"],
+                                 "kind": b.get("kind", "ge"),
+                                 "cap": b.get("cap"), "hl": b["hl"],
+                                 "side": b["side"], "trig": b.get("trig"),
+                                 "pside": round(b.get("pside", 0), 3),
+                                 "entry": b["entry"], "count": cnt,
+                                 "outcome": None, "exited": True,
+                                 "cut": True, "exit_px": int(bid),
+                                 "pnl": round(net / 100.0, 2),
+                                 "ts": now(), "ots": b.get("ots", ""),
+                                 "era": ERA})
+            self.history = self.history[-400:]
+            self.autopsy.append({"tk": tk, "side": b["side"],
+                                 "entry": b["entry"], "count": cnt,
+                                 "fee": b.get("fee", 0),
+                                 "exit_pnl": round(net / 100.0, 2),
+                                 "kind": "CUT", "trig": b.get("trig"),
+                                 "ts": now()})
+            self.autopsy = self.autopsy[-200:]
+            self._log([now(), "CUT", self.mode, b["city"], b["strike"],
+                       b["hl"], b["side"], round(b.get("pside", 0), 3),
+                       int(bid), cnt, "", round(net / 100.0, 2),
+                       b.get("oid", "")])
+            del self.bets[tk]
+            done += 1
+        return done
+
+    def _conc_cost_c(self, city, date, hl=None):
         """FILLED city/date cost in cents: the MAX of our book and
         Kalshi's own position feed. 8/12 Miami lesson ($43 = 33% of NAV
         on one thermometer, 3x the city cap): a fill our book hasn't
@@ -2013,12 +2255,15 @@ class DriftLive:
         settlement (settled tickers excluded below) but it NEVER lags a
         fill, so the max of the two views is the honest exposure."""
         bc = dc = kc = kd = 0
+        bm = km = 0   # 8/17: same-METRIC same-date cost (lo vs hi)
         for b in self.bets.values():
             c0 = b.get("entry", 0) * b.get("count", 0)
             if b.get("city") == city:
                 bc += c0
             if b.get("date", "") == date:
                 dc += c0
+                if hl and b.get("hl") == hl:
+                    bm += c0
         done = set(self.settled_tks)
         for p in (self.k_positions or []):
             tk = p.get("ticker")
@@ -2029,7 +2274,10 @@ class DriftLive:
                 kc += c0
             if p.get("date", "") == date:
                 kd += c0
-        return max(bc, int(kc)), max(dc, int(kd))
+                # k rows carry no hl; the ticker encodes it (KXLOWT*)
+                if hl and ("lo" if "LOWT" in tk else "hi") == hl:
+                    km += c0
+        return (max(bc, int(kc)), max(dc, int(kd)), max(bm, int(km)))
 
     def _cap_refused(self, kind, tk, entry, size, c_cost, d_cost, nav_cc):
         """8/12: name every concentration refusal on the tracker. 2,353
@@ -2919,6 +3167,7 @@ class DriftLive:
         cands.sort(key=lambda c: ({"nickel": 0, "level": 1}.get(c[0], 2), -c[1]))
         placed = 0
         _ccap_add, _dcap_add = {}, {}   # 8/12: same-cycle placements
+        _mcap_add = {}                  # 8/17: (hl, date) same-cycle
         _done_tks = set(self.settled_tks)
         kpos_tks = {p.get("ticker") for p in (self.k_positions or [])
                     if p.get("ticker") and p.get("ticker") not in _done_tks}
@@ -3008,16 +3257,26 @@ class DriftLive:
                 # left (>= the 5-lot floor) like every other cap here
                 # instead of refusing outright.
                 # 8/12 Miami hardening: exposure = max(book, exchange)
-                c0d0 = self._conc_cost_c(mk["city"], mk.get("date", ""))
+                _hl0 = "lo" if mk["is_low"] else "hi"
+                c0d0 = self._conc_cost_c(mk["city"], mk.get("date", ""),
+                                         hl=_hl0)
                 c_cost = c0d0[0] + _ccap_add.get(mk["city"], 0)
                 d_cost = c0d0[1] + _dcap_add.get(mk.get("date", ""), 0)
+                # 8/17 metric-slate: all lows (or highs) of one date are
+                # ONE weather bet; cap that axis too
+                m_cost = c0d0[2] + _mcap_add.get(
+                    (_hl0, mk.get("date", "")), 0)
                 room_c = int(nav_cc * CITY_CAP_PCT) - c_cost
                 room_d = int(nav_cc * SLATE_CAP_PCT) - d_cost
-                room = min(room_c, room_d)
+                room_m = int(nav_cc * METRIC_SLATE_PCT) - m_cost
+                room = min(room_c, room_d, room_m)
                 while size > MIN_CONTRACTS and entry * size > room:
                     size -= 1
                 if entry * size > room:
-                    kind0 = "city" if room_c <= room_d else "slate"
+                    if room_m <= min(room_c, room_d):
+                        kind0 = "mslate"
+                    else:
+                        kind0 = "city" if room_c <= room_d else "slate"
                     self.exec_stats[kind0 + "_capped"] = (
                         self.exec_stats.get(kind0 + "_capped", 0) + 1)
                     self._cap_refused(kind0, tk, entry, size,
@@ -3054,6 +3313,8 @@ class DriftLive:
                                      + entry * size)
             _dcap_add[mk.get("date", "")] = (
                 _dcap_add.get(mk.get("date", ""), 0) + entry * size)
+            _mk0 = ("lo" if mk["is_low"] else "hi", mk.get("date", ""))
+            _mcap_add[_mk0] = _mcap_add.get(_mk0, 0) + entry * size
             (nk_keys if trig == "nickel" else ev_keys).add(ekey)
             self.placed += 1
             placed += 1
@@ -3167,17 +3428,22 @@ class DriftLive:
             # 8/12: FILLED risk (max of book and exchange views, see
             # _conc_cost_c) + this lane's own resting bids - pending
             # maker joins no longer double-reserve the caps
-            c_cost, d_cost = self._conc_cost_c(mk["city"],
-                                               mk.get("date", ""))
+            _hl0 = "lo" if mk["is_low"] else "hi"
+            c_cost, d_cost, m_cost = self._conc_cost_c(
+                mk["city"], mk.get("date", ""), hl=_hl0)
             for x in self.dips.values():
                 c0 = x.get("entry", 0) * x.get("count", 0)
                 if x.get("city") == mk["city"]:
                     c_cost += c0
                 if x.get("date", "") == mk.get("date", ""):
                     d_cost += c0
+                    if x.get("hl", "") == _hl0:
+                        m_cost += c0
             if c_cost + cost > int(nav_c * CITY_CAP_PCT):
                 continue
             if d_cost + cost > int(nav_c * SLATE_CAP_PCT):
+                continue
+            if m_cost + cost > int(nav_c * METRIC_SLATE_PCT):
                 continue
             if self.open_cost_c() + dip_tot + cost > self.max_open_c:
                 continue
@@ -3381,8 +3647,16 @@ class DriftLive:
             mkts = we.find_temp_markets(max_days=1)
         except Exception:
             mkts = None
+        # 8/17 v3: mark the book BEFORE place() so the weekly breaker
+        # (checked at the top of place) measures this cycle's marks,
+        # not last cycle's cost basis.
+        try:
+            self._mark_nav(mkts)
+        except Exception:
+            pass
         self.place(mkts)
         self.flatten(mkts)
+        self.cut_check(mkts)         # 8/17: band-broken downside exit
         self.quote_offers(mkts)      # 8/10: the offer side of the book
         try:
             bal = self.balance_c()

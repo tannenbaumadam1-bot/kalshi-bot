@@ -1,0 +1,215 @@
+"""8/17 build: breaker v3 (marked NAV), CUT downside exit, metric-slate cap.
+
+The 8/17 morning is the fixture: five low-temp NO positions collapsed
+85c->5c (-$23 of marks) while the breaker read loss -$4.30, because it
+measured cash + ENTRY COST - a number that cannot see mark damage.
+"""
+import os
+import sys
+import time
+import datetime as _dt
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+import drift_live as dl
+
+TODAY = _dt.date.today().isoformat()
+
+
+def _mk(tk="KXLOWTHOU-26AUG17-B73.5", bid=82, ask=85, city="houston",
+        is_low=True, strike=73, kind="ge", cap=None, date=None, vol=100.0,
+        hrs=10.0):
+    return {"ticker": tk, "city": city, "is_low": is_low, "strike": strike,
+            "kind": kind, "cap": cap, "yes_bid": bid, "yes_ask": ask,
+            "date": date or TODAY, "hrs": hrs, "title": "", "sub": "",
+            "bid_size": 50.0, "ask_size": 50.0, "vol": vol}
+
+
+def _bot(tmp_path, monkeypatch):
+    monkeypatch.setattr(dl, "STATE", str(tmp_path / "s.json"))
+    monkeypatch.setattr(dl, "BETS", str(tmp_path / "b.csv"))
+    return dl.DriftLive(None, mode="DRY")
+
+
+def _no_pos(tk, entry=88, count=5, city="houston", hl="lo", date=None):
+    return {"side": "no", "entry": entry, "count": count, "city": city,
+            "strike": 73, "kind": "ge", "cap": None, "hl": hl,
+            "pside": 0.9, "date": date or TODAY, "trig": "level",
+            "peak": 90.0, "fee": 10, "oid": "x", "ots": dl.now(),
+            "era": dl.ERA}
+
+
+# ---------------- breaker v3: marked NAV ----------------
+
+def test_marked_nav_sees_the_damage_cost_basis_cannot(tmp_path, monkeypatch):
+    """The 8/17 scenario in miniature: marks collapse, cost basis frozen."""
+    b = _bot(tmp_path, monkeypatch)
+    b.bets["T1"] = _no_pos("T1", entry=88, count=5)
+    b.dry_balance_c = 5000
+    # market now prices our NO side at ~2c (yes_ask 98 -> no bid 2)
+    b._mark_nav([_mk("T1", bid=95, ask=98)])
+    assert b.last_mnav_c > 0
+    # marked nav = cash 5000 + 2*5 = ~5010c, NOT 5000 + 88*5 = 5440c
+    assert b.last_mnav_c <= 5100, b.last_mnav_c
+    assert b.mnav_ts > 0
+
+
+def test_breaker_uses_marked_nav_when_fresh(tmp_path, monkeypatch):
+    b = _bot(tmp_path, monkeypatch)
+    b.bets["T1"] = _no_pos("T1", entry=88, count=5)
+    b.dry_balance_c = 5000
+    b.last_nav_c = 5440.0                      # cost basis: blind
+    b.nav_days = {TODAY: 13000.0}              # a real recorded peak
+    b._mark_nav([_mk("T1", bid=95, ask=98)])   # marks: ~5010
+    tripped = b._week_loss_exceeded()
+    assert b.week_basis == "marked"
+    # drawdown vs 13000 peak on ~5010 marked nav is way past 15%
+    assert tripped
+
+
+def test_breaker_falls_back_to_cost_when_marks_stale(tmp_path, monkeypatch):
+    b = _bot(tmp_path, monkeypatch)
+    b.last_nav_c = 10000.0
+    b.last_mnav_c = 5000.0
+    b.mnav_ts = time.time() - dl.MNAV_FRESH_S - 60   # stale
+    b.nav_days = {TODAY: 10000.0}
+    b._week_loss_exceeded()
+    assert b.week_basis == "cost"
+
+
+def test_mark_pass_refuses_thin_coverage(tmp_path, monkeypatch):
+    """A scan that prices too little of the book must not publish."""
+    b = _bot(tmp_path, monkeypatch)
+    b.bets["T1"] = _no_pos("T1", entry=88, count=5)
+    b.bets["T2"] = _no_pos("T2", entry=85, count=5, city="denver")
+    b.dry_balance_c = 5000
+    b._mark_nav([])                    # no quotes at all
+    assert b.last_mnav_c == 0.0        # nothing published
+
+
+def test_marked_nav_feeds_nav_days_peak(tmp_path, monkeypatch):
+    b = _bot(tmp_path, monkeypatch)
+    b.bets["T1"] = _no_pos("T1", entry=88, count=5)
+    b.dry_balance_c = 5000
+    b.nav_days = {}
+    b._mark_nav([_mk("T1", bid=95, ask=98)])
+    assert TODAY in b.nav_days and b.nav_days[TODAY] == b.last_mnav_c
+
+
+def test_dust_marks_at_entry_not_quotes(tmp_path, monkeypatch):
+    b = _bot(tmp_path, monkeypatch)
+    b.bets["T1"] = _no_pos("T1", entry=2, count=10)   # dust adopt
+    b.dry_balance_c = 5000
+    b._mark_nav([_mk("T1", bid=1, ask=99)])
+    # dust contributes cost (20c), not a mark; nav = 5000 + 20
+    assert b.last_mnav_c == 5020.0
+
+
+# ---------------- CUT: band-broken downside exit ----------------
+
+def test_cut_sells_a_broken_band_after_confirmation(tmp_path, monkeypatch):
+    b = _bot(tmp_path, monkeypatch)
+    b.bets["T1"] = _no_pos("T1", entry=88, count=5)
+    # NO-side mid = 100 - (30+34)/2 = 68 > 50: healthy, no cut
+    assert b.cut_check([_mk("T1", bid=30, ask=34)]) == 0
+    # band breaks: yes mid 62 -> our smid 38 <= 50; cycle 1 = confirm only
+    assert b.cut_check([_mk("T1", bid=60, ask=64)]) == 0
+    assert b.bets["T1"]["cut_n"] == 1
+    # cycle 2 confirms -> sell into no-bid (100-64=36)
+    assert b.cut_check([_mk("T1", bid=60, ask=64)]) == 1
+    assert "T1" not in b.bets
+    row = b.history[-1]
+    assert row.get("cut") and row["exit_px"] == 36
+    assert b.autopsy[-1]["kind"] == "CUT"
+    assert b.exec_stats.get("cuts") == 1
+    assert b.turns["kinds"]["cut"] == 1
+
+
+def test_cut_confirmation_resets_on_recovery(tmp_path, monkeypatch):
+    b = _bot(tmp_path, monkeypatch)
+    b.bets["T1"] = _no_pos("T1", entry=88, count=5)
+    b.cut_check([_mk("T1", bid=60, ask=64)])      # broken, cut_n = 1
+    assert b.bets["T1"]["cut_n"] == 1
+    b.cut_check([_mk("T1", bid=30, ask=34)])      # recovered
+    assert b.bets["T1"]["cut_n"] == 0
+    b.cut_check([_mk("T1", bid=60, ask=64)])      # must re-confirm from 0
+    assert "T1" in b.bets
+
+
+def test_cut_spares_cheap_entries_and_dust(tmp_path, monkeypatch):
+    """Lottery tickets (adopts at 1-3c) are never cut - pure fee burn."""
+    b = _bot(tmp_path, monkeypatch)
+    b.bets["T1"] = _no_pos("T1", entry=2, count=10)
+    for _ in range(dl.CUT_CONFIRM + 1):
+        assert b.cut_check([_mk("T1", bid=97, ask=99)]) == 0
+    assert "T1" in b.bets
+
+
+def test_cut_defers_to_flatten_near_close(tmp_path, monkeypatch):
+    b = _bot(tmp_path, monkeypatch)
+    b.bets["T1"] = _no_pos("T1", entry=88, count=5)
+    mk = _mk("T1", bid=60, ask=64, hrs=0.5)       # inside FLATTEN_H
+    for _ in range(dl.CUT_CONFIRM + 1):
+        assert b.cut_check([mk]) == 0
+    assert "T1" in b.bets
+
+
+def test_cut_realizes_the_loss_in_the_day_ledger(tmp_path, monkeypatch):
+    b = _bot(tmp_path, monkeypatch)
+    b.bets["T1"] = _no_pos("T1", entry=88, count=5)
+    day0 = b.day_pnl_c
+    for _ in range(dl.CUT_CONFIRM):
+        b.cut_check([_mk("T1", bid=60, ask=64)])
+    # sold 5 @ 36 vs entry 88: net well negative, booked realized
+    assert b.day_pnl_c < day0
+
+
+# ---------------- metric-slate cap ----------------
+
+def test_conc_cost_reports_metric_axis(tmp_path, monkeypatch):
+    b = _bot(tmp_path, monkeypatch)
+    b.bets["L1"] = _no_pos("L1", entry=80, count=5, city="houston", hl="lo")
+    b.bets["L2"] = _no_pos("L2", entry=80, count=5, city="denver", hl="lo")
+    b.bets["H1"] = _no_pos("H1", entry=80, count=5, city="miami", hl="hi")
+    c, d, m = b._conc_cost_c("houston", TODAY, hl="lo")
+    assert c == 400            # one houston position
+    assert d == 1200           # all three settle today
+    assert m == 800            # only the two LOWS count on the lo axis
+
+
+def test_metric_slate_cap_blocks_the_correlated_axis(tmp_path, monkeypatch):
+    """8/17 fixture: lows already at the metric cap -> a new LOW is
+    refused (mslate) while a HIGH on the same slate still places."""
+    b = _bot(tmp_path, monkeypatch)
+    monkeypatch.setattr(dl, "METRIC_SLATE_PCT", 0.10)
+    b.last_nav_c = 10000.0     # metric room = 1000c
+    b.bets["L1"] = _no_pos("L1", entry=88, count=5, city="houston", hl="lo")
+    b.bets["L2"] = _no_pos("L2", entry=88, count=5, city="denver", hl="lo")
+    # lows cost 880c of a 1000c metric budget -> 5 more @82 must refuse
+    lo_mk = _mk("KXLOWTSEA-X", bid=82, ask=85, city="seattle", is_low=True)
+    hi_mk = _mk("KXHIGHMIA-X", bid=82, ask=85, city="miami", is_low=False)
+    n = b.place(mkts=[lo_mk, hi_mk])
+    tks = set(b.bets) | {o["ticker"] for o in b.pending.values()}
+    assert "KXLOWTSEA-X" not in tks
+    assert "KXHIGHMIA-X" in tks
+    assert b.exec_stats.get("mslate_capped", 0) >= 1
+
+
+def test_metric_cap_counts_exchange_view_via_ticker(tmp_path, monkeypatch):
+    """k_positions rows carry no hl - the ticker must encode it."""
+    b = _bot(tmp_path, monkeypatch)
+    b.k_positions = [{"ticker": "KXLOWTDEN-X", "entry": 88, "count": 5,
+                      "city": "denver", "date": TODAY}]
+    b.settled_tks = []
+    _, _, m = b._conc_cost_c("houston", TODAY, hl="lo")
+    assert m == 440
+    _, _, m_hi = b._conc_cost_c("houston", TODAY, hl="hi")
+    assert m_hi == 0
+
+
+# ---------------- rung reweight ----------------
+
+def test_97_rung_is_gone_from_the_base_ladder():
+    assert dl.SELL_MIN_C >= 98
+    assert all(lo != 97 or h_min < 2.0
+               for h_min, lo, hi in dl.DECAY_LADDER)

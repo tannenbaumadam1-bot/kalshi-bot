@@ -39,9 +39,18 @@ STATE = os.environ.get("SPORTS_PAPER_STATE",
                        os.path.join("logs", "sports_paper_state.json"))
 ERA = "sports1"
 EDGE_MIN_C = float(os.environ.get("SPORTS_EDGE_MIN_C", "3"))
-ENTRY_MIN = int(os.environ.get("SPORTS_ENTRY_MIN", "65"))
-ENTRY_MAX = int(os.environ.get("SPORTS_ENTRY_MAX", "90"))
-MAX_SPREAD = int(os.environ.get("SPORTS_MAX_SPREAD", "5"))
+ENTRY_MIN = int(os.environ.get("SPORTS_ENTRY_MIN", "60"))
+ENTRY_MAX = int(os.environ.get("SPORTS_ENTRY_MAX", "94"))
+# 8/17 GATE-SPEED WIDENING (Adam: push harder): 2 settles in 5 days
+# against a 200-settle gate = 500 days to go-live, and the spread
+# filter alone refused 6,800 candidates - 30x every other filter
+# combined. This is PAPER: fills are simulated at the REAL ask with
+# exact fees, so a wide book can't fake edge - the ask still has to
+# be EDGE_MIN_C cheap vs the anchor. Widening the spread admits more
+# evidence, not more risk. 5 -> 10; band 65-90 -> 60-94 for the same
+# reason (the weather book's whole profit engine lives at 85-96 and
+# sports capped itself out of that band). REVERT: env overrides.
+MAX_SPREAD = int(os.environ.get("SPORTS_MAX_SPREAD", "10"))
 # 8/12 (Adam): 5-contract MINIMUM, same floor as the live books - the
 # fee-rounding math (a 1-lot pays the same rounded-up cent as 5) and
 # the go-live dataset both need real-sized trades. No config may take
