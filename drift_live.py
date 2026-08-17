@@ -651,6 +651,21 @@ class DriftLive:
                     # 8/6 one-time: pre-fix anchor excluded crypto cost -
                     # discard it; next cycle re-anchors with _day_anchor_c
                     self.day_nav0_c = None
+                if not d.get("nav_v3"):
+                    # 8/17 one-time BREAKER v3 MIGRATION: every existing
+                    # nav_days entry is COST-BASIS (busted positions at
+                    # full entry cost - "peaks" that never existed; the
+                    # 13:28 deploy measured honest marks against a
+                    # phantom 144.51 and false-halted at -22.44 on a day
+                    # whose true marked drawdown was ~-11.5%). Clear the
+                    # ledger; _mark_nav re-seeds it with marked NAV on
+                    # the next cycle and the breaker re-arms measuring
+                    # from today. The halt latch resets with it because
+                    # the gate re-evaluates EVERY cycle on the fresh
+                    # ledger - if honest drawdown still exceeds the
+                    # limit, it halts again next cycle on its own.
+                    self.nav_days = {}
+                    self.week_halted = False
             except Exception:
                 pass
         # 8/11 K-TRUTH v2 one-time rebuild: backfill sale proceeds from
@@ -1112,6 +1127,7 @@ class DriftLive:
              # last push. Caught while verifying the slate raise, whose
              # risk case leans on this breaker being real.
              "nav_days": getattr(self, "nav_days", None) or {},
+             "nav_v3": True,
              "last_mnav_c": getattr(self, "last_mnav_c", 0.0),
              "mnav_ts": getattr(self, "mnav_ts", 0.0),
              "slate_days": getattr(self, "slate_days", None) or {},
@@ -3039,18 +3055,12 @@ class DriftLive:
         self.max_open_c = int(nav_c * OPEN_PCT)
         self.max_day_loss_c = max(HALT_FLOOR_C, int(nav_c * HALT_PCT))
         self.last_nav_c = nav_c      # 8/14: weekly breaker measures on this
-        # 8/15: daily NAV high-water marks feed the drawdown breaker
-        try:
-            d = today()
-            if not isinstance(self.nav_days, dict):
-                self.nav_days = {}
-            self.nav_days[d] = max(float(self.nav_days.get(d, 0) or 0),
-                                   float(nav_c))
-            if len(self.nav_days) > 60:
-                for old in sorted(self.nav_days)[:-60]:
-                    self.nav_days.pop(old, None)
-        except (TypeError, ValueError, AttributeError):
-            pass
+        # 8/17 v3: nav_days is MARKED-ONLY now (_mark_nav owns it).
+        # Cost-basis entries here were the contamination that produced
+        # the 13:28 false halt: a "144.51 peak" that was busted
+        # positions counted at full entry cost - a NAV that never
+        # existed on the exchange. Feeding it again would re-poison the
+        # ledger one deploy after the migration cleaned it.
 
     def place(self, mkts=None):
         # 8/13: the halt measures the day's loss FROM THE LAST RESUME,

@@ -213,3 +213,43 @@ def test_97_rung_is_gone_from_the_base_ladder():
     assert dl.SELL_MIN_C >= 98
     assert all(lo != 97 or h_min < 2.0
                for h_min, lo, hi in dl.DECAY_LADDER)
+
+
+# ---------------- v3 migration: purge cost-basis peaks ----------------
+
+def test_migration_clears_legacy_nav_days_and_halt_latch(tmp_path,
+                                                         monkeypatch):
+    """The 13:28 false halt: honest marks measured against a phantom
+    cost-basis 'peak'. Loading a pre-v3 state must clear both."""
+    b = _bot(tmp_path, monkeypatch)
+    b.nav_days = {TODAY: 14451.0}      # the phantom peak
+    b.week_halted = True
+    b.save()
+    import json
+    d = json.load(open(dl.STATE))
+    assert d.get("nav_v3") is True     # new saves are tagged
+    del d["nav_v3"]                    # simulate a pre-v3 state file
+    json.dump(d, open(dl.STATE, "w"))
+    b2 = dl.DriftLive(None, mode="DRY")
+    assert b2.nav_days == {}
+    assert b2.week_halted is False
+
+
+def test_v3_state_survives_reload_untouched(tmp_path, monkeypatch):
+    b = _bot(tmp_path, monkeypatch)
+    b.nav_days = {TODAY: 12000.0}      # a MARKED peak (post-v3)
+    b.save()
+    b2 = dl.DriftLive(None, mode="DRY")
+    assert b2.nav_days == {TODAY: 12000.0}   # marked peaks survive
+    # (week_halted itself is never persisted - the gate re-measures on
+    # the live ledger every cycle, so a real halt re-fires on its own)
+
+
+def test_refresh_caps_no_longer_writes_cost_basis_peaks(tmp_path,
+                                                        monkeypatch):
+    """Re-contamination guard: only _mark_nav may feed nav_days."""
+    b = _bot(tmp_path, monkeypatch)
+    b.bets["T1"] = _no_pos("T1", entry=88, count=5)
+    b.nav_days = {}
+    b._refresh_caps(5000)
+    assert b.nav_days == {}
