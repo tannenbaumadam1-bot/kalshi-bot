@@ -1640,7 +1640,27 @@ class DriftLive:
         oc += sum(o["entry"] * o["count"] for o in self.pending.values())
         return oc
 
-    def _turn_add(self, net_c, kind, hold_h=None):
+    @staticmethod
+    def _ewin(ehrs):
+        """8/17 velocity telemetry: entry-window bucket. The average
+        lift takes ~5.7 capital-hours; if late entries (short windows)
+        carry the same net at half the hold, entry TIMING is the
+        cheapest per-capital-hour lever on the board. Nothing tunes on
+        this yet - it accumulates the evidence first (per_ch pattern:
+        instrument -> 3-4 days of ledger -> retune)."""
+        try:
+            h = float(ehrs)
+        except (TypeError, ValueError):
+            return "na"
+        if h < 4:
+            return "0-4"
+        if h < 8:
+            return "4-8"
+        if h < 16:
+            return "8-16"
+        return "16+"
+
+    def _turn_add(self, net_c, kind, hold_h=None, ehrs=None):
         """Book one completed round trip.
 
         8/14: settlements ARE turns now. The old ledger counted only
@@ -1673,6 +1693,15 @@ class DriftLive:
         if hold_h is not None and hold_h >= 0:
             kh = t.setdefault("kinds_hold_h", {})
             kh[kind] = round(float(kh.get(kind, 0)) + float(hold_h), 2)
+        # 8/17: net + capital-hours by ENTRY WINDOW (hrs-to-settlement
+        # at entry) - the entry-timing evidence ledger
+        ew = t.setdefault("ewin", {})
+        w = ew.setdefault(self._ewin(ehrs), {"n": 0, "net_c": 0.0,
+                                             "hold_h": 0.0})
+        w["n"] += 1
+        w["net_c"] = round(w["net_c"] + net_c, 1)
+        if hold_h is not None and hold_h >= 0:
+            w["hold_h"] = round(w["hold_h"] + float(hold_h), 2)
         # keep the day map bounded
         if len(t.get("days", {})) > 60:
             for old in sorted(t["days"])[:-60]:
@@ -1984,8 +2013,25 @@ class DriftLive:
                     self.slate_days.pop(old, None)
         except (TypeError, ValueError, AttributeError):
             pass
+        # 8/17 velocity KPIs. unquoted = non-dust inventory with NO
+        # resting offer (capital that cannot lift by definition - the
+        # quote-coverage gap, was invisible). yield_day = today's turn
+        # net per working dollar - THE compounding number: working_pct
+        # says how much capital works, this says how hard.
+        _offs = getattr(self, "offers", None) or {}
+        unq = sum(b.get("entry", 0) * b.get("count", 0)
+                  for tk, b in self.bets.items()
+                  if tk not in _offs and not self._is_dust(b))
+        t = getattr(self, "turns", None)
+        t = t if isinstance(t, dict) else {}
+        d_now = datetime.date.today().isoformat()
+        day_net = float(((t.get("days") or {}).get(d_now) or {})
+                        .get("net_c", 0))
         return {"working": round(work / 100.0, 2),
                 "committed": round(commit / 100.0, 2),
+                "unquoted": round(unq / 100.0, 2),
+                "yield_day": (round(day_net / work, 4) if work > 0
+                              else None),
                 "working_pct": round(work / cap, 3),
                 "deployed": round(dep / 100.0, 2),
                 "dips": round(dip / 100.0, 2),
@@ -2032,6 +2078,18 @@ class DriftLive:
                              / 100.0 / h, 3)
                     for k, h in (t.get("kinds_hold_h") or {}).items()
                     if h and float(h) > 0},
+                # 8/17: the entry-timing evidence - net, hold and per_ch
+                # by hrs-to-settlement AT ENTRY. When a window's per_ch
+                # separates from the pack, entry timing gets retuned on
+                # it (same playbook that retired the 97 rung).
+                "ewin": {
+                    w: {"n": int(v.get("n", 0)),
+                        "net": round(float(v.get("net_c", 0)) / 100.0, 2),
+                        "per_ch": (round(float(v.get("net_c", 0)) / 100.0
+                                         / float(v["hold_h"]), 4)
+                                   if float(v.get("hold_h", 0) or 0) > 0
+                                   else None)}
+                    for w, v in (t.get("ewin") or {}).items()},
                 "flatten_h": FLATTEN_H if FLATTEN_ON else None}
 
     def _sell_rungs(self, b, hrs):
@@ -2124,7 +2182,8 @@ class DriftLive:
             self.day_pnl_c += net
             self.fees_c += fee
             self._turn_add(net, "flatten",
-                           hold_h=_hold_hours(b.get("ots")))
+                           hold_h=_hold_hours(b.get("ots")),
+                           ehrs=b.get("ehrs"))
             self.exec_stats["flattened"] = (
                 self.exec_stats.get("flattened", 0) + 1)
             if self.client is None:
@@ -2230,7 +2289,9 @@ class DriftLive:
             self._day_add(net)
             self.day_pnl_c += net
             self.fees_c += fee
-            self._turn_add(net, "cut", hold_h=_hold_hours(b.get("ots")))
+            self._turn_add(net, "cut",
+                           hold_h=_hold_hours(b.get("ots")),
+                           ehrs=b.get("ehrs"))
             self.exec_stats["cuts"] = self.exec_stats.get("cuts", 0) + 1
             if self.client is None:
                 self.dry_balance_c += int(bid) * cnt - fee
@@ -2361,6 +2422,7 @@ class DriftLive:
                                  "kind", "cap", "hl", "pside", "date",
                                  "trig", "peak")},
                              "count": filled, "fee": fee, "oid": oid,
+                             "ehrs": o.get("ehrs"),
                              "ots": o.get("ots", now()), "era": ERA}
         self._log([now(), "FILL", self.mode, o["city"], o["strike"],
                    o["hl"], o["side"], round(o["pside"], 3),
@@ -2746,7 +2808,7 @@ class DriftLive:
         # decay ladder can be retuned on net-per-capital-hour - the only
         # objective that makes sense on a capital-constrained book.
         _hh = _hold_hours(b.get("ots"))
-        self._turn_add(net, "lift", hold_h=_hh)
+        self._turn_add(net, "lift", hold_h=_hh, ehrs=b.get("ehrs"))
         self._rung_lift(px, net, _hh)
         # 8/15 TWO-SIDED: the market we just sold at 96-99 is the same
         # trade again if it dips back. The calibration table says this
@@ -2950,7 +3012,9 @@ class DriftLive:
             # 8/14: a position that rode to settlement is a completed
             # round trip too - book it so per_turn stops being a
             # winners-only sample.
-            self._turn_add(net, "settle", hold_h=_hold_hours(b.get("ots")))
+            self._turn_add(net, "settle",
+                           hold_h=_hold_hours(b.get("ots")),
+                           ehrs=b.get("ehrs"))
             del self.bets[tk]
 
     # ---- momentum stop + trailing exit (taker sells, same rules as paper) ----
@@ -3174,7 +3238,17 @@ class DriftLive:
                 continue
             cands.append((trig, score, mk, side, entry, smid, ekey, exec_kind,
                           bid_entry))
-        cands.sort(key=lambda c: ({"nickel": 0, "level": 1}.get(c[0], 2), -c[1]))
+        # 8/17 PROVEN-FIRST ALLOCATION (order IS allocation): every cap -
+        # bet, open, city, slate, metric - is a first-come budget, and
+        # the sort decides who spends it. Within a lane, candidates in
+        # PROVEN buckets (the ledger's own half-Kelly evidence) now
+        # outrank unproven ones, so on a full book the last dollars go
+        # to level:85-89 before an unproven sub-80 probe - accentuating
+        # what works costs nothing but this sort key.
+        cands.sort(key=lambda c: (
+            {"nickel": 0, "level": 1}.get(c[0], 2),
+            0 if self._bucket_is_proven(c[0], int(c[4]), bstats) else 1,
+            -c[1]))
         placed = 0
         _ccap_add, _dcap_add = {}, {}   # 8/12: same-cycle placements
         _mcap_add = {}                  # 8/17: (hl, date) same-cycle
@@ -3316,6 +3390,7 @@ class DriftLive:
                 "kind": mk.get("kind", "ge"), "cap": mk.get("cap"),
                 "hl": ("lo" if mk["is_low"] else "hi"),
                 "date": mk.get("date", ""), "trig": trig, "peak": smid,
+                "ehrs": mk.get("hrs"),   # 8/17: entry-window telemetry
                 "exec": exec_kind, "ots": now()}
             pk = "placed_" + exec_kind
             self.exec_stats[pk] = self.exec_stats.get(pk, 0) + 1
@@ -3353,6 +3428,7 @@ class DriftLive:
                                           "strike", "kind", "cap", "hl",
                                           "pside", "date", "trig", "peak")},
                                       "fee": fee, "oid": oid,
+                                      "ehrs": o.get("ehrs"),
                                       "ots": o["ots"], "era": ERA}
                 del self.pending[oid]
         self.quote_dips(mkts, balance_c, bstats)   # 8/11 bid side
@@ -3456,6 +3532,13 @@ class DriftLive:
             if m_cost + cost > int(nav_c * METRIC_SLATE_PCT):
                 continue
             if self.open_cost_c() + dip_tot + cost > self.max_open_c:
+                # 8/17: make the bid side's starvation VISIBLE. The dip
+                # lane runs last, so a full book (util ~99%) refuses
+                # every standing bid here and the flywheel's cheap-
+                # inventory turn never happens. This counter is the
+                # evidence for the allocation-order debate.
+                self.exec_stats["dip_capped"] = (
+                    self.exec_stats.get("dip_capped", 0) + 1)
                 continue
             if balance_c - cost < self.reserve_c:
                 continue

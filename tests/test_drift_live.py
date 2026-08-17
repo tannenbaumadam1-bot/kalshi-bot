@@ -1894,7 +1894,8 @@ def test_hold_hours_wired_into_lift_and_flatten():
     import inspect
     src = inspect.getsource(dl.DriftLive)
     assert '_turn_add(net, "lift", hold_h=' in src
-    assert 'hold_h=_hold_hours(b.get("ots")))' in src
+    # 8/17: exits also carry ehrs (entry-window telemetry)
+    assert 'hold_h=_hold_hours(b.get("ots"))' in src
     for kind in ('"lift"', '"flatten"', '"settle"'):
         idx = src.find(f'_turn_add(net, {kind}')
         assert idx != -1, kind
