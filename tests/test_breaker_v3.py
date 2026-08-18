@@ -335,3 +335,38 @@ def test_dip_starvation_is_counted(tmp_path, monkeypatch):
     # unheld favorite, bid 88 -> dip bid rests at 86... except no room
     b.quote_dips([_mk("T9", bid=88, ask=90, city="boston")], 10000, {})
     assert b.exec_stats.get("dip_capped", 0) >= 1
+
+
+# ---------------- 8/18: CUT blind-spot fix ----------------
+
+def test_cut_reaches_positions_missing_from_the_scan(tmp_path, monkeypatch):
+    """8/18 live finding: DEN/SEA (yesterday's slate) sat at 3-7c all
+    day with zero cuts - the scan only returns today-forward markets.
+    cut_check must fetch quotes for held tickers the scan missed."""
+    b = _bot(tmp_path, monkeypatch)
+    b.bets["OLD1"] = _no_pos("OLD1", entry=88, count=5)
+    monkeypatch.setattr(dl.dp.DriftPaper, "_quotes",
+                        lambda self, tks: {"OLD1": (93, 95)})
+    # no-side mid = 100-94 = 6 <= 50; bid = 100-95 = 5
+    assert b.cut_check([]) == 0            # confirm cycle 1
+    assert b.bets["OLD1"]["cut_n"] == 1
+    assert b.cut_check([]) == 1            # fires from fallback quotes
+    assert "OLD1" not in b.bets
+    assert b.history[-1]["exit_px"] == 5
+    assert b.exec_stats.get("cuts", 0) == 1
+
+
+def test_cut_skips_closed_markets_with_no_bid(tmp_path, monkeypatch):
+    b = _bot(tmp_path, monkeypatch)
+    b.bets["OLD2"] = _no_pos("OLD2", entry=88, count=5)
+    monkeypatch.setattr(dl.dp.DriftPaper, "_quotes",
+                        lambda self, tks: {})   # market closed: no book
+    for _ in range(dl.CUT_CONFIRM + 1):
+        assert b.cut_check([]) == 0
+    assert "OLD2" in b.bets                # settlement decides, as before
+
+
+def test_new_mechanism_counters_publish_zero(tmp_path, monkeypatch):
+    b = _bot(tmp_path, monkeypatch)
+    for k in ("cuts", "mslate_capped", "dip_capped"):
+        assert b.exec_stats.get(k) == 0, k

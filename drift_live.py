@@ -622,6 +622,11 @@ class DriftLive:
         self.week_limit_c = None  # (never render an uncomputed 0 as a cap)
         self.resume_token = ""   # the unhalt.txt date already consumed
         self.load()
+        # 8/18: publish ZEROS for the new mechanisms. "cuts" absent from
+        # the tracker is indistinguishable from "cut code not running" -
+        # a silent safety mechanism must prove it is alive.
+        for k0 in ("cuts", "mslate_capped", "dip_capped"):
+            self.exec_stats.setdefault(k0, 0)
 
     # ---- persistence ----
     def load(self):
@@ -2234,6 +2239,25 @@ class DriftLive:
         if not CUT_ON or not self.bets:
             return 0
         by_tk = {m["ticker"]: m for m in (mkts or [])}
+        # 8/18 BLIND-SPOT FIX (found live: DEN/SEA sat at 3-7c all day,
+        # zero cuts): the scan only returns TODAY-forward markets, so a
+        # broken position from YESTERDAY's slate is invisible to a pass
+        # that reads only `mkts` - the exact 8/17 casualty class. Fetch
+        # quotes directly for held eligible tickers the scan missed;
+        # a market that is truly closed simply returns no bid and is
+        # skipped, same as before.
+        missing = [tk for tk, b in self.bets.items()
+                   if tk not in by_tk
+                   and b.get("entry", 0) >= CUT_MIN_ENTRY_C
+                   and not self._is_dust(b)]
+        if missing:
+            try:
+                for tk0, (yb0, ya0) in dp.DriftPaper._quotes(
+                        self, missing).items():
+                    by_tk[tk0] = {"ticker": tk0, "yes_bid": yb0,
+                                  "yes_ask": ya0, "hrs": None}
+            except Exception:
+                pass
         done = 0
         for tk, b in list(self.bets.items()):
             if b.get("entry", 0) < CUT_MIN_ENTRY_C or self._is_dust(b):
@@ -2247,6 +2271,8 @@ class DriftLive:
                 hrs = None
             if hrs is not None and hrs <= FLATTEN_H:
                 continue                  # the flatten pass owns endgame
+                # (hrs None = unscanned ticker: flatten can't see it
+                #  either, so CUT is its only exit - proceed)
             yb, ya = mk.get("yes_bid"), mk.get("yes_ask")
             if not yb or not ya:
                 continue
