@@ -22,6 +22,9 @@ def _mk(tk="KXHIGHNY-26JUL-T86", bid=82, ask=85, city="new york",
 def _bot(tmp_path, monkeypatch):
     monkeypatch.setattr(dl, "STATE", str(tmp_path / "s.json"))
     monkeypatch.setattr(dl, "BETS", str(tmp_path / "b.csv"))
+    # 8/18: legacy tests run WITHOUT the Adam override lane; tests that
+    # exercise BUCKET_ALLOW set it explicitly
+    monkeypatch.setattr(dl, "BUCKET_ALLOW", set())
     b = dl.DriftLive(None, mode="DRY")
     return b
 

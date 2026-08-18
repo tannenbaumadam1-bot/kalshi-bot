@@ -181,6 +181,19 @@ BUCKET_MIN_N = int(os.environ.get("DRIFT_LIVE_BUCKET_MIN_N", "8"))
 # A proven-negative lane now stays blocked in a persistent map. The
 # rolling window can still ADD blocks; it can no longer remove them.
 BUCKET_STICKY = os.environ.get("DRIFT_LIVE_BUCKET_STICKY", "1") == "1"
+# --- 8/18 ADAM OVERRIDE LIST: bucket keys exempt from the gate AND
+# granted full earned treatment (proven chase, 96 floor, 8% bet_pv).
+# Context: the 8/16-17 correlated bust window sticky-blocked
+# level:85-89 - the lifetime-Wilson-proven flagship (76/79) - on a
+# recent window whose payoff shape (sell winners +30c, ride busts to
+# -4.30) no longer exists now that CUT and the metric-slate cap are
+# live (bust ~-2.50, clusters capped). Adam explicitly ordered the
+# unblock AT 8% SIZING on 8/18 ("we need to be more aggressive here
+# to hit return targets") - recorded per the never-touch-the-ceiling
+# rule: his number, his call. REVERT: export DRIFT_LIVE_BUCKET_ALLOW=""
+# (empty), or edit the default here.
+BUCKET_ALLOW = {k.strip() for k in os.environ.get(
+    "DRIFT_LIVE_BUCKET_ALLOW", "level:85-89").split(",") if k.strip()}
 # Evidence-weighted Kelly (7/28, Adam: 'increase positions as we
 # accumulate gains'): a bucket that has PROVEN itself on the live ledger
 # (n >= KELLY_PROVEN_N settled, net > 0) earns half-Kelly sizing; every
@@ -794,6 +807,12 @@ class DriftLive:
 
     def _bucket_blocked(self, bstats, trig, entry):
         bk = self._bucket_key(trig, entry)
+        if bk in BUCKET_ALLOW:
+            # 8/18 Adam override: exempt, and purge the sticky memory so
+            # the tracker shows the lane honestly unblocked
+            if isinstance(getattr(self, "bucket_blocked_cum", None), dict):
+                self.bucket_blocked_cum.pop(bk, None)
+            return False
         # A lane whose rows have rolled off ENTIRELY vanishes from bstats,
         # and `bstats.get(bk)` would return None -> not blocked. That is
         # the same unblock-by-decay hole, one step further along, so the
@@ -812,6 +831,8 @@ class DriftLive:
         codebase. Used by the 8/14 chase ceiling: only lanes with live
         positive evidence may chase past CHASE_MAX_E.
         """
+        if self._bucket_key(trig, entry) in BUCKET_ALLOW:
+            return True         # 8/18 Adam override: full earned status
         if bstats is None:
             bstats = self._bucket_stats()
         if self._bucket_blocked(bstats, trig, entry):
@@ -823,6 +844,8 @@ class DriftLive:
 
     def _kelly_frac(self, bstats, trig, entry):
         """Evidence-weighted Kelly: proven buckets earn half-Kelly."""
+        if self._bucket_key(trig, entry) in BUCKET_ALLOW:
+            return KELLY_PROVEN_MULT     # 8/18 Adam override: 8% lane
         a = bstats.get(self._bucket_key(trig, entry))
         if a and a.get("n", 0) >= KELLY_PROVEN_N and a.get("net", 0) > 0:
             return KELLY_PROVEN_MULT
@@ -1256,6 +1279,7 @@ class DriftLive:
                           "cut": (CUT_C if CUT_ON else None),
                           "day_basis": getattr(self, "day_halt_basis",
                                                "realized"),
+                          "allow": sorted(BUCKET_ALLOW),
                           "dyn": DYN_CAPS, "floor": ENTRY_FLOOR,
                           "chase": CHASE_MAX_E, "rest_h": REST_MAX_H,
                           "min_ct": MIN_CONTRACTS,

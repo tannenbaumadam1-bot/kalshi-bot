@@ -28,6 +28,9 @@ def _mk(tk="KXLOWTHOU-26AUG17-B73.5", bid=82, ask=85, city="houston",
 def _bot(tmp_path, monkeypatch):
     monkeypatch.setattr(dl, "STATE", str(tmp_path / "s.json"))
     monkeypatch.setattr(dl, "BETS", str(tmp_path / "b.csv"))
+    # 8/18: legacy tests run WITHOUT the Adam override lane; tests that
+    # exercise BUCKET_ALLOW set it explicitly
+    monkeypatch.setattr(dl, "BUCKET_ALLOW", set())
     return dl.DriftLive(None, mode="DRY")
 
 
@@ -453,3 +456,48 @@ def test_day_halt_realized_failsafe_when_marks_dark(tmp_path, monkeypatch):
     b.place(mkts=[])
     assert b.halted is True
     assert b.day_halt_basis == "realized"
+
+
+# ---------------- 8/18: Adam override - unblock 85-89 at 8% ----------------
+
+def test_allow_list_exempts_the_lane_from_the_gate(tmp_path, monkeypatch):
+    b = _bot(tmp_path, monkeypatch)
+    monkeypatch.setattr(dl, "BUCKET_ALLOW", {"level:85-89"})
+    b.bucket_blocked_cum = {"level:85-89": {"n": 46, "net": -1.72},
+                            "level:80-84": {"n": 8, "net": -9.27}}
+    bstats = {"level:85-89": {"n": 47, "net": -6.08, "blocked": True}}
+    assert b._bucket_blocked(bstats, "level", 87) is False
+    assert "level:85-89" not in b.bucket_blocked_cum   # sticky purged
+    # non-allowed lanes stay gated
+    assert b._bucket_blocked({}, "level", 82) is True
+
+
+def test_allow_list_grants_full_earned_status(tmp_path, monkeypatch):
+    b = _bot(tmp_path, monkeypatch)
+    monkeypatch.setattr(dl, "BUCKET_ALLOW", {"level:85-89"})
+    # proven despite a red recent window: Adam's explicit 8/18 order
+    assert b._bucket_is_proven("level", 87, {}) is True
+    assert b._kelly_frac({}, "level", 87) == dl.KELLY_PROVEN_MULT
+    # a different band is untouched
+    assert b._kelly_frac({}, "level", 91) == dl.KELLY_BASE
+
+
+def test_allowed_lane_sizes_to_the_earned_cap(tmp_path, monkeypatch):
+    monkeypatch.setattr(dl, "CITY_CAP_PCT", 1.0)
+    monkeypatch.setattr(dl, "SLATE_CAP_PCT", 1.0)
+    monkeypatch.setattr(dl, "METRIC_SLATE_PCT", 1.0)
+    b = _bot(tmp_path, monkeypatch)
+    monkeypatch.setattr(dl, "BUCKET_ALLOW", {"level:85-89"})  # after _bot reset
+    b.dry_balance_c = 60000                     # $600: past the boost step
+    # scale mode via history in a DIFFERENT lane (90-92), so the 8%
+    # treatment of 85-89 can only come from the override
+    b.history = [{"tk": f"G{i}", "ots": f"o{i}", "trig": "level",
+                  "entry": 91, "pnl": 0.2, "sold": True,
+                  "pside": 0.91} for i in range(70)]
+    b._refresh_caps(b.balance_c())
+    assert b.place(mkts=[_mk("KXHIGHMIA-A8", bid=85, ask=88, is_low=False,
+                             city="miami")]) == 1
+    bet = next(iter(b.bets.values()))
+    cost = bet["entry"] * bet["count"]
+    assert cost > b.max_bet_c                   # beyond base 3%
+    assert cost <= b.max_bet_pv_c               # inside the 8% earned cap
