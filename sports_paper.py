@@ -38,7 +38,16 @@ from weather_paper import fetch_result
 STATE = os.environ.get("SPORTS_PAPER_STATE",
                        os.path.join("logs", "sports_paper_state.json"))
 ERA = "sports1"
-EDGE_MIN_C = float(os.environ.get("SPORTS_EDGE_MIN_C", "3"))
+# 8/18 GATE-SPEED, round 2 (Adam: "the sportsbook is hardly working" -
+# 3 entries lifetime, 2/200 settled). The 8/17 spread widening worked
+# (spread refusals stopped dead) but moved the bottleneck: ~500/day
+# anchored candidates now die on this 3c edge floor. This is a PAPER
+# book whose job is settled EVIDENCE, and every entry records its
+# `edge` - so collect at >=1c and choose the real go-live edge floor
+# empirically from the settled cohort, sliced by edge. The go-live
+# gate itself (200 settled + Wilson LB > breakeven) is unchanged and
+# can be evaluated on any edge subset. REVERT: SPORTS_EDGE_MIN_C=3.
+EDGE_MIN_C = float(os.environ.get("SPORTS_EDGE_MIN_C", "1"))
 ENTRY_MIN = int(os.environ.get("SPORTS_ENTRY_MIN", "60"))
 ENTRY_MAX = int(os.environ.get("SPORTS_ENTRY_MAX", "94"))
 # 8/17 GATE-SPEED WIDENING (Adam: push harder): 2 settles in 5 days
@@ -57,7 +66,9 @@ MAX_SPREAD = int(os.environ.get("SPORTS_MAX_SPREAD", "10"))
 # the size below the floor.
 MIN_CONTRACTS = int(os.environ.get("SPORTS_MIN_CONTRACTS", "5"))
 SIZE = max(MIN_CONTRACTS, int(os.environ.get("SPORTS_SIZE", "5")))
-MAX_OPEN = int(os.environ.get("SPORTS_MAX_OPEN", "10"))
+# 8/18: 10 -> 25 for the paper book - throughput cap, not risk (no
+# dollars move); a full evening slate must fit or the gate starves.
+MAX_OPEN = int(os.environ.get("SPORTS_MAX_OPEN", "25"))
 SELL_LO_C = int(os.environ.get("SPORTS_SELL_LO", "97"))
 SELL_HI_C = int(os.environ.get("SPORTS_SELL_HI", "99"))
 CLOSE_H = float(os.environ.get("SPORTS_CLOSE_H", "36"))
@@ -255,6 +266,8 @@ class SportsPaper:
                  "placed": self.placed, "sold": self.sold,
                  "sold_net_c": self.sold_net_c,
                  "miss": self.miss, "gate": self.gate,
+                 "no_anchor_last": getattr(self, "no_anchor_last",
+                                           None) or [],
                  "sold_log": self.sold_log[-200:],
                  # 8/12: anchor-index sizes on the tracker - an EMPTY pm
                  # index (this launch bug) is now one glance, not a
@@ -762,6 +775,18 @@ class SportsPaper:
                        if sharp_rows else None)
             if pm_fair is None and sh_fair is None:
                 self._miss_add("no_anchor")
+                # 8/18 diagnostic: no_anchor is now the #1 filter
+                # (~2k/day) and nobody knows if that is anchor COVERAGE
+                # (game truly unpriced anywhere) or anchor MATCHING
+                # (name mismatch). Keep the last few candidates so the
+                # audit has concrete cases to trace.
+                na = getattr(self, "no_anchor_last", None)
+                if not isinstance(na, list):
+                    na = self.no_anchor_last = []
+                na.append({"tk": tk, "team": mk.get("team"),
+                           "title": (mk.get("title") or "")[:60],
+                           "ts": now()})
+                del na[:-5]
                 continue
             anchors = 1
             if pm_fair is None:
