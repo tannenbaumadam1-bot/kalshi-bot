@@ -656,6 +656,12 @@ class DriftLive:
                     # 8/6 one-time: pre-fix anchor excluded crypto cost -
                     # discard it; next cycle re-anchors with _day_anchor_c
                     self.day_nav0_c = None
+                if not d.get("nav0_v3"):
+                    # 8/18 one-time: discard the cost-basis day anchor
+                    # (the phantom $141.37); next cycle re-anchors on
+                    # marked NAV. Today's tile restarts mid-day once -
+                    # honest from the next midnight roll onward.
+                    self.day_nav0_c = None
                 if not d.get("nav_v3"):
                     # 8/17 one-time BREAKER v3 MIGRATION: every existing
                     # nav_days entry is COST-BASIS (busted positions at
@@ -1107,6 +1113,7 @@ class DriftLive:
              "placed": self.placed, "canceled": self.canceled,
              "day": self.day, "day_pnl_c": self.day_pnl_c,
              "day_nav0_c": self.day_nav0_c, "nav0_v2": True,
+             "nav0_v3": True,
              "dry_balance_c": self.dry_balance_c,
              "settled_tks": self.settled_tks[-300:],
              "k_settlements": self.k_settlements[:300],
@@ -1438,11 +1445,20 @@ class DriftLive:
               f"(day P&L stays {self.day_pnl_c / 100.0:+.2f})")
 
     def _day_anchor_c(self, bal):
-        # day anchor = cash + BOTH books' open cost. 8/6 bug (Adam caught
-        # it: tile +14.6% vs Kalshi ~flat): the anchor ignored the CRYPTO
-        # book's overnight positions, so the moment lane 2 started holding
-        # positions across midnight the baseline read ~$14 low and
-        # "today's return" claimed the whole crypto book as profit.
+        # 8/18 v3 (Adam caught it: tile -8.64% "vs day start $141.37" on
+        # a NAV that never existed): the anchor was cash + ENTRY COST,
+        # the same cost-basis blindness evicted from the breaker on
+        # 8/17. A position bought at 88 and marked 3 sat in the anchor
+        # at 88 - so midnight "NAV" was inflated by every unrealized
+        # loss on the book, and the day tile then charged TODAY for
+        # damage that happened days ago. Anchor on MARKED NAV whenever
+        # the mark pass is reasonably fresh (2h - overnight cycles are
+        # slow); the cost sum stays as the fail-safe only.
+        # 8/6 lesson retained: whatever basis, it must cover BOTH books.
+        m_c = float(getattr(self, "last_mnav_c", 0) or 0)
+        m_ts = float(getattr(self, "mnav_ts", 0) or 0)
+        if MNAV_ON and m_c > 0 and (time.time() - m_ts) < 7200:
+            return int(m_c)
         return (bal
                 + sum(b["entry"] * b["count"] for b in self.bets.values())
                 + _crypto_cost_c())

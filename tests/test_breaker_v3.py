@@ -370,3 +370,38 @@ def test_new_mechanism_counters_publish_zero(tmp_path, monkeypatch):
     b = _bot(tmp_path, monkeypatch)
     for k in ("cuts", "mslate_capped", "dip_capped"):
         assert b.exec_stats.get(k) == 0, k
+
+
+# ---------------- 8/18: day anchor on marked NAV ----------------
+
+def test_day_anchor_prefers_fresh_marked_nav(tmp_path, monkeypatch):
+    """The phantom $141.37: cost-basis anchor counted busted positions
+    at full entry cost. Marked NAV is the anchor now."""
+    b = _bot(tmp_path, monkeypatch)
+    b.bets["T1"] = _no_pos("T1", entry=88, count=5)   # marked ~0 elsewhere
+    b.last_mnav_c = 12800.0
+    b.mnav_ts = time.time()
+    assert b._day_anchor_c(10000) == 12800            # marked, not cost
+
+
+def test_day_anchor_falls_back_to_cost_when_marks_old(tmp_path,
+                                                      monkeypatch):
+    b = _bot(tmp_path, monkeypatch)
+    b.bets["T1"] = _no_pos("T1", entry=88, count=5)
+    b.last_mnav_c = 12800.0
+    b.mnav_ts = time.time() - 7300                    # > 2h stale
+    assert b._day_anchor_c(10000) == 10000 + 440      # cost fail-safe
+
+
+def test_nav0_v3_migration_discards_the_phantom_anchor(tmp_path,
+                                                       monkeypatch):
+    b = _bot(tmp_path, monkeypatch)
+    b.day_nav0_c = 14137                              # the phantom
+    b.save()
+    import json
+    d = json.load(open(dl.STATE))
+    assert d.get("nav0_v3") is True
+    del d["nav0_v3"]                                  # pre-fix state file
+    json.dump(d, open(dl.STATE, "w"))
+    b2 = dl.DriftLive(None, mode="DRY")
+    assert b2.day_nav0_c is None                      # re-anchors next cycle
