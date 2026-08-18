@@ -1254,6 +1254,8 @@ class DriftLive:
                           "city": CITY_CAP_PCT, "slate": SLATE_CAP_PCT,
                           "mslate": METRIC_SLATE_PCT,
                           "cut": (CUT_C if CUT_ON else None),
+                          "day_basis": getattr(self, "day_halt_basis",
+                                               "realized"),
                           "dyn": DYN_CAPS, "floor": ENTRY_FLOOR,
                           "chase": CHASE_MAX_E, "rest_h": REST_MAX_H,
                           "min_ct": MIN_CONTRACTS,
@@ -3169,26 +3171,50 @@ class DriftLive:
         # ledger one deploy after the migration cleaned it.
 
     def place(self, mkts=None):
-        # 8/13: the halt measures the day's loss FROM THE LAST RESUME,
-        # not from midnight. A manual resume (unhalt.txt) hands the book
-        # a fresh full-size daily budget without ever touching the P&L
-        # ledger - the day's true number stays honest on the tracker.
-        if (self.day_pnl_c - float(getattr(self, "halt_base_c", 0))
-                <= -self.max_day_loss_c):
-            self.halted = True
-            return 0
-        # 8/14 WEEKLY CIRCUIT BREAKER: the daily halt is 15% of NAV, so a
-        # three-day losing streak trips nothing and compounds to ~-45%.
-        # This measures the rolling 7-day realized P&L against the same
-        # percentage of NAV and stops the book until a human resumes.
-        if WEEK_HALT_ON and self._week_loss_exceeded():
-            self.week_halted = True
-            return 0
+        # 8/18 ORDER FIX (the $2/$60/$12 deadlock, caught by Adam): the
+        # halt gates used to run BEFORE _refresh_caps, so after any
+        # restart the gates were judged against BOOT-DEFAULT caps - and
+        # a tripped gate returned early, which meant the caps could
+        # never refresh to their real values again. Caps first, always;
+        # the gates judge against live numbers.
         try:
             balance_c = self.balance_c()
         except Exception:
             return 0
         self._refresh_caps(balance_c)
+        # 8/18 DAY HALT v2 (same disease, last gauge): realized day_pnl
+        # counts money REALIZED today, which on a morning like 8/18
+        # is mostly old damage finally settling (-13.61 realized while
+        # the marked book was +7 on the day - it halted the best day of
+        # the week). The day's true loss is marked NAV vs the marked
+        # day anchor; realized (from last resume, the 8/13 semantics)
+        # remains the fail-safe when marks or the anchor are dark.
+        # The latch mirrors the measure: it clears when the measure
+        # recovers, exactly like the weekly gate.
+        m_c = float(getattr(self, "last_mnav_c", 0) or 0)
+        m_ts = float(getattr(self, "mnav_ts", 0) or 0)
+        m_ok = (MNAV_ON and m_c > 0
+                and (time.time() - m_ts) < MNAV_FRESH_S
+                and self.day_nav0_c)
+        if m_ok:
+            day_loss_c = m_c - float(self.day_nav0_c)
+            self.day_halt_basis = "marked"
+        else:
+            day_loss_c = (self.day_pnl_c
+                          - float(getattr(self, "halt_base_c", 0)))
+            self.day_halt_basis = "realized"
+        if day_loss_c <= -self.max_day_loss_c:
+            self.halted = True
+            return 0
+        self.halted = False
+        # 8/14 WEEKLY CIRCUIT BREAKER: the daily halt is 15% of NAV, so a
+        # three-day losing streak trips nothing and compounds to ~-45%.
+        # Drawdown from the rolling 7-day marked peak; the latch clears
+        # when the measure does (8/18, symmetric with the day gate).
+        if WEEK_HALT_ON and self._week_loss_exceeded():
+            self.week_halted = True
+            return 0
+        self.week_halted = False
         if mkts is None:
             try:
                 mkts = we.find_temp_markets(max_days=1)

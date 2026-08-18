@@ -135,10 +135,13 @@ def test_open_cap_blocks(tmp_path, monkeypatch):
 
 
 def test_daily_halt(tmp_path, monkeypatch):
+    # 8/18 v2: caps refresh BEFORE the gate (so the loss must exceed the
+    # POST-refresh cap), and with no marks the realized fail-safe rules
     b = _bot(tmp_path, monkeypatch)
-    b.day_pnl_c = -b.max_day_loss_c
+    b.day_pnl_c = -99999
     assert b.place(mkts=[_mk(bid=82, ask=85)]) == 0
     assert b.halted
+    assert b.day_halt_basis == "realized"
 
 
 def _lvl_bet(peak=83.0):

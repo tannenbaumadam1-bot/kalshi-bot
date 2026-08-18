@@ -405,3 +405,51 @@ def test_nav0_v3_migration_discards_the_phantom_anchor(tmp_path,
     json.dump(d, open(dl.STATE, "w"))
     b2 = dl.DriftLive(None, mode="DRY")
     assert b2.day_nav0_c is None                      # re-anchors next cycle
+
+
+# ---------------- 8/18: day halt v2 + caps-before-gates ----------------
+
+def test_caps_refresh_before_the_halt_gate(tmp_path, monkeypatch):
+    """The $2/$60/$12 deadlock: a tripped gate judged against boot
+    defaults returned before _refresh_caps could ever fix them."""
+    b = _bot(tmp_path, monkeypatch)
+    b.day_pnl_c = -1361                       # the 8/18 morning
+    b.max_day_loss_c = 1200                   # stale boot default
+    b.last_mnav_c = 0.0                       # no marks: realized path
+    b.place(mkts=[])                          # halts on realized...
+    # ...but caps refreshed FIRST off the live balance regardless
+    assert b.max_day_loss_c > 1200
+    assert b.max_bet_pv_c > 0
+
+
+def test_day_halt_measures_marked_day_not_realized(tmp_path, monkeypatch):
+    """8/18: -13.61 REALIZED (old busts settling) while the marked book
+    was +7 on the day. The day gate must read the marked day."""
+    b = _bot(tmp_path, monkeypatch)
+    b.day_pnl_c = -1361                       # yesterday's damage, realized today
+    b.day_nav0_c = 12158
+    b.last_mnav_c = 12889.0                   # day is UP $7.31 marked
+    b.mnav_ts = time.time()
+    b.halted = True                           # stale latch from the deadlock
+    b.place(mkts=[])
+    assert b.halted is False                  # cleared: the day is green
+    assert b.day_halt_basis == "marked"
+
+
+def test_day_halt_still_fires_on_a_real_marked_drop(tmp_path, monkeypatch):
+    b = _bot(tmp_path, monkeypatch)
+    b.day_nav0_c = 12000
+    b.last_mnav_c = 9500.0                    # -25% marked day
+    b.mnav_ts = time.time()
+    b.place(mkts=[])
+    assert b.halted is True
+    assert b.day_halt_basis == "marked"
+
+
+def test_day_halt_realized_failsafe_when_marks_dark(tmp_path, monkeypatch):
+    b = _bot(tmp_path, monkeypatch)
+    b.last_mnav_c = 0.0                       # marks never published
+    b.day_pnl_c = -9999
+    b.place(mkts=[])
+    assert b.halted is True
+    assert b.day_halt_basis == "realized"
