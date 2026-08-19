@@ -459,6 +459,17 @@ CUT_ON = os.environ.get("DRIFT_LIVE_CUT", "1") == "1"
 CUT_C = float(os.environ.get("DRIFT_LIVE_CUT_C", "50"))
 CUT_CONFIRM = int(os.environ.get("DRIFT_LIVE_CUT_CONFIRM", "2"))
 CUT_MIN_ENTRY_C = int(os.environ.get("DRIFT_LIVE_CUT_MIN_ENTRY", "80"))
+# --- 8/19 OVERNIGHT-LOWS SOFT BLOCK (Adam: "do 1+2 together, ship it").
+# The weekend's entire disaster class was evening-entered LOW positions
+# held overnight (8-16h). The ewin bucket mixing lows with morning highs
+# means a hard window block would amputate the good cohort too - so the
+# known suspect is HALF-SIZED instead: low-side entries placed more than
+# OVN_LO_H hours before settlement size at half (5-lot floor holds).
+# Highs untouched; evidence keeps flowing; tail exposure of the new
+# full-size config is cut roughly in half where it lives.
+# REVERT: export DRIFT_LIVE_OVN_LO_HALF=0.
+OVN_LO_HALF = os.environ.get("DRIFT_LIVE_OVN_LO_HALF", "1") == "1"
+OVN_LO_H = float(os.environ.get("DRIFT_LIVE_OVN_LO_H", "8"))
 
 
 def _hold_hours(ots):
@@ -1298,6 +1309,7 @@ class DriftLive:
                           "day_basis": getattr(self, "day_halt_basis",
                                                "realized"),
                           "gate_force": GATE_FORCE or None,
+                          "ovn_lo_half": OVN_LO_HALF,
                           "allow": sorted(BUCKET_ALLOW),
                           "dyn": DYN_CAPS, "floor": ENTRY_FLOOR,
                           "chase": CHASE_MAX_E, "rest_h": REST_MAX_H,
@@ -1737,7 +1749,7 @@ class DriftLive:
             return self.max_open_c
         return self.max_open_c - int(self.max_open_c * DIP_SLEEVE_PCT)
 
-    def _turn_add(self, net_c, kind, hold_h=None, ehrs=None):
+    def _turn_add(self, net_c, kind, hold_h=None, ehrs=None, hl=None):
         """Book one completed round trip.
 
         8/14: settlements ARE turns now. The old ledger counted only
@@ -1773,8 +1785,15 @@ class DriftLive:
         # 8/17: net + capital-hours by ENTRY WINDOW (hrs-to-settlement
         # at entry) - the entry-timing evidence ledger
         ew = t.setdefault("ewin", {})
-        w = ew.setdefault(self._ewin(ehrs), {"n": 0, "net_c": 0.0,
-                                             "hold_h": 0.0})
+        # 8/19 split by METRIC (Adam 1+2): "8-16h" mixed overnight lows
+        # with morning highs - lows settle at dawn, highs at dusk, so
+        # hours-to-settlement alone cannot separate the suspect cohort
+        # from the bread-and-butter one. Keys are now e.g. "lo:8-16".
+        wk = self._ewin(ehrs)
+        if hl in ("lo", "hi"):
+            wk = f"{hl}:{wk}"
+        w = ew.setdefault(wk, {"n": 0, "net_c": 0.0,
+                               "hold_h": 0.0})
         w["n"] += 1
         w["net_c"] = round(w["net_c"] + net_c, 1)
         if hold_h is not None and hold_h >= 0:
@@ -2262,7 +2281,7 @@ class DriftLive:
             self.fees_c += fee
             self._turn_add(net, "flatten",
                            hold_h=_hold_hours(b.get("ots")),
-                           ehrs=b.get("ehrs"))
+                           ehrs=b.get("ehrs"), hl=b.get("hl"))
             self.exec_stats["flattened"] = (
                 self.exec_stats.get("flattened", 0) + 1)
             if self.client is None:
@@ -2391,7 +2410,7 @@ class DriftLive:
             self.fees_c += fee
             self._turn_add(net, "cut",
                            hold_h=_hold_hours(b.get("ots")),
-                           ehrs=b.get("ehrs"))
+                           ehrs=b.get("ehrs"), hl=b.get("hl"))
             self.exec_stats["cuts"] = self.exec_stats.get("cuts", 0) + 1
             if self.client is None:
                 self.dry_balance_c += int(bid) * cnt - fee
@@ -2908,7 +2927,8 @@ class DriftLive:
         # decay ladder can be retuned on net-per-capital-hour - the only
         # objective that makes sense on a capital-constrained book.
         _hh = _hold_hours(b.get("ots"))
-        self._turn_add(net, "lift", hold_h=_hh, ehrs=b.get("ehrs"))
+        self._turn_add(net, "lift", hold_h=_hh, ehrs=b.get("ehrs"),
+                       hl=b.get("hl"))
         self._rung_lift(px, net, _hh)
         # 8/15 TWO-SIDED: the market we just sold at 96-99 is the same
         # trade again if it dips back. The calibration table says this
@@ -3114,7 +3134,7 @@ class DriftLive:
             # winners-only sample.
             self._turn_add(net, "settle",
                            hold_h=_hold_hours(b.get("ots")),
-                           ehrs=b.get("ehrs"))
+                           ehrs=b.get("ehrs"), hl=b.get("hl"))
             del self.bets[tk]
 
     # ---- momentum stop + trailing exit (taker sells, same rules as paper) ----
@@ -3444,6 +3464,16 @@ class DriftLive:
                     if size < 1:
                         continue
                 size = max(size, MIN_CONTRACTS)   # fee-rounding floor
+                # 8/19 soft block: overnight LOW entries at half size
+                try:
+                    _h2s = float(mk.get("hrs"))
+                except (TypeError, ValueError):
+                    _h2s = None
+                if (OVN_LO_HALF and mk["is_low"] and _h2s is not None
+                        and _h2s > OVN_LO_H):
+                    size = max(MIN_CONTRACTS, size // 2)
+                    self.exec_stats["ovn_lo_halved"] = (
+                        self.exec_stats.get("ovn_lo_halved", 0) + 1)
                 # ...and trims to the matching dollar ceiling
                 _cap = (getattr(self, "max_bet_pv_c", 0) or self.max_bet_c
                         ) if _pv else self.max_bet_c

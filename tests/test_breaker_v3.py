@@ -563,3 +563,58 @@ def test_gate_force_empty_restores_evidence_gating(tmp_path, monkeypatch):
     b.history = []
     mode, n = b._gate()
     assert mode == "probe"               # no evidence -> probe, as ever
+
+
+# -------- 8/19: ewin metric split + overnight-lows half-size --------
+
+def test_ewin_keys_split_by_metric(tmp_path, monkeypatch):
+    b = _bot(tmp_path, monkeypatch)
+    b._turn_add(50.0, "lift", hold_h=2.0, ehrs=10.0, hl="lo")
+    b._turn_add(30.0, "lift", hold_h=2.0, ehrs=10.0, hl="hi")
+    b._turn_add(10.0, "lift", hold_h=2.0, ehrs=10.0)      # no hl: legacy
+    ew = b.turns["ewin"]
+    assert ew["lo:8-16"]["n"] == 1 and ew["hi:8-16"]["n"] == 1
+    assert ew["8-16"]["n"] == 1                            # untagged bucket
+
+
+def test_overnight_low_entries_half_size(tmp_path, monkeypatch):
+    """Adam 1+2: LOW entries >8h to settlement size at half; the 5-lot
+    floor holds; HIGH entries at the same horizon are untouched."""
+    monkeypatch.setattr(dl, "GATE_FORCE", "scale")   # full size live
+    monkeypatch.setattr(dl, "CITY_CAP_PCT", 1.0)
+    monkeypatch.setattr(dl, "SLATE_CAP_PCT", 1.0)
+    monkeypatch.setattr(dl, "METRIC_SLATE_PCT", 1.0)
+    monkeypatch.setattr(dl, "DIP_SLEEVE_PCT", 0.0)
+    monkeypatch.setattr(dl, "BUCKET_ALLOW", {"level:85-89"})
+    b = _bot(tmp_path, monkeypatch)
+    monkeypatch.setattr(dl, "BUCKET_ALLOW", {"level:85-89"})
+    monkeypatch.setattr(dl, "GATE_FORCE", "scale")
+    b.dry_balance_c = 60000
+    b._refresh_caps(b.balance_c())
+    b.place(mkts=[_mk("KXLOWTDEN-OV1", bid=85, ask=88, is_low=True,
+                      city="denver", hrs=12.0),
+                  _mk("KXHIGHMIA-OV2", bid=85, ask=88, is_low=False,
+                      city="miami", hrs=12.0)])
+    lo = next(v for v in b.bets.values() if v["city"] == "denver")
+    hi = next(v for v in b.bets.values() if v["city"] == "miami")
+    assert hi["count"] >= 2 * lo["count"] or (
+        lo["count"] == dl.MIN_CONTRACTS and hi["count"] > lo["count"])
+    assert b.exec_stats.get("ovn_lo_halved", 0) >= 1
+
+
+def test_short_horizon_lows_keep_full_size(tmp_path, monkeypatch):
+    monkeypatch.setattr(dl, "GATE_FORCE", "scale")
+    monkeypatch.setattr(dl, "CITY_CAP_PCT", 1.0)
+    monkeypatch.setattr(dl, "SLATE_CAP_PCT", 1.0)
+    monkeypatch.setattr(dl, "METRIC_SLATE_PCT", 1.0)
+    monkeypatch.setattr(dl, "DIP_SLEEVE_PCT", 0.0)
+    b = _bot(tmp_path, monkeypatch)
+    monkeypatch.setattr(dl, "GATE_FORCE", "scale")
+    monkeypatch.setattr(dl, "BUCKET_ALLOW", {"level:85-89"})
+    b.dry_balance_c = 60000
+    b._refresh_caps(b.balance_c())
+    b.place(mkts=[_mk("KXLOWTSEA-OV3", bid=85, ask=88, is_low=True,
+                      city="seattle", hrs=5.0)])       # inside 8h: full
+    lo = next(v for v in b.bets.values() if v["city"] == "seattle")
+    assert lo["count"] > dl.MIN_CONTRACTS
+    assert b.exec_stats.get("ovn_lo_halved", 0) == 0
