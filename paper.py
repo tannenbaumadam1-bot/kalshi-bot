@@ -599,6 +599,18 @@ def main():
     # since 8/14 with stale inventory, 4 turns against a 200-turn gate -
     # it stopped generating evidence. State preserved; revive with
     # PAPER_MIDBAND=1.
+    # CULTURE SCANNER (8/19, Adam: "build the culture one right now"):
+    # phase 0 of the culture nowcast - watch/match/record every Kalshi
+    # Entertainment book + kworb counters. NO TRADING. PAPER_CULTURE=0
+    # kills it.
+    cu_bot = None
+    if os.environ.get("PAPER_CULTURE", "1") == "1":
+        try:
+            import culture_scan
+            cu_bot = culture_scan.CultureScan()
+        except Exception as e:
+            print(f"culture scanner unavailable: {e}")
+            cu_bot = None
     mb_bot = None
     if os.environ.get("PAPER_MIDBAND", "0") == "1":
         try:
@@ -773,6 +785,15 @@ def main():
                               f"sold {sp_bot.sold}")
                 except Exception as e:
                     print(f"  sports paper step skipped: {e}")
+            if cu_bot is not None and n % 10 == 4:
+                try:
+                    cs2 = cu_bot.step()
+                    print(f"  CULTURE(scan): {cs2['scanned']} mkts | "
+                          f"{cs2['liquid']} liquid | "
+                          f"{cs2['matched']} matched | "
+                          f"kworb {cs2['kworb_rows']}")
+                except Exception as e:
+                    print(f"  culture scan skipped: {e}")
             if mb_bot is not None and n % 5 == 3:
                 try:
                     no = mb_bot.step()

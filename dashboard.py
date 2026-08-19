@@ -426,6 +426,13 @@ def build_data():
             out["midband"] = _md
     except Exception:
         pass
+    # CULTURE SCANNER (8/19): phase-0 telemetry block
+    try:
+        _cu = os.path.join("logs", "culture_state.json")
+        if os.path.exists(_cu):
+            out["culture"] = json.load(open(_cu))
+    except Exception:
+        pass
     for key, fname in (("clive", "crypto_live_state.json"),):
         fpath = os.path.join("logs", fname)
         if os.path.exists(fpath):
