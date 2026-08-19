@@ -45,6 +45,13 @@ import drift_paper as dp
 from kalshibot.fees import fee_cents
 from weather_paper import fetch_result
 
+# 8/19 THE TAPE RECORDER (BlueWalker lesson #1: record everything).
+# Guarded import: a missing/broken recorder must never break trading.
+try:
+    from recorder import Recorder as _Recorder
+except Exception:
+    _Recorder = None
+
 CONFIG = "config_live.yaml"
 STATE = os.path.join("logs", "drift_live_state.json")
 BETS = os.path.join("logs", "drift_live_bets.csv")
@@ -663,6 +670,7 @@ class DriftLive:
         self.week_loss_c = None   # None = not yet evaluated this run
         self.week_limit_c = None  # (never render an uncomputed 0 as a cap)
         self.resume_token = ""   # the unhalt.txt date already consumed
+        self.rec = _Recorder() if _Recorder else None   # 8/19 the tape
         self.load()
         # 8/18: publish ZEROS for the new mechanisms. "cuts" absent from
         # the tracker is indistinguishable from "cut code not running" -
@@ -1282,6 +1290,8 @@ class DriftLive:
                           "mnav": (round(float(self.last_mnav_c) / 100.0, 2)
                                    if getattr(self, "last_mnav_c", 0)
                                    else None)},
+                 "rec": (self.rec.stats() if self.rec is not None
+                         else {"on": False}),
                  "has_kalshi_truth": bool(self.k_settlements) or self.k_exit_realized_c != 0,
                  "exec": dict(self.exec_stats),
                  # mirror counts + fees straight from Kalshi's records
@@ -3901,6 +3911,19 @@ class DriftLive:
             self._mark_nav(mkts)
         except Exception:
             pass
+        # 8/19 tape: one line per cycle - every book the scan saw, the
+        # whole position state, marked NAV. Better dataset -> better
+        # experiments -> better alpha. Fully guarded; never trades.
+        if self.rec is not None:
+            try:
+                self.rec.cycle(
+                    mkts, self.bets, len(self.pending),
+                    len(getattr(self, "offers", {}) or {}),
+                    len(getattr(self, "dips", {}) or {}),
+                    {"m": getattr(self, "last_mnav_c", 0),
+                     "c": getattr(self, "last_nav_c", 0)})
+            except Exception:
+                pass
         self.place(mkts)
         self.flatten(mkts)
         self.cut_check(mkts)         # 8/17: band-broken downside exit
