@@ -414,18 +414,15 @@ def build_data():
             out["sports"] = _sd
     except Exception:
         pass
-    # MID-BAND PAPER BOOK (8/13): 15-55c bands, graded on turns
-    try:
-        _mp = os.path.join("logs", "midband_paper_state.json")
-        if os.path.exists(_mp):
-            _md = json.load(open(_mp))
-            _md["history"] = (_md.get("history") or [])[-30:]
-            _md["open_positions"] = [dict(v, ticker=k) for k, v
-                                     in (_md.get("bets") or {}).items()][:12]
-            _md.pop("bets", None)
-            out["midband"] = _md
-    except Exception:
-        pass
+    # MID-BAND PAPER BOOK RETIRED 8/19 (Adam: "cut things that are a
+    # distraction"). The book stopped trading 8/14: it filled all 12
+    # slots and then froze - no fair value to tell it when a thesis had
+    # broken, so nothing could exit and the turn counter stuck at 4.
+    # NOT a failed thesis: all 4 completed turns WON (+$2.18, +$0.55 per
+    # turn, the buy-at-20-sell-at-40 trade). The lane comes back with a
+    # brain when the weather nowcast passes its shadow exam; the frozen
+    # state is filed as MIDBAND_AUTOPSY.md. State file preserved on the
+    # server. To revive: restore this block + PAPER_MIDBAND=1.
     # CULTURE SCANNER (8/19): phase-0 telemetry block
     try:
         _cu = os.path.join("logs", "culture_state.json")
@@ -773,18 +770,7 @@ td.num,th.num{text-align:right}
 <th class=num>Entry</th><th class=num>Edge</th><th class=num>Qty</th><th>Anchors</th></tr></thead>
 <tbody id=spopen></tbody></table></div>
 </div>
-<div id=mbwrap style="display:none;border:1.5px solid rgba(110,168,254,.45);border-radius:12px;padding:14px 18px;margin:14px 0 4px;background:linear-gradient(180deg,rgba(110,168,254,.05),transparent)">
-<h2 style="margin:0 0 10px">Book 4 &middot; Mid-band <span id=mbmode style="text-transform:none;letter-spacing:0"></span></h2>
-<div class=grid id=mbtiles></div>
-<div style="margin-top:12px"><div class=t style="margin-bottom:6px">Open now</div>
-<table><thead><tr><th>Opened</th><th>Market</th><th class=num>Model</th>
-<th class=num>Entry</th><th class=num>Edge</th><th class=num>Qty</th></tr></thead>
-<tbody id=mbopen></tbody></table></div>
-<div style="margin-top:12px"><div class=t style="margin-bottom:6px">Completed turns</div>
-<table><thead><tr><th>Closed</th><th>Market</th><th class=num>Entry</th>
-<th class=num>Exit</th><th class=num>Qty</th><th>Why</th><th class=num>P&amp;L</th></tr></thead>
-<tbody id=mbtbl></tbody></table></div>
-</div>
+<!-- Book 4 (mid-band) panel retired 8/19 - see payload note -->
 <!-- PAPER SECTIONS RETIRED 7/30 (Adam: 'get rid of the other two paper
      strategies for now') - hidden, not deleted; ledgers archived on the
      server as *_retired.json. Set display:block + revive the books in
@@ -1131,31 +1117,6 @@ async function load(){
       +'<td class=num>'+b.count+'</td>'
       +'<td>'+(b.anchors===2?'<span class=chip style="background:rgba(47,208,140,.13);color:var(--grn)">PM+SHARP</span>':'<span class=chip style="background:rgba(125,144,173,.15);color:var(--mut)">SINGLE</span>')+'</td></tr>').join('')
       ||'<tr><td colspan=8 class=empty>Scanning sports books for anchored edge&hellip;</td></tr>';
-  }
-  if(d.midband&&d.midband.summary){const MB=d.midband.summary,MR=MB.rules||{},MG=MB.gate||{};
-    $('mbwrap').style.display='block';
-    $('mbmode').innerHTML='<span class=chip style="background:rgba(125,144,173,.15);color:var(--mut)">PAPER</span>'
-      +' <span class=mut style="font-size:11px">era midband1 &middot; '+((MR.band||[15,55]).join('-'))+'&cent; bands vs the ensemble &middot; exits on convergence or the pre-close flatten &middot; never held to settlement</span>';
-    $('mbtiles').innerHTML=[
-      tile('Go-live gate',(MG.n||0)+' / '+(MG.need||200)+' turns'+(MG.ready?' &middot; <span class=pos>READY</span>':''),'graded on ROUND TRIPS, not settlements'),
-      tile('Turns',(MB.turns||0)+' &middot; <span class="'+C(MB.net)+'">'+M(MB.net||0)+'</span>',(MB.wins||0)+'W / '+(MB.losses||0)+'L'+(MB.win_rate!=null?(' &middot; '+(MB.win_rate*100).toFixed(0)+'% win'):'')),
-      tile('Per turn',(MB.per_turn!=null?M(MB.per_turn):'<span class=mut>&mdash;</span>'),'mid-band loses often by design &mdash; the payoff is the point'),
-      tile('Open',(MB.open||0)+' &middot; '+(MB.placed||0)+' placed','target +'+Math.round((MR.target_pct||0.4)*100)+'% &middot; flatten T-'+(MR.flatten_h||1)+'h &middot; '+(MR.size||5)+' lots')
-    ].join('');
-    $('mbopen').innerHTML=((d.midband.open_positions)||[]).map(b=>'<tr><td class=mut>'+String(b.ots||'').slice(5,16).replace('T',' ')+'</td>'
-      +'<td>'+(b.city||'')+' '+(b.strike!=null?b.strike+'&deg;':'')+' '+(b.is_low?'low':'high')+'</td>'
-      +'<td class=num>'+(b.fair!=null?Math.round(b.fair*100)+'%':'&ndash;')+'</td>'
-      +'<td class=num>'+b.entry+'&cent;</td>'
-      +'<td class=num>'+(b.edge!=null?b.edge+'&cent;':'&ndash;')+'</td>'
-      +'<td class=num>'+b.count+'</td></tr>').join('')
-      ||'<tr><td colspan=6 class=empty>Scanning bands for model edge&hellip;</td></tr>';
-    $('mbtbl').innerHTML=((d.midband.history)||[]).slice().reverse().slice(0,12).map(h=>'<tr><td class=mut>'+String(h.ts||'').slice(5,16).replace('T',' ')+'</td>'
-      +'<td>'+(h.city||'')+' '+(h.strike!=null?h.strike+'&deg;':'')+'</td>'
-      +'<td class=num>'+h.entry+'&cent;</td><td class=num>'+(h.exit!=null?h.exit+'&cent;':'&ndash;')+'</td>'
-      +'<td class=num>'+h.count+'</td>'
-      +'<td>'+(h.why==='target'?'<span class=chip style="background:rgba(47,208,140,.13);color:var(--grn)">TARGET</span>':'<span class=chip style="background:rgba(125,144,173,.15);color:var(--mut)">FLATTEN</span>')+'</td>'
-      +'<td class=num><span class="'+C(h.pnl)+'">'+M(h.pnl)+'</span></td></tr>').join('')
-      ||'<tr><td colspan=7 class=empty>No completed turns yet&hellip;</td></tr>';
   }
   {const strip=[];
    const fmtL=(tag,LV)=>{const L=LV.summary;const w=(L.k_wins!=null?L.k_wins:L.wins),l=(L.k_wins!=null?L.k_losses:L.losses);return tag+' '+(L.mode||'LIVE')+' '+M(L.net||0)+' ('+(w||0)+'W/'+(l||0)+'L)'
