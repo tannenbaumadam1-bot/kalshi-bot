@@ -293,6 +293,7 @@ def test_proven_bucket_outranks_unproven_on_a_tight_budget(tmp_path,
     """Order IS allocation: with room for ONE bet, the proven-bucket
     candidate must win the budget regardless of scan order."""
     b = _bot(tmp_path, monkeypatch)
+    monkeypatch.setattr(dl, "DIP_SLEEVE_PCT", 0.0)   # sleeve off: ordering test
     monkeypatch.setattr(dl, "METRIC_SLATE_PCT", 1.0)
     monkeypatch.setattr(dl, "SLATE_CAP_PCT", 1.0)
     monkeypatch.setattr(dl, "CITY_CAP_PCT", 1.0)
@@ -501,3 +502,44 @@ def test_allowed_lane_sizes_to_the_earned_cap(tmp_path, monkeypatch):
     cost = bet["entry"] * bet["count"]
     assert cost > b.max_bet_c                   # beyond base 3%
     assert cost <= b.max_bet_pv_c               # inside the 8% earned cap
+
+
+# ---------------- 8/18: bid-side unstarve (dip sleeve) ----------------
+
+def test_entries_stop_at_cap_minus_sleeve(tmp_path, monkeypatch):
+    """Fresh entries may not consume the dip sleeve."""
+    b = _bot(tmp_path, monkeypatch)
+    monkeypatch.setattr(dl, "DYN_CAPS", False)
+    monkeypatch.setattr(dl, "DIP_SLEEVE_PCT", 0.10)
+    b.max_open_c = 1000
+    b.bets["T1"] = _no_pos("T1", entry=89, count=10)   # 890 filled
+    b.last_nav_c = 100000.0                            # caps roomy
+    # entry cap = 900; 890 + 445 > 900 -> refused
+    n = b.place(mkts=[_mk("KXHIGHMIA-S1", bid=85, ask=89, is_low=False,
+                          city="miami")])
+    assert "KXHIGHMIA-S1" not in set(b.bets) | {
+        o["ticker"] for o in b.pending.values()}
+
+
+def test_dips_can_rest_into_the_sleeve_on_a_full_book(tmp_path,
+                                                      monkeypatch):
+    """The unstarve itself: the exact state that produced 35,872
+    refusals (entries at their cap) must now accept a standing bid."""
+    b = _bot(tmp_path, monkeypatch)
+    monkeypatch.setattr(dl, "DIP_SLEEVE_PCT", 0.10)
+    b.max_open_c = 10000                               # $100 book
+    b.last_nav_c = 100000.0
+    b.bets["T1"] = _no_pos("T1", entry=90, count=100)  # 9000 = entry cap
+    b.quote_dips([_mk("KXHIGHBOS-S2", bid=88, ask=92, is_low=False,
+                      city="boston")], 100000, {})
+    assert "KXHIGHBOS-S2" in b.dips                    # bid RESTS now
+    # and the dip lane still cannot push TOTAL past the open cap:
+    dip_cost = sum(d["entry"] * d["count"] for d in b.dips.values())
+    assert b.open_cost_c() + dip_cost <= b.max_open_c
+
+
+def test_sleeve_zero_restores_old_behavior(tmp_path, monkeypatch):
+    b = _bot(tmp_path, monkeypatch)
+    monkeypatch.setattr(dl, "DIP_SLEEVE_PCT", 0.0)
+    b.max_open_c = 1000
+    assert b._entry_cap_c() == 1000

@@ -343,6 +343,16 @@ DIP_DISCOUNT_C = int(os.environ.get("DRIFT_LIVE_DIP_DISCOUNT", "2"))
 DIP_MIN_ROOM_C = 2      # bid must sit >= 2c under the market bid
 DIP_REFRESH_C = int(os.environ.get("DRIFT_LIVE_DIP_REFRESH", "3"))
 DIP_MAX_PCT = float(os.environ.get("DRIFT_LIVE_DIP_MAX_PCT", "0.25"))
+# --- 8/18 BID-SIDE UNSTARVE (Adam-approved: "build this, incorporate
+# into the live bot"). The dip lane runs LAST every cycle, so a full
+# book refused every standing bid at the open-cap check - 35,872
+# refusals in one day against 14 lifetime fills. The fix is a SLEEVE:
+# a slice of the open cap reserved for standing bids that fresh
+# entries cannot crowd out. Entries stop at (open cap - sleeve); dips
+# may fill the whole cap. Total exposure NEVER exceeds the existing
+# open cap - no locked ceiling moves, capital is just split so the
+# bid side stops losing the race. REVERT: DRIFT_LIVE_DIP_SLEEVE=0.
+DIP_SLEEVE_PCT = float(os.environ.get("DRIFT_LIVE_DIP_SLEEVE", "0.10"))
 # 8/17 RUNG REWEIGHT: the telemetry finally reported and 97 is a dead
 # rung - 8 placed / 1 lifted (12.5% conv), $0.0032 per capital-hour vs
 # 98's 57.6% conv at $0.0301 and 99's $0.0344. Every quote parked at 97
@@ -988,7 +998,7 @@ class DriftLive:
         if bal - ask_s * size < self.reserve_c:
             self._cross_why = "reserve"
             return False
-        if self.open_cost_c() + ask_s * size > self.max_open_c:
+        if self.open_cost_c() + ask_s * size > self._entry_cap_c():
             self._cross_why = "open_cap"
             return False
         new_oid = f"xc-{self.placed + 1}"
@@ -1707,6 +1717,15 @@ class DriftLive:
             return "8-16"
         return "16+"
 
+    def _entry_cap_c(self):
+        """8/18 bid-side unstarve: entries stop at (open cap - dip
+        sleeve) so standing bids always have room on a full book. Dips
+        check against the FULL cap, so total filled exposure can never
+        exceed the same locked ceiling as before."""
+        if not DIP_ON or DIP_SLEEVE_PCT <= 0:
+            return self.max_open_c
+        return self.max_open_c - int(self.max_open_c * DIP_SLEEVE_PCT)
+
     def _turn_add(self, net_c, kind, hold_h=None, ehrs=None):
         """Book one completed round trip.
 
@@ -2083,6 +2102,8 @@ class DriftLive:
                 "deployed": round(dep / 100.0, 2),
                 "dips": round(dip / 100.0, 2),
                 "cap": round(self.max_open_c / 100.0, 2),
+                "sleeve": round((self.max_open_c - self._entry_cap_c())
+                                / 100.0, 2),
                 "pct": round(dep / cap, 3),
                 "pct_with_dips": round((dep + dip) / cap, 3),
                 "positions": len(self.bets),
@@ -3458,7 +3479,7 @@ class DriftLive:
                     self._cap_refused(kind0, tk, entry, size,
                                       c_cost, d_cost, nav_cc)
                     continue
-            if self.open_cost_c() + entry * size > self.max_open_c:
+            if self.open_cost_c() + entry * size > self._entry_cap_c():
                 continue
             if balance_c - entry * size < self.reserve_c:
                 continue
@@ -3788,7 +3809,7 @@ class DriftLive:
             size -= 1
         if entry_add * size > self.max_bet_c:
             return False
-        if self.open_cost_c() + entry_add * size > self.max_open_c:
+        if self.open_cost_c() + entry_add * size > self._entry_cap_c():
             return False
         if balance_c - entry_add * size < self.reserve_c:
             return False
