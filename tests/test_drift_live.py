@@ -25,6 +25,7 @@ def _bot(tmp_path, monkeypatch):
     # 8/18: legacy tests run WITHOUT the Adam override lane; tests that
     # exercise BUCKET_ALLOW set it explicitly
     monkeypatch.setattr(dl, "BUCKET_ALLOW", set())
+    monkeypatch.setattr(dl, "GATE_FORCE", "")   # tests grade the gate honestly
     b = dl.DriftLive(None, mode="DRY")
     return b
 

@@ -492,6 +492,14 @@ def _cycle_s():
 # short-lived for a 10-minute look interval).
 CRYPTO_SUB_S = int(os.environ.get("DRIFT_CRYPTO_SUB_S", "180"))
 GATE_MIN_N = dp.GATE_MIN_N
+# --- 8/19 ADAM ORDER: "ship the full size now". Forces the sizing
+# gate to scale mode - the probe throttle (5-lot entries after a red
+# 60-row window) is OFF while this is set. Recorded per the
+# never-touch-the-ceiling rule: his dial, his call, given with the
+# risk framing that overriding a sizing governor right after losses
+# is how books die; the daily/weekly MARKED breakers and CUT remain
+# the stop-losses. REVERT: export DRIFT_LIVE_GATE_FORCE="" (empty).
+GATE_FORCE = os.environ.get("DRIFT_LIVE_GATE_FORCE", "scale").strip()
 GATE_MAX_GAP = dp.GATE_MAX_GAP
 PROBE_COST_CENTS = dp.PROBE_COST_CENTS
 ERA = "dlive1"
@@ -1289,6 +1297,7 @@ class DriftLive:
                           "cut": (CUT_C if CUT_ON else None),
                           "day_basis": getattr(self, "day_halt_basis",
                                                "realized"),
+                          "gate_force": GATE_FORCE or None,
                           "allow": sorted(BUCKET_ALLOW),
                           "dyn": DYN_CAPS, "floor": ENTRY_FLOOR,
                           "chase": CHASE_MAX_E, "rest_h": REST_MAX_H,
@@ -1378,6 +1387,8 @@ class DriftLive:
         cur = [h for h in rows
                if h.get("outcome") in (0, 1) or h.get("sold")][-60:]
         n = len(cur)
+        if GATE_FORCE in ("scale", "probe"):
+            return GATE_FORCE, n     # 8/19 Adam override: full size
         if n < GATE_MIN_N:
             return "probe", n
         expectancy = sum(h.get("pnl") or 0 for h in cur) / n

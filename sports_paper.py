@@ -59,7 +59,13 @@ ENTRY_MAX = int(os.environ.get("SPORTS_ENTRY_MAX", "94"))
 # evidence, not more risk. 5 -> 10; band 65-90 -> 60-94 for the same
 # reason (the weather book's whole profit engine lives at 85-96 and
 # sports capped itself out of that band). REVERT: env overrides.
-MAX_SPREAD = int(os.environ.get("SPORTS_MAX_SPREAD", "10"))
+# 8/19 round 3 (Adam: "this sports funnel needs to be shipping a lot
+# more bets a day"): spread refusals resumed at ~10k/day even at 10c -
+# the wide-book leagues (soccer etc) sit outside it. 14c admits them;
+# paper fills still pay the REAL ask with exact fees, so a wide book
+# cannot fake edge - it can only donate evidence. SPORTS_MAX_SPREAD=10
+# reverts.
+MAX_SPREAD = int(os.environ.get("SPORTS_MAX_SPREAD", "14"))
 # 8/12 (Adam): 5-contract MINIMUM, same floor as the live books - the
 # fee-rounding math (a 1-lot pays the same rounded-up cent as 5) and
 # the go-live dataset both need real-sized trades. No config may take

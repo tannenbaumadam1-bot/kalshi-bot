@@ -31,6 +31,7 @@ def _bot(tmp_path, monkeypatch):
     # 8/18: legacy tests run WITHOUT the Adam override lane; tests that
     # exercise BUCKET_ALLOW set it explicitly
     monkeypatch.setattr(dl, "BUCKET_ALLOW", set())
+    monkeypatch.setattr(dl, "GATE_FORCE", "")   # tests grade the gate honestly
     return dl.DriftLive(None, mode="DRY")
 
 
@@ -543,3 +544,22 @@ def test_sleeve_zero_restores_old_behavior(tmp_path, monkeypatch):
     monkeypatch.setattr(dl, "DIP_SLEEVE_PCT", 0.0)
     b.max_open_c = 1000
     assert b._entry_cap_c() == 1000
+
+
+# ---------------- 8/19: Adam gate override (full size) ----------------
+
+def test_gate_force_scale_overrides_probe(tmp_path, monkeypatch):
+    """Adam's 8/19 order: probe throttle OFF while GATE_FORCE=scale."""
+    b = _bot(tmp_path, monkeypatch)
+    monkeypatch.setattr(dl, "GATE_FORCE", "scale")
+    b.history = []                       # zero evidence: normally probe
+    mode, n = b._gate()
+    assert mode == "scale"
+
+
+def test_gate_force_empty_restores_evidence_gating(tmp_path, monkeypatch):
+    b = _bot(tmp_path, monkeypatch)
+    monkeypatch.setattr(dl, "GATE_FORCE", "")
+    b.history = []
+    mode, n = b._gate()
+    assert mode == "probe"               # no evidence -> probe, as ever
