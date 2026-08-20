@@ -69,7 +69,11 @@ ROTATE_N = int(os.environ.get("PHANTOM_ROTATE", "30"))
 MAX_SERIES = int(os.environ.get("PHANTOM_MAX_SERIES", "60"))
 _SERIES_RX = re.compile(r"MLB|BASEBALL|ATP|WTA|TENNIS|USOPEN", re.I)
 TRADE_PAGES = int(os.environ.get("PHANTOM_TRADE_PAGES", "4"))
-ERA = "phantom1"
+# phantom2: the phantom1 ledger was generated with a LOOK-AHEAD bug
+# (quotes posted now, filled against prints from the previous 15
+# minutes) and is discarded rather than carried. A number built on a
+# time-travelling fill is not a small error, it's a different book.
+ERA = "phantom2"
 
 # --- quoting policy (all in cents) ---
 # Only quote where the market is wide enough that stepping inside still
@@ -244,6 +248,8 @@ class PhantomBook:
         self._seen = set()    # trade ids already scored
         self._series, self._ser_ts, self._rot = [], 0.0, 0
         self.hit_ts = {}      # tk -> when flow last ran into our quote
+        self.resting = {}     # the quotes that were live LAST window
+        self._last_ts = 0.0
         self.realized_c = 0.0  # settled, banked, never re-marked
         self.settled = []
         self.hot = set()      # series the tape has shown printing
@@ -466,7 +472,7 @@ class PhantomBook:
             pass
         return out
 
-    def check_fills(self, trades):
+    def check_fills(self, trades, since=0.0):
         """Would our resting quotes have been hit? taker_side tells us
         which side of the book the print consumed:
           taker BOUGHT yes at p -> lifted offers -> our ask fills if
@@ -480,8 +486,13 @@ class PhantomBook:
             if tid in self._seen:
                 continue
             tk = t.get("ticker")
-            q = self.quotes.get(tk)
+            q = self.resting.get(tk)
             if q is None:
+                continue
+            # the print must post-date the quote it supposedly hit
+            tts = _ts(t.get("created_time"))
+            if tts and tts < q["ts"]:
+                self.stats["pre_quote"] = self.stats.get("pre_quote", 0) + 1
                 continue
             self._seen.add(tid)
             self.stats["trades_seen"] += 1
@@ -627,7 +638,7 @@ class PhantomBook:
         for m in mkts:
             if m["yb"] and m["ya"]:
                 mid[m["tk"]] = (m["yb"] + m["ya"]) / 2.0
-        pairs = locked_c = unmatched_n = unreal_c = open_c = 0
+        pairs = locked_c = unmatched_n = unreal_c = open_c = cap_c = 0
         fees_c = 0
         clusters, rows = {}, []
         lanes = {}
@@ -642,6 +653,11 @@ class PhantomBook:
                 m_locked = (asell - abuy) * matched - r.get("fee", 0)
                 locked_c += m_locked
             fees_c += r.get("fee", 0)
+            # what Kalshi would actually have LOCKED UP for this
+            # position: cash for the buys, full collateral for the
+            # sells. The denominator nobody asks for until the P&L
+            # looks good.
+            cap_c += r["bc"] + (sn * 100 - r["sc"])
             net = bn - sn
             fee = r.get("fee", 0)
             m = mid.get(tk)
@@ -689,7 +705,7 @@ class PhantomBook:
         return {"pairs": pairs, "locked_c": round(locked_c, 1),
                 "fees_c": fees_c, "unmatched": unmatched_n,
                 "unreal_c": round(unreal_c, 1),
-                "open_c": round(open_c, 1),
+                "open_c": round(open_c, 1), "cap_c": round(cap_c, 1),
                 "positions": rows[:14], "lanes": lanes,
                 "clusters": [{"event": event_label(k), "ticker": k,
                               "net": v["net"], "strikes": v["strikes"],
@@ -792,11 +808,18 @@ class PhantomBook:
     # ---------------- the cycle ----------------
     def step(self):
         mkts, series_hit = self.fetch_markets()
-        quotable = self.quote(mkts)
-        since = time.time() - 900
+        # ORDER MATTERS. A resting order can only be hit by a print that
+        # happens AFTER it is posted. So: settle the window that just
+        # elapsed against the quotes that were actually resting during
+        # it, and only THEN post new quotes for the next window.
+        now0 = time.time()
+        since = self._last_ts or (now0 - 300)
         trades = self.fetch_trades(since)
-        self.check_fills(trades)
+        self.check_fills(trades, since)
         self.score_flow(trades, mkts)
+        quotable = self.quote(mkts)
+        self.resting = self.quotes
+        self._last_ts = now0
         self.score_adverse(mkts)
         self.settle_check(mkts)
         bk = self.book(mkts)
@@ -848,6 +871,9 @@ class PhantomBook:
             "realized": round(self.realized_c / 100, 2),
             "open_pnl": round(bk["open_c"] / 100, 2),
             "settled_n": self.stats.get("settled", 0),
+            "capital": round(bk["cap_c"] / 100, 2),
+            "on_capital": (round(100.0 * (self.realized_c + bk["open_c"])
+                                 / bk["cap_c"], 1) if bk["cap_c"] else None),
             "settled": self.settled[-12:][::-1],
             "spread_pnl": round(bk["locked_c"] / 100, 2),
             "risk_pnl": round(bk["unreal_c"] / 100, 2),
@@ -855,6 +881,7 @@ class PhantomBook:
                            if bk["pairs"] else None),
             "pos_capped": self.stats.get("pos_capped", 0),
             "stale_skipped": self.stats.get("stale_skipped", 0),
+            "pre_quote": self.stats.get("pre_quote", 0),
             "widened": self.stats.get("widened", 0),
             "tightened": self.stats.get("tightened", 0),
             "clusters": bk["clusters"], "cluster_n": bk["cluster_n"],

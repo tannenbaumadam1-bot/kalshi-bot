@@ -1118,7 +1118,7 @@ async function load(){
     $('phmode').innerHTML='<span class=chip style="background:rgba(139,124,246,.16);color:#a99bff">PAPER &middot; NO MONEY</span>'
       +' <span class=mut style="font-size:11px">era '+(P.era||'phantom1')+' &middot; two-sided quoting on MLB + tennis props &middot; fills only when a REAL print trades through us &middot; being the book for retail</span>';
     $('phtiles').innerHTML=[
-      tile('TOTAL P&L','<span class="'+C(P.total)+'">'+M(P.total||0)+'</span>','banked '+M(P.realized||0)+' from '+(P.settled_n||0)+' settled &middot; open '+M(P.open_pnl||0)+' &middot; paper, exact Kalshi fees'),
+      tile('TOTAL P&L','<span class="'+C(P.total)+'">'+M(P.total||0)+'</span>','banked '+M(P.realized||0)+' from '+(P.settled_n||0)+' settled &middot; open '+M(P.open_pnl||0)+' &middot; on '+M(P.capital||0)+' of collateral'+((P.on_capital!=null)?' = '+P.on_capital.toFixed(1)+'%':'')),
       tile('Match rate',mr,'the KPI &middot; paired CONTRACTS / all contracts &middot; '+(P.contracts||0)+' filled &middot; by fill-event '+((P.match_events!=null)?(P.match_events*100).toFixed(0)+'%':'&ndash;')),
       tile('Phantom fills',(P.fills_strict||0)+' strict &middot; '+(P.fills_loose||0)+' loose','strict = traded THROUGH us &middot; '+(P.fills_per_h||0)+'/hr &middot; '+(P.trades_seen||0)+' prints seen'),
       tile('Spread earned','<span class="'+C(P.spread_pnl)+'">'+M(P.spread_pnl||0)+'</span>','THE thesis &middot; '+(P.pairs||0)+' paired contracts &middot; '+((P.per_pair_c!=null)?P.per_pair_c.toFixed(2)+'&cent;/pair after fees':'no pairs yet')),

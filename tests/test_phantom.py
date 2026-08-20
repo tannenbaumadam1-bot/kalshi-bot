@@ -17,6 +17,15 @@ def _bot(tmp_path, monkeypatch):
     monkeypatch.setattr(ph, "STATE", str(tmp_path / "ph.json"))
     b = ph.PhantomBook()
     b.rec = None
+    # tests post a quote then send it a print: mirror the live order by
+    # treating the quote just posted as the resting one
+    _q = b.quote
+
+    def _quote_and_rest(mkts):
+        n = _q(mkts)
+        b.resting = b.quotes
+        return n
+    b.quote = _quote_and_rest
     return b
 
 
@@ -620,3 +629,25 @@ def test_realized_survives_a_restart(tmp_path, monkeypatch):
     b.save({"era": ph.ERA})
     b2 = _bot(tmp_path, monkeypatch)
     assert b2.realized_c == 777.0 and b2.settled[0]["tk"] == "X"
+
+
+def test_a_print_cannot_hit_a_quote_posted_after_it(tmp_path, monkeypatch):
+    """The look-ahead bug that inflated phantom1: quotes were posted
+    now and filled against 15 minutes of PAST prints."""
+    b = _bot(tmp_path, monkeypatch)
+    b.quote([_mk(yb=45, ya=55)])
+    old = {"trade_id": "old", "ticker": "KXMLBGAME-T1",
+           "yes_price": 57, "count_fp": "10", "taker_side": "yes",
+           "created_time": "2020-01-01T00:00:00Z"}
+    b.check_fills([old])
+    assert not b.inv
+    assert b.stats["pre_quote"] == 1
+
+
+def test_capital_is_reported_next_to_the_pnl(tmp_path, monkeypatch):
+    """A P&L with no denominator is a boast, not a number."""
+    b = _bot(tmp_path, monkeypatch)
+    b.quote([_mk(yb=45, ya=55)])
+    b.check_fills([_tr(px=44, side="no", cnt=10)])
+    bk = b.book([_mk(yb=45, ya=55)])
+    assert bk["cap_c"] == 460          # 10 bought at 46c
