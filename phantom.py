@@ -193,6 +193,11 @@ class PhantomBook:
             state["inv"] = self.inv
             state["fills"] = self.fills[-400:]
             state["hot"] = sorted(self.hot)
+            # 8/20 caught live: inventory persisted across a restart but
+            # the fill COUNTERS did not, so match_rate read 0.0 while 40
+            # contracts sat paired. A KPI that resets on deploy is worse
+            # than no KPI - it lies quietly in the right direction.
+            state["stats"] = self.stats
             state["t0"] = self._t0
             json.dump(state, open(STATE, "w"))
         except Exception:

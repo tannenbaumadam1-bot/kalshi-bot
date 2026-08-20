@@ -285,3 +285,16 @@ def test_flow_bucketed_by_the_spread_it_printed_in(tmp_path, monkeypatch):
     assert b.flow["by_spread"]["8-14"] == 1
     assert b.flow["prints"] == 3 and b.flow["contracts"] == 15
     assert b.flow["in_ours"] == 1          # only WIDE was quotable
+
+
+def test_fill_counters_survive_a_restart(tmp_path, monkeypatch):
+    """Caught live 8/20: inventory persisted but counters didn't, so
+    match_rate read 0.0 with 40 contracts paired."""
+    b = _bot(tmp_path, monkeypatch)
+    b.quote([_mk(yb=45, ya=55)])
+    b.check_fills([_tr(px=44, side="no", cnt=5, tid="b1"),
+                   _tr(px=57, side="yes", cnt=5, tid="a1")])
+    b.save({"era": ph.ERA})
+    b2 = _bot(tmp_path, monkeypatch)
+    assert b2.stats["fills_bid"] == 1 and b2.stats["fills_ask"] == 1
+    assert b2.stats["fills_strict"] == 2
