@@ -738,3 +738,39 @@ def test_short_inventory_posts_the_other_side(tmp_path, monkeypatch):
     b.quote([_mk(yb=45, ya=55)])
     b.check_fills([_tr(px=57, side="yes", cnt=10)])    # sold 10 @ 54c
     assert round(b._capital_c()) == 460                # 10 x (100-54)
+
+
+def test_stale_marks_are_counted_not_hidden(tmp_path, monkeypatch):
+    """8/17's lesson, ported: a $137 'all-time high' that was entirely
+    stale marks. If a price is a memory, say so."""
+    b = _bot(tmp_path, monkeypatch)
+    b.quote([_mk(yb=45, ya=55)])
+    b.check_fills([_tr(px=44, side="no", cnt=10)])
+    bk = b.book([_mk(yb=45, ya=55)])          # fresh mark
+    assert bk["stale_n"] == 0
+    b.inv["KXMLBGAME-T1"]["mark_ts"] = time.time() - ph.MARK_FRESH_S - 1
+    bk = b.book([])                            # market not scanned
+    assert bk["stale_n"] == 1
+    assert bk["stale_c"] != 0
+
+
+def test_daily_pnl_series_records_the_shape(tmp_path, monkeypatch):
+    """One cumulative number tells you where you are, not how you got
+    there. Overnight we need the curve."""
+    import datetime as _dt
+    b = _bot(tmp_path, monkeypatch)
+    b.realized_c = 500.0
+    monkeypatch.setattr(b, "fetch_markets", lambda full=True: ([], 0))
+    monkeypatch.setattr(b, "fetch_trades", lambda s: [])
+    st = b.step()
+    today = _dt.date.today().isoformat()
+    assert st["pnl_days"][today] == 5.0
+    b.save({"era": ph.ERA})
+    b2 = _bot(tmp_path, monkeypatch)
+    assert b2.pnl_days[today] == 5.0           # survives a restart
+
+
+def test_book_starts_at_one_hundred_dollars():
+    """Adam, 8/20: 'reset the paper money to $100 and start flat'."""
+    assert ph.BOOK_CAPITAL_C == 10000
+    assert ph.ERA == "phantom4"

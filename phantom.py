@@ -69,13 +69,15 @@ ROTATE_N = int(os.environ.get("PHANTOM_ROTATE", "30"))
 MAX_SERIES = int(os.environ.get("PHANTOM_MAX_SERIES", "60"))
 _SERIES_RX = re.compile(r"MLB|BASEBALL|ATP|WTA|TENNIS|USOPEN", re.I)
 TRADE_PAGES = int(os.environ.get("PHANTOM_TRADE_PAGES", "4"))
+# phantom4 (Adam: "reset the paper money to $100 and start flat") is the
+# first ledger with every constraint correct from cycle 1.
 # phantom2 discarded phantom1 (LOOK-AHEAD bug: quotes posted now, then
 # filled against prints from the previous 15 minutes). phantom3 discards
 # phantom2, whose inventory was accumulated before the collateral cap
 # existed and under a capital formula that double-counted paired
 # positions the exchange would have netted flat. A ledger built over a
 # broken constraint can't be repaired in place - it has to restart.
-ERA = "phantom3"
+ERA = "phantom4"
 
 # --- quoting policy (all in cents) ---
 # Only quote where the market is wide enough that stepping inside still
@@ -131,12 +133,16 @@ SETTLE_BATCH = int(os.environ.get("PHANTOM_SETTLE_BATCH", "25"))
 # $135 account could never post, so its P&L is not a number we could
 # have earned. The book now stops ADDING at its collateral limit;
 # risk-reducing fills are always allowed.
-BOOK_CAPITAL_C = int(os.environ.get("PHANTOM_CAPITAL", "13500"))
+BOOK_CAPITAL_C = int(os.environ.get("PHANTOM_CAPITAL", "10000"))
 # the fast path must not become a tight-book-only sample: HOT is fed by
 # prints, and 97% of prints are in 1-3c books, so without a slice of
 # rotation the WIDE lane - the one that looked profitable - stops being
 # measured at all.
 ROTATE_FAST = int(os.environ.get("PHANTOM_ROTATE_FAST", "12"))
+# a mark older than this is not a price, it's a memory. The 8/17 live
+# book showed a $137 "all-time high" that was entirely stale marks; the
+# real NAV was $117. Never let that happen silently again.
+MARK_FRESH_S = int(os.environ.get("PHANTOM_MARK_FRESH", "1800"))
 # adverse-selection clocks
 ADV_FAST_S = int(os.environ.get("PHANTOM_ADV_FAST", "300"))     # 5 min
 ADV_SLOW_S = int(os.environ.get("PHANTOM_ADV_SLOW", "1800"))    # 30 min
@@ -265,6 +271,8 @@ class PhantomBook:
         self._last_ts = 0.0
         self.realized_c = 0.0  # settled, banked, never re-marked
         self.settled = []
+        self.pnl_days = {}    # date -> total P&L, so we see the SHAPE
+        self.errs = 0
         self.hot = set()      # series the tape has shown printing
         self.flow = {"prints": 0, "contracts": 0, "in_ours": 0,
                      "by_spread": {}}
@@ -282,6 +290,8 @@ class PhantomBook:
             self.fills = (d.get("fills") or [])[-400:]
             self.hot = set(d.get("hot") or [])
             self.realized_c = d.get("realized_c") or 0.0
+            self.pnl_days = d.get("pnl_days") or {}
+            self.errs = d.get("errs") or 0
             self.settled = (d.get("settled") or [])[-40:]
             self.flow.update(d.get("flow") or {})
             self._t0 = d.get("t0") or self._t0
@@ -295,6 +305,8 @@ class PhantomBook:
             state["fills"] = self.fills[-400:]
             state["hot"] = sorted(self.hot)
             state["realized_c"] = self.realized_c
+            state["pnl_days"] = self.pnl_days
+            state["errs"] = self.errs
             state["settled"] = self.settled[-40:]
             # 8/20 caught live: inventory persisted across a restart but
             # the fill COUNTERS did not, so match_rate read 0.0 while 40
@@ -681,7 +693,8 @@ class PhantomBook:
             if m["yb"] and m["ya"]:
                 mid[m["tk"]] = (m["yb"] + m["ya"]) / 2.0
         pairs = locked_c = unmatched_n = unreal_c = open_c = cap_c = 0
-        fees_c = 0
+        fees_c = stale_n = stale_c = 0
+        nowt = time.time()
         clusters, rows = {}, []
         lanes = {}
         for tk, r in self.inv.items():
@@ -711,9 +724,16 @@ class PhantomBook:
             #   proceeds - cost + value of what we still hold - fees
             # With net == 0 it collapses to the locked spread, so the
             # spread/directional split below always adds back up.
-            mark = m if m is not None else r.get("last_mark")
+            mark = m
             if mark is not None:
                 r["last_mark"] = mark
+                r["mark_ts"] = nowt
+            else:
+                mark = r.get("last_mark")
+                if (nowt - r.get("mark_ts", 0)) > MARK_FRESH_S:
+                    stale_n += 1
+                    stale_c += (r["sc"] - r["bc"]
+                                + net * (mark or 0) - fee)
             m_open = (r["sc"] - r["bc"] + net * (mark or 0) - fee)
             m_locked = (m_locked - 0) if matched else 0.0
             m_unreal = m_open - m_locked
@@ -750,6 +770,7 @@ class PhantomBook:
                 "fees_c": fees_c, "unmatched": unmatched_n,
                 "unreal_c": round(unreal_c, 1),
                 "open_c": round(open_c, 1), "cap_c": round(cap_c, 1),
+                "stale_n": stale_n, "stale_c": round(stale_c, 1),
                 "positions": rows[:14], "lanes": lanes,
                 "clusters": [{"event": event_label(k), "ticker": k,
                               "net": v["net"], "strikes": v["strikes"],
@@ -922,6 +943,8 @@ class PhantomBook:
             "open_pnl": round(bk["open_c"] / 100, 2),
             "settled_n": self.stats.get("settled", 0),
             "capital": round(bk["cap_c"] / 100, 2),
+            "marks_stale": bk["stale_n"],
+            "stale_pnl": round(bk["stale_c"] / 100, 2),
             "on_capital": (round(100.0 * (self.realized_c + bk["open_c"])
                                  / bk["cap_c"], 1) if bk["cap_c"] else None),
             "settled": self.settled[-12:][::-1],
@@ -961,6 +984,13 @@ class PhantomBook:
                  "pnl": _pos.get(tk, {}).get("pnl", 0.0)}
                 for tk, q in list(self.quotes.items())[:10]],
         }
+        _tot = (self.realized_c + bk["open_c"]) / 100.0
+        self.pnl_days[datetime.date.today().isoformat()] = round(_tot, 2)
+        if len(self.pnl_days) > 60:
+            for k in sorted(self.pnl_days)[:-60]:
+                self.pnl_days.pop(k, None)
+        state["pnl_days"] = dict(sorted(self.pnl_days.items())[-10:])
+        state["errs"] = self.errs
         self.last = state
         if self.rec is not None:
             self.rec.write({"ts": state["updated"], "kind": "phantom",
