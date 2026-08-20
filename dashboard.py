@@ -775,6 +775,11 @@ td.num,th.num{text-align:right}
 <th class=num>Our bid</th><th class=num>Our ask</th><th class=num>Our edge</th>
 <th class=num>Pos</th><th class=num>P&amp;L</th></tr></thead>
 <tbody id=phq></tbody></table></div>
+<div style="margin-top:12px"><div class=t style="margin-bottom:6px">Lane ledger &mdash; which width is the business?</div>
+<table><thead><tr><th>Lane</th><th class=num>Quoted</th><th class=num>Paired</th>
+<th class=num>Unpaired</th><th class=num>Match</th><th class=num>Spread P&amp;L</th>
+<th class=num>&cent;/pair</th><th class=num>Adverse 5m</th><th class=num>Directional</th></tr></thead>
+<tbody id=phlane></tbody></table></div>
 <div style="margin-top:12px"><div class=t style="margin-bottom:6px">Positions &amp; P&amp;L (per market)</div>
 <table><thead><tr><th>Game</th><th>Market</th><th class=num>Bought</th><th class=num>Sold</th>
 <th class=num>Net</th><th class=num>Our px</th><th class=num>Mkt mid</th><th class=num>P&amp;L</th></tr></thead>
@@ -1112,7 +1117,7 @@ async function load(){
       tile('Phantom fills',(P.fills_strict||0)+' strict &middot; '+(P.fills_loose||0)+' loose','strict = traded THROUGH us &middot; '+(P.fills_per_h||0)+'/hr &middot; '+(P.trades_seen||0)+' prints seen'),
       tile('Spread earned','<span class="'+C(P.spread_pnl)+'">'+M(P.spread_pnl||0)+'</span>','THE thesis &middot; '+(P.pairs||0)+' paired contracts &middot; '+((P.per_pair_c!=null)?P.per_pair_c.toFixed(2)+'&cent;/pair after fees':'no pairs yet')),
       tile('Directional luck','<span class="'+C(P.risk_pnl)+'">'+M(P.risk_pnl||0)+'</span>','mark on '+(P.unmatched||0)+' UNPAIRED contracts &middot; not a strategy, a coin flip &middot; net '+M(P.net||0)),
-      tile('Fees paid','<span class=neg>'+M(-(P.fees||0))+'</span>','maker rate '+((R.maker_rate||0.0175)*100).toFixed(2)+'% &middot; '+(P.contracts||0)+' contracts filled &middot; '+(P.pos_capped||0)+' fills refused at the inventory cap'),
+      tile('Fees paid','<span class=neg>'+M(-(P.fees||0))+'</span>','maker rate '+((R.maker_rate||0.0175)*100).toFixed(2)+'% &middot; '+(P.contracts||0)+' contracts &middot; refused: '+(P.pos_capped||0)+' at cap, '+(P.stale_skipped||0)+' stale &middot; '+(P.widened||0)+' backed off after a hit'),
       tile('Adverse (5m)',af,'price drift after our fills &middot; negative = we get picked off &middot; n='+((A.fast&&A.fast.n)||0)),
       tile('Surface',(P.quoted||0)+' quoted','of '+(P.quotable||0)+' quotable / '+(P.scanned||0)+' scanned &middot; mlb '+((P.by_sport||{}).mlb||0)+' &middot; tennis '+((P.by_sport||{}).tennis||0)),
       tile('Unmatched mark','<span class="'+C(P.unreal)+'">'+M(P.unreal||0)+'</span>','across '+(P.cluster_n||0)+' clusters &middot; caps '+(R.max_pos||20)+'/mkt, '+(R.max_cluster||40)+'/game &middot; quoting '+(R.min_spread||4)+'-'+(R.max_width||8)+'&cent; wide')
@@ -1126,6 +1131,16 @@ async function load(){
       +'<td class=num>'+(q.net?((q.net>0?'+':'')+q.net):'&ndash;')+'</td>'
       +'<td class=num>'+(q.net?'<span class="'+C(q.pnl)+'">'+M(q.pnl||0)+'</span>':'&ndash;')+'</td></tr>').join('')
       ||'<tr><td colspan=9 class=empty>Scanning MLB and tennis books for quotable spreads&hellip;</td></tr>';
+    $('phlane').innerHTML=Object.keys(P.by_lane||{}).sort().map(k=>{const L=P.by_lane[k];
+      return '<tr><td>'+(k==='wide'?'<span class=chip style="background:rgba(139,124,246,.16);color:#a99bff">WIDE &ge;4&cent;</span>':'<span class=chip style="background:rgba(47,208,140,.13);color:var(--grn)">TIGHT 1-3&cent;</span>')+'</td>'
+      +'<td class=num>'+(L.quoted||0)+'</td><td class=num>'+(L.pairs||0)+'</td>'
+      +'<td class=num>'+(L.unmatched||0)+'</td>'
+      +'<td class=num>'+((L.match!=null)?(L.match*100).toFixed(0)+'%':'&ndash;')+'</td>'
+      +'<td class=num><span class="'+C(L.spread)+'">'+M(L.spread||0)+'</span></td>'
+      +'<td class=num>'+((L.per_pair_c!=null)?L.per_pair_c.toFixed(2)+'&cent;':'&ndash;')+'</td>'
+      +'<td class=num>'+((L.adverse!=null)?'<span class="'+C(L.adverse)+'">'+L.adverse.toFixed(1)+'&cent;</span> <span class=mut style="font-size:10px">n='+(L.adv_n||0)+'</span>':'&ndash;')+'</td>'
+      +'<td class=num><span class="'+C(L.risk)+'">'+M(L.risk||0)+'</span></td></tr>';}).join('')
+      ||'<tr><td colspan=9 class=empty>No lane data yet&hellip;</td></tr>';
     $('phpos').innerHTML=((P.positions)||[]).map(r=>'<tr><td class=mut>'+(r.event||'')+'</td>'
       +'<td>'+(r.title||r.tk)+'</td>'
       +'<td class=num>'+(r.bn||0)+'</td><td class=num>'+(r.sn||0)+'</td>'

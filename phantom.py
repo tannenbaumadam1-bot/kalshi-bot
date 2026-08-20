@@ -95,6 +95,26 @@ MAX_WIDTH_C = int(os.environ.get("PHANTOM_MAX_WIDTH", "8"))
 # measures gambling instead of making.
 MAX_POS = int(os.environ.get("PHANTOM_MAX_POS", "20"))
 MAX_CLUSTER_POS = int(os.environ.get("PHANTOM_MAX_CLUSTER", "40"))
+# 8/20 build 3 (Adam: "why don't we include it in the actual book").
+# 97% of prints happen in 1-3c books we were refusing on principle. So
+# we quote them too - in the SAME book, one inventory - but every quote
+# carries a LANE tag so the ledger can still answer which width pays.
+# wide = step inside a >=4c market; tight = JOIN the touch of a 1-3c
+# market and earn a penny on a hundred times the flow.
+TIGHT_MIN_C = int(os.environ.get("PHANTOM_TIGHT_MIN", "1"))
+# INVENTORY SKEW - the real fix for a 42% match rate. We were quoting
+# symmetrically around the mid no matter what we held, so when retail
+# kept selling us overs we kept buying at the same price forever. A
+# book moves its line: as we get long, shade BOTH sides down so we are
+# likelier to sell and less likely to add. Adam, 8/20: this is what
+# turns "we got lucky on STL" into "we chose that exposure".
+SKEW_MAX_C = int(os.environ.get("PHANTOM_SKEW_MAX", "3"))
+# STALENESS - a fill is information. If the market has jumped away from
+# where we quoted, a real maker has already cancelled; anyone still
+# hitting us knows something. And after being hit, back off briefly.
+STALE_C = int(os.environ.get("PHANTOM_STALE", "8"))
+HIT_COOLDOWN_S = int(os.environ.get("PHANTOM_HIT_COOLDOWN", "120"))
+WIDEN_C = int(os.environ.get("PHANTOM_WIDEN", "2"))
 # adverse-selection clocks
 ADV_FAST_S = int(os.environ.get("PHANTOM_ADV_FAST", "300"))     # 5 min
 ADV_SLOW_S = int(os.environ.get("PHANTOM_ADV_SLOW", "1800"))    # 30 min
@@ -218,6 +238,7 @@ class PhantomBook:
         self.last = {}
         self._seen = set()    # trade ids already scored
         self._series, self._ser_ts, self._rot = [], 0.0, 0
+        self.hit_ts = {}      # tk -> when flow last ran into our quote
         self.hot = set()      # series the tape has shown printing
         self.flow = {"prints": 0, "contracts": 0, "in_ours": 0,
                      "by_spread": {}}
@@ -364,6 +385,7 @@ class PhantomBook:
         book - there is nothing to be the other side OF."""
         self.quotes = {}
         quotable = 0
+        now = time.time()
         for m in sorted(mkts, key=lambda r: -_num(r.get("vol"))):
             yb, ya = m["yb"], m["ya"]
             if not yb or not ya or ya <= yb:
@@ -371,24 +393,41 @@ class PhantomBook:
             if yb < MIN_PX_C or ya > MAX_PX_C:
                 continue
             spread = ya - yb
-            if spread < MIN_SPREAD_C:
+            if spread < TIGHT_MIN_C:
                 continue
+            lane = "wide" if spread >= MIN_SPREAD_C else "tight"
             quotable += 1
             if len(self.quotes) >= MAX_QUOTES:
                 continue
-            bid, ask = yb + EDGE_C, ya - EDGE_C
-            if ask - bid < 2:          # no overround left after stepping in
+            if lane == "wide":
+                bid, ask = yb + EDGE_C, ya - EDGE_C
+                if ask - bid < 2:      # no overround left after stepping in
+                    continue
+                if ask - bid > MAX_WIDTH_C:
+                    # tighten toward the mid until we're a real quote
+                    mid0 = (yb + ya) / 2.0
+                    bid = int(round(mid0 - MAX_WIDTH_C / 2.0))
+                    ask = bid + MAX_WIDTH_C
+                    self.stats["tightened"] = (
+                        self.stats.get("tightened", 0) + 1)
+            else:
+                bid, ask = yb, ya      # JOIN the touch, don't cross it
+            if now - self.hit_ts.get(m["tk"], 0.0) < HIT_COOLDOWN_S:
+                bid -= WIDEN_C
+                ask += WIDEN_C
+                self.stats["widened"] = self.stats.get("widened", 0) + 1
+            sk = self._skew(m["tk"])
+            bid -= sk
+            ask -= sk
+            # never cross, never post a marketable order
+            bid = max(1, min(bid, ya - 1))
+            ask = min(99, max(ask, yb + 1))
+            if ask <= bid:
                 continue
-            if ask - bid > MAX_WIDTH_C:
-                # tighten toward the mid until we're a real quote
-                mid = (yb + ya) / 2.0
-                bid = int(round(mid - MAX_WIDTH_C / 2.0))
-                ask = bid + MAX_WIDTH_C
-                self.stats["tightened"] = self.stats.get("tightened", 0) + 1
             self.quotes[m["tk"]] = {
-                "bid": bid, "ask": ask, "ts": time.time(),
+                "bid": bid, "ask": ask, "ts": now, "lane": lane,
                 "mid": (yb + ya) / 2.0, "left_b": SIZE, "left_a": SIZE,
-                "sport": m["sport"], "event": m["event"],
+                "sport": m["sport"], "event": m["event"], "skew": sk,
                 "title": m["title"], "mspread": spread}
         self.stats["quoted"] += len(self.quotes)
         return quotable
@@ -452,6 +491,13 @@ class PhantomBook:
             if t.get("is_block_trade"):
                 self.flow["blocks"] = self.flow.get("blocks", 0) + 1
                 continue
+            if abs(px - q["mid"]) > STALE_C:
+                # the market has jumped past where we quoted: a real
+                # maker cancelled long ago, and whoever is still lifting
+                # this price knows something we don't
+                self.stats["stale_skipped"] = (
+                    self.stats.get("stale_skipped", 0) + 1)
+                continue
             side = (t.get("taker_side") or "").lower()
             if not self._room(tk, q, side):
                 self.stats["pos_capped"] = self.stats.get(
@@ -476,6 +522,20 @@ class PhantomBook:
         if len(self._seen) > 40000:
             self._seen = set(list(self._seen)[-20000:])
         return n_new
+
+    def _skew(self, tk):
+        """Cents to shift BOTH quotes by, given what we're holding.
+        Long -> shade down (sell easier, buy harder). This is a book
+        moving its line, and it is the structural answer to one-sided
+        inventory."""
+        r = self.inv.get(tk)
+        if not r:
+            return 0
+        net = r["bn"] - r["sn"]
+        if not net:
+            return 0
+        return int(round(SKEW_MAX_C * max(-1.0, min(1.0,
+                                                    net / float(MAX_POS)))))
 
     def _headroom(self, tk, direction):
         """Contracts we may still add in this direction before the cap."""
@@ -502,9 +562,12 @@ class PhantomBook:
         return True
 
     def _book_fill(self, tk, q, side, px, n, strict):
+        self.hit_ts[tk] = time.time()
         rec = self.inv.setdefault(tk, {
             "bn": 0, "bc": 0, "sn": 0, "sc": 0, "sport": q["sport"],
-            "event": q["event"], "title": q["title"]})
+            "event": q["event"], "title": q["title"],
+            "lane": q.get("lane", "wide")})
+        rec["lane"] = q.get("lane", rec.get("lane", "wide"))
         if side == "buy":
             rec["bn"] += n
             rec["bc"] += px * n
@@ -517,6 +580,7 @@ class PhantomBook:
         self.fills.append({"tk": tk, "side": side, "px": px, "n": n,
                            "ts": time.time(), "mid": q["mid"],
                            "strict": bool(strict), "sport": q["sport"],
+                           "lane": q.get("lane", "wide"),
                            "adv_f": None, "adv_s": None})
         if self.rec is not None:
             self.rec.event("phantom_fill", tk=tk, side=side, px=px,
@@ -554,6 +618,7 @@ class PhantomBook:
         pairs = locked_c = unmatched_n = unreal_c = 0
         fees_c = 0
         clusters, rows = {}, []
+        lanes = {}
         for tk, r in self.inv.items():
             bn, sn = r["bn"], r["sn"]
             matched = min(bn, sn)
@@ -575,6 +640,15 @@ class PhantomBook:
                     ref = (r["bc"] / bn) if net > 0 else (r["sc"] / sn)
                     m_unreal = (m - ref) * net
                     unreal_c += m_unreal
+            ln = lanes.setdefault(r.get("lane", "wide"),
+                                  {"pairs": 0, "unmatched": 0,
+                                   "spread_c": 0.0, "risk_c": 0.0,
+                                   "mkts": 0})
+            ln["pairs"] += matched
+            ln["unmatched"] += abs(net)
+            ln["spread_c"] += m_locked
+            ln["risk_c"] += m_unreal
+            ln["mkts"] += 1
             ev = r.get("event") or tk
             c = clusters.setdefault(ev, {"net": 0, "strikes": 0,
                                          "pnl_c": 0.0})
@@ -596,12 +670,46 @@ class PhantomBook:
         return {"pairs": pairs, "locked_c": round(locked_c, 1),
                 "fees_c": fees_c, "unmatched": unmatched_n,
                 "unreal_c": round(unreal_c, 1),
-                "positions": rows[:14],
+                "positions": rows[:14], "lanes": lanes,
                 "clusters": [{"event": event_label(k), "ticker": k,
                               "net": v["net"], "strikes": v["strikes"],
                               "pnl": round(v["pnl_c"] / 100, 2)}
                              for k, v in top],
                 "cluster_n": len(clusters)}
+
+    def _lane_report(self, lanes):
+        """Which WIDTH is the business? Same book, same inventory - the
+        tag is what lets the ledger answer. wide = we stepped inside a
+        4c+ market; tight = we joined the touch of a 1-3c one, where
+        97% of the exchange's prints actually happen."""
+        q = {}
+        for tk, x in self.quotes.items():
+            ln = x.get("lane", "wide")
+            q[ln] = q.get(ln, 0) + 1
+        adv = {}
+        for f in self.fills:
+            if f.get("adv_f") is None:
+                continue
+            a = adv.setdefault(f.get("lane", "wide"), [])
+            a.append(f["adv_f"])
+        out = {}
+        for ln in set(list(lanes) + list(q)):
+            d = lanes.get(ln) or {"pairs": 0, "unmatched": 0,
+                                  "spread_c": 0.0, "risk_c": 0.0,
+                                  "mkts": 0}
+            ct = 2 * d["pairs"] + d["unmatched"]
+            av = adv.get(ln) or []
+            out[ln] = {
+                "quoted": q.get(ln, 0), "mkts": d["mkts"],
+                "pairs": d["pairs"], "unmatched": d["unmatched"],
+                "match": round(2.0 * d["pairs"] / ct, 3) if ct else None,
+                "spread": round(d["spread_c"] / 100, 2),
+                "risk": round(d["risk_c"] / 100, 2),
+                "per_pair_c": (round(d["spread_c"] / d["pairs"], 2)
+                               if d["pairs"] else None),
+                "adverse": round(sum(av) / len(av), 2) if av else None,
+                "adv_n": len(av)}
+        return out
 
     def _adverse_summary(self):
         out = {}
@@ -683,9 +791,12 @@ class PhantomBook:
             "per_pair_c": (round(bk["locked_c"] / bk["pairs"], 2)
                            if bk["pairs"] else None),
             "pos_capped": self.stats.get("pos_capped", 0),
+            "stale_skipped": self.stats.get("stale_skipped", 0),
+            "widened": self.stats.get("widened", 0),
             "tightened": self.stats.get("tightened", 0),
             "clusters": bk["clusters"], "cluster_n": bk["cluster_n"],
             "adverse": self._adverse_summary(),
+            "by_lane": self._lane_report(bk["lanes"]),
             "spreads": self._spread_profile(mkts),
             "trades_seen": self.stats["trades_seen"],
             "cycles": self.stats["cycles"],
@@ -696,6 +807,7 @@ class PhantomBook:
                       "max_quotes": MAX_QUOTES,
                       "max_width": MAX_WIDTH_C,
                       "max_pos": MAX_POS, "max_cluster": MAX_CLUSTER_POS,
+                      "skew_max": SKEW_MAX_C, "stale": STALE_C,
                       "maker_rate": MAKER_RATE},
             "positions": bk["positions"],
             "examples": [

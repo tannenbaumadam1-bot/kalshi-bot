@@ -64,11 +64,15 @@ def test_quotes_inside_a_wide_market(tmp_path, monkeypatch):
     assert q["ask"] > q["bid"]                    # overround survives
 
 
-def test_refuses_tight_markets(tmp_path, monkeypatch):
-    """A 2c market has no overround left after we step inside."""
+def test_tight_markets_join_the_touch(tmp_path, monkeypatch):
+    """8/20 (Adam: 'why don't we include it in the actual book'). We
+    can't step INSIDE a 2c market, but we can join it - same book, one
+    inventory, tagged so the ledger can still split wide from tight."""
     b = _bot(tmp_path, monkeypatch)
-    assert b.quote([_mk(yb=49, ya=51)]) == 0
-    assert not b.quotes
+    assert b.quote([_mk(yb=49, ya=51)]) == 1
+    q = b.quotes["KXMLBGAME-T1"]
+    assert q["lane"] == "tight"
+    assert q["bid"] == 49 and q["ask"] == 51      # joined, not crossed
 
 
 def test_refuses_one_sided_and_extreme_books(tmp_path, monkeypatch):
@@ -287,7 +291,7 @@ def test_flow_bucketed_by_the_spread_it_printed_in(tmp_path, monkeypatch):
     assert b.flow["by_spread"]["1-3"] == 2
     assert b.flow["by_spread"]["8-14"] == 1
     assert b.flow["prints"] == 3 and b.flow["contracts"] == 15
-    assert b.flow["in_ours"] == 1          # only WIDE was quotable
+    assert b.flow["in_ours"] == 3          # both lanes are quoted now
 
 
 def test_fill_counters_survive_a_restart(tmp_path, monkeypatch):
@@ -386,6 +390,7 @@ def test_inventory_cap_stops_the_martingale(tmp_path, monkeypatch):
     40 lots on one side. A maker caps inventory; a gambler doesn't."""
     b = _bot(tmp_path, monkeypatch)
     monkeypatch.setattr(ph, "MAX_POS", 20)
+    monkeypatch.setattr(ph, "SKEW_MAX_C", 0)   # isolate the CAP
     for i in range(8):                       # 8 cycles of one-sided flow
         b.quote([_mk(yb=45, ya=55)])
         b.check_fills([_tr(px=44, side="no", cnt=10, tid=f"c{i}")])
@@ -438,3 +443,101 @@ def test_pnl_splits_spread_from_directional_luck(tmp_path, monkeypatch):
     assert round(st["spread_pnl"] + st["risk_pnl"], 2) == st["net"]
     assert st["risk_pnl"] > st["spread_pnl"]      # luck dominates
     assert st["per_pair_c"] is not None
+
+
+# ---------------- 8/20 build: skew, staleness, lanes ----------------
+
+def test_inventory_skew_moves_the_line(tmp_path, monkeypatch):
+    """The structural fix for one-sided inventory: long -> shade BOTH
+    quotes down, so selling gets easier and adding gets harder. This is
+    a book moving its line."""
+    b = _bot(tmp_path, monkeypatch)
+    monkeypatch.setattr(ph, "HIT_COOLDOWN_S", 0)  # isolate the skew
+    b.quote([_mk(yb=45, ya=55)])
+    flat = dict(b.quotes["KXMLBGAME-T1"])
+    b.check_fills([_tr(px=44, side="no", cnt=10)])   # now long 10
+    b.quote([_mk(yb=45, ya=55)])
+    long_q = b.quotes["KXMLBGAME-T1"]
+    assert long_q["skew"] > 0
+    assert long_q["bid"] < flat["bid"]       # harder to buy more
+    assert long_q["ask"] < flat["ask"]       # easier to sell out
+
+
+def test_skew_reverses_when_we_are_short(tmp_path, monkeypatch):
+    b = _bot(tmp_path, monkeypatch)
+    monkeypatch.setattr(ph, "HIT_COOLDOWN_S", 0)  # isolate the skew
+    b.quote([_mk(yb=45, ya=55)])
+    flat = dict(b.quotes["KXMLBGAME-T1"])
+    b.check_fills([_tr(px=57, side="yes", cnt=10)])  # now short 10
+    b.quote([_mk(yb=45, ya=55)])
+    q = b.quotes["KXMLBGAME-T1"]
+    assert q["skew"] < 0
+    assert q["bid"] > flat["bid"] and q["ask"] > flat["ask"]
+
+
+def test_quotes_never_cross_or_go_marketable(tmp_path, monkeypatch):
+    """Skew and widening must never post an order that trades instantly
+    - that would make us a taker, paying 4x the fee."""
+    b = _bot(tmp_path, monkeypatch)
+    monkeypatch.setattr(ph, "SKEW_MAX_C", 20)
+    b.quote([_mk(yb=49, ya=51)])
+    b.check_fills([_tr(px=48, side="no", cnt=10)])
+    b.quote([_mk(yb=49, ya=51)])
+    q = b.quotes["KXMLBGAME-T1"]
+    assert q["ask"] > q["bid"]
+    assert q["ask"] >= 50 and q["bid"] <= 50     # inside/at their touch
+
+
+def test_stale_quote_is_not_filled(tmp_path, monkeypatch):
+    """If the market has jumped past where we quoted, a real maker has
+    already cancelled - only someone informed is still lifting us."""
+    b = _bot(tmp_path, monkeypatch)
+    b.quote([_mk(yb=45, ya=55)])                  # mid 50, ask 54
+    b.check_fills([_tr(px=50 + ph.STALE_C + 5, side="yes", cnt=10)])
+    assert not b.inv
+    assert b.stats["stale_skipped"] == 1
+
+
+def test_we_back_off_after_being_hit(tmp_path, monkeypatch):
+    """A fill is information. Re-arming at the same price into the same
+    flow is how a maker donates."""
+    b = _bot(tmp_path, monkeypatch)
+    monkeypatch.setattr(ph, "SKEW_MAX_C", 0)      # isolate the widening
+    b.quote([_mk(yb=45, ya=55)])
+    before = dict(b.quotes["KXMLBGAME-T1"])
+    b.check_fills([_tr(px=44, side="no", cnt=10)])
+    b.quote([_mk(yb=45, ya=55)])
+    after = b.quotes["KXMLBGAME-T1"]
+    assert after["ask"] - after["bid"] > before["ask"] - before["bid"]
+    assert b.stats["widened"] == 1
+
+
+def test_lanes_are_tagged_through_to_the_ledger(tmp_path, monkeypatch):
+    """One book, one inventory - but the tape must still be able to say
+    which WIDTH is the business."""
+    b = _bot(tmp_path, monkeypatch)
+    b.quote([_mk(tk="W", yb=45, ya=55), _mk(tk="T", yb=49, ya=51)])
+    assert b.quotes["W"]["lane"] == "wide"
+    assert b.quotes["T"]["lane"] == "tight"
+    b.check_fills([_tr(tk="W", px=57, side="yes", cnt=10, tid="w1"),
+                   _tr(tk="T", px=49, side="no", cnt=10, tid="t1")])
+    assert b.inv["W"]["lane"] == "wide"
+    assert b.inv["T"]["lane"] == "tight"
+    assert {f["lane"] for f in b.fills} == {"wide", "tight"}
+
+
+def test_lane_report_splits_wide_from_tight(tmp_path, monkeypatch):
+    """The decision this build exists to inform: is the business the
+    wide books nobody trades, or the penny books everybody does?"""
+    b = _bot(tmp_path, monkeypatch)
+    mks = [_mk(tk="W", yb=45, ya=55), _mk(tk="T", yb=49, ya=51)]
+    b.quote(mks)
+    b.check_fills([_tr(tk="W", px=57, side="yes", cnt=10, tid="w1"),
+                   _tr(tk="W", px=44, side="no", cnt=10, tid="w2"),
+                   _tr(tk="T", px=49, side="no", cnt=10, tid="t1")])
+    bk = b.book(mks)
+    rep = b._lane_report(bk["lanes"])
+    assert rep["wide"]["pairs"] == 10 and rep["wide"]["match"] == 1.0
+    assert rep["tight"]["pairs"] == 0
+    assert rep["tight"]["unmatched"] == 10
+    assert rep["wide"]["per_pair_c"] is not None
