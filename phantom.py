@@ -118,6 +118,8 @@ STALE_C = int(os.environ.get("PHANTOM_STALE", "8"))
 # could never fire (widened read 0 on the first live pass).
 HIT_COOLDOWN_S = int(os.environ.get("PHANTOM_HIT_COOLDOWN", "300"))
 WIDEN_C = int(os.environ.get("PHANTOM_WIDEN", "2"))
+# settle at most this many finished markets per cycle (one API call each)
+SETTLE_BATCH = int(os.environ.get("PHANTOM_SETTLE_BATCH", "25"))
 # adverse-selection clocks
 ADV_FAST_S = int(os.environ.get("PHANTOM_ADV_FAST", "300"))     # 5 min
 ADV_SLOW_S = int(os.environ.get("PHANTOM_ADV_SLOW", "1800"))    # 30 min
@@ -242,6 +244,8 @@ class PhantomBook:
         self._seen = set()    # trade ids already scored
         self._series, self._ser_ts, self._rot = [], 0.0, 0
         self.hit_ts = {}      # tk -> when flow last ran into our quote
+        self.realized_c = 0.0  # settled, banked, never re-marked
+        self.settled = []
         self.hot = set()      # series the tape has shown printing
         self.flow = {"prints": 0, "contracts": 0, "in_ours": 0,
                      "by_spread": {}}
@@ -258,6 +262,8 @@ class PhantomBook:
             self.stats.update(d.get("stats") or {})
             self.fills = (d.get("fills") or [])[-400:]
             self.hot = set(d.get("hot") or [])
+            self.realized_c = d.get("realized_c") or 0.0
+            self.settled = (d.get("settled") or [])[-40:]
             self.flow.update(d.get("flow") or {})
             self._t0 = d.get("t0") or self._t0
         except Exception:
@@ -269,6 +275,8 @@ class PhantomBook:
             state["inv"] = self.inv
             state["fills"] = self.fills[-400:]
             state["hot"] = sorted(self.hot)
+            state["realized_c"] = self.realized_c
+            state["settled"] = self.settled[-40:]
             # 8/20 caught live: inventory persisted across a restart but
             # the fill COUNTERS did not, so match_rate read 0.0 while 40
             # contracts sat paired. A KPI that resets on deploy is worse
@@ -571,6 +579,7 @@ class PhantomBook:
             "event": q["event"], "title": q["title"],
             "lane": q.get("lane", "wide")})
         rec["lane"] = q.get("lane", rec.get("lane", "wide"))
+        rec["fee"] = rec.get("fee", 0) + fee_c(px, n)
         if side == "buy":
             rec["bn"] += n
             rec["bc"] += px * n
@@ -618,7 +627,7 @@ class PhantomBook:
         for m in mkts:
             if m["yb"] and m["ya"]:
                 mid[m["tk"]] = (m["yb"] + m["ya"]) / 2.0
-        pairs = locked_c = unmatched_n = unreal_c = 0
+        pairs = locked_c = unmatched_n = unreal_c = open_c = 0
         fees_c = 0
         clusters, rows = {}, []
         lanes = {}
@@ -629,20 +638,27 @@ class PhantomBook:
             if matched:
                 abuy = r["bc"] / bn
                 asell = r["sc"] / sn
-                gross = (asell - abuy) * matched
-                f = (fee_c(abuy, matched) + fee_c(asell, matched))
                 pairs += matched
-                m_locked = gross - f
+                m_locked = (asell - abuy) * matched - r.get("fee", 0)
                 locked_c += m_locked
-                fees_c += f
+            fees_c += r.get("fee", 0)
             net = bn - sn
+            fee = r.get("fee", 0)
+            m = mid.get(tk)
             if net:
                 unmatched_n += abs(net)
-                m = mid.get(tk)
-                if m is not None:
-                    ref = (r["bc"] / bn) if net > 0 else (r["sc"] / sn)
-                    m_unreal = (m - ref) * net
-                    unreal_c += m_unreal
+            # ONE formula for a market's P&L, so the total is exact:
+            #   proceeds - cost + value of what we still hold - fees
+            # With net == 0 it collapses to the locked spread, so the
+            # spread/directional split below always adds back up.
+            mark = m if m is not None else r.get("last_mark")
+            if mark is not None:
+                r["last_mark"] = mark
+            m_open = (r["sc"] - r["bc"] + net * (mark or 0) - fee)
+            m_locked = (m_locked - 0) if matched else 0.0
+            m_unreal = m_open - m_locked
+            open_c += m_open
+            unreal_c += m_unreal
             ln = lanes.setdefault(r.get("lane", "wide"),
                                   {"pairs": 0, "unmatched": 0,
                                    "spread_c": 0.0, "risk_c": 0.0,
@@ -673,12 +689,48 @@ class PhantomBook:
         return {"pairs": pairs, "locked_c": round(locked_c, 1),
                 "fees_c": fees_c, "unmatched": unmatched_n,
                 "unreal_c": round(unreal_c, 1),
+                "open_c": round(open_c, 1),
                 "positions": rows[:14], "lanes": lanes,
                 "clusters": [{"event": event_label(k), "ticker": k,
                               "net": v["net"], "strikes": v["strikes"],
                               "pnl": round(v["pnl_c"] / 100, 2)}
                              for k, v in top],
                 "cluster_n": len(clusters)}
+
+    def settle_check(self, mkts):
+        """Realize markets that have finished. Without this a running
+        total is a lie: when a game ends the market leaves the scan,
+        its mark goes missing, and the P&L we earned or lost on it
+        silently evaporates from the tracker."""
+        live = {m["tk"] for m in mkts}
+        gone = [tk for tk in self.inv if tk not in live]
+        done = 0
+        for tk in gone[:SETTLE_BATCH]:
+            try:
+                d = requests.get(f"{KALSHI}/markets/{tk}", timeout=15).json()
+            except Exception:
+                continue
+            mk = d.get("market") or {}
+            res = (mk.get("result") or "").lower()
+            if res not in ("yes", "no"):
+                continue
+            r = self.inv.pop(tk)
+            net = r["bn"] - r["sn"]
+            payout = 100 if res == "yes" else 0
+            pnl = r["sc"] - r["bc"] + net * payout - r.get("fee", 0)
+            self.realized_c += pnl
+            self.stats["settled"] = self.stats.get("settled", 0) + 1
+            self.settled.append({
+                "tk": tk, "event": event_label(r.get("event")),
+                "title": (r.get("title") or tk)[:60],
+                "lane": r.get("lane", "wide"),
+                "bn": r["bn"], "sn": r["sn"], "net": net,
+                "result": res, "pnl": round(pnl / 100, 2),
+                "ts": datetime.datetime.now().isoformat(
+                    timespec="seconds")})
+            self.settled = self.settled[-40:]
+            done += 1
+        return done
 
     def _lane_report(self, lanes):
         """Which WIDTH is the business? Same book, same inventory - the
@@ -746,6 +798,7 @@ class PhantomBook:
         self.check_fills(trades)
         self.score_flow(trades, mkts)
         self.score_adverse(mkts)
+        self.settle_check(mkts)
         bk = self.book(mkts)
         self.stats["cycles"] += 1
         fs, fl = self.stats["fills_strict"], self.stats["fills_loose"]
@@ -789,6 +842,13 @@ class PhantomBook:
             # mark on unpaired inventory, which is a directional bet we
             # did not choose. A headline that mixes them will report a
             # coin flip as a strategy.
+            # THE headline Adam asked for: everything banked at
+            # settlement plus everything currently open, one number.
+            "total": round((self.realized_c + bk["open_c"]) / 100, 2),
+            "realized": round(self.realized_c / 100, 2),
+            "open_pnl": round(bk["open_c"] / 100, 2),
+            "settled_n": self.stats.get("settled", 0),
+            "settled": self.settled[-12:][::-1],
             "spread_pnl": round(bk["locked_c"] / 100, 2),
             "risk_pnl": round(bk["unreal_c"] / 100, 2),
             "per_pair_c": (round(bk["locked_c"] / bk["pairs"], 2)

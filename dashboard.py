@@ -775,6 +775,11 @@ td.num,th.num{text-align:right}
 <th class=num>Our bid</th><th class=num>Our ask</th><th class=num>Our edge</th>
 <th class=num>Pos</th><th class=num>P&amp;L</th></tr></thead>
 <tbody id=phq></tbody></table></div>
+<div style="margin-top:12px"><div class=t style="margin-bottom:6px">Settled &mdash; banked, never re-marked</div>
+<table><thead><tr><th>Closed</th><th>Game</th><th>Market</th><th>Lane</th>
+<th class=num>Bought</th><th class=num>Sold</th><th class=num>Net</th>
+<th>Result</th><th class=num>P&amp;L</th></tr></thead>
+<tbody id=phset></tbody></table></div>
 <div style="margin-top:12px"><div class=t style="margin-bottom:6px">Lane ledger &mdash; which width is the business?</div>
 <table><thead><tr><th>Lane</th><th class=num>Quoted</th><th class=num>Paired</th>
 <th class=num>Unpaired</th><th class=num>Match</th><th class=num>Spread P&amp;L</th>
@@ -1113,6 +1118,7 @@ async function load(){
     $('phmode').innerHTML='<span class=chip style="background:rgba(139,124,246,.16);color:#a99bff">PAPER &middot; NO MONEY</span>'
       +' <span class=mut style="font-size:11px">era '+(P.era||'phantom1')+' &middot; two-sided quoting on MLB + tennis props &middot; fills only when a REAL print trades through us &middot; being the book for retail</span>';
     $('phtiles').innerHTML=[
+      tile('TOTAL P&L','<span class="'+C(P.total)+'">'+M(P.total||0)+'</span>','banked '+M(P.realized||0)+' from '+(P.settled_n||0)+' settled &middot; open '+M(P.open_pnl||0)+' &middot; paper, exact Kalshi fees'),
       tile('Match rate',mr,'the KPI &middot; paired CONTRACTS / all contracts &middot; '+(P.contracts||0)+' filled &middot; by fill-event '+((P.match_events!=null)?(P.match_events*100).toFixed(0)+'%':'&ndash;')),
       tile('Phantom fills',(P.fills_strict||0)+' strict &middot; '+(P.fills_loose||0)+' loose','strict = traded THROUGH us &middot; '+(P.fills_per_h||0)+'/hr &middot; '+(P.trades_seen||0)+' prints seen'),
       tile('Spread earned','<span class="'+C(P.spread_pnl)+'">'+M(P.spread_pnl||0)+'</span>','THE thesis &middot; '+(P.pairs||0)+' paired contracts &middot; '+((P.per_pair_c!=null)?P.per_pair_c.toFixed(2)+'&cent;/pair after fees':'no pairs yet')),
@@ -1131,6 +1137,14 @@ async function load(){
       +'<td class=num>'+(q.net?((q.net>0?'+':'')+q.net):'&ndash;')+'</td>'
       +'<td class=num>'+(q.net?'<span class="'+C(q.pnl)+'">'+M(q.pnl||0)+'</span>':'&ndash;')+'</td></tr>').join('')
       ||'<tr><td colspan=9 class=empty>Scanning MLB and tennis books for quotable spreads&hellip;</td></tr>';
+    $('phset').innerHTML=((P.settled)||[]).map(r=>'<tr><td class=mut>'+String(r.ts||'').slice(5,16).replace('T',' ')+'</td>'
+      +'<td class=mut>'+(r.event||'')+'</td><td>'+(r.title||r.tk)+'</td>'
+      +'<td>'+(r.lane==='tight'?'<span class=chip style="background:rgba(47,208,140,.13);color:var(--grn)">TIGHT</span>':'<span class=chip style="background:rgba(139,124,246,.16);color:#a99bff">WIDE</span>')+'</td>'
+      +'<td class=num>'+(r.bn||0)+'</td><td class=num>'+(r.sn||0)+'</td>'
+      +'<td class=num>'+((r.net>0?'+':'')+r.net)+'</td>'
+      +'<td>'+(String(r.result).toUpperCase()==='YES'?'<span class=pos>YES</span>':'<span class=neg>NO</span>')+'</td>'
+      +'<td class=num><span class="'+C(r.pnl)+'">'+M(r.pnl||0)+'</span></td></tr>').join('')
+      ||'<tr><td colspan=9 class=empty>Nothing settled yet &mdash; positions bank when their game finishes&hellip;</td></tr>';
     $('phlane').innerHTML=Object.keys(P.by_lane||{}).sort().map(k=>{const L=P.by_lane[k];
       return '<tr><td>'+(k==='wide'?'<span class=chip style="background:rgba(139,124,246,.16);color:#a99bff">WIDE &ge;4&cent;</span>':'<span class=chip style="background:rgba(47,208,140,.13);color:var(--grn)">TIGHT 1-3&cent;</span>')+'</td>'
       +'<td class=num>'+(L.quoted||0)+'</td><td class=num>'+(L.pairs||0)+'</td>'

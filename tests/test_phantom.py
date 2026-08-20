@@ -541,3 +541,82 @@ def test_lane_report_splits_wide_from_tight(tmp_path, monkeypatch):
     assert rep["tight"]["pairs"] == 0
     assert rep["tight"]["unmatched"] == 10
     assert rep["wide"]["per_pair_c"] is not None
+
+
+# ---------------- settlement + the running total ----------------
+
+class _Resp:
+    def __init__(self, res):
+        self._res = res
+
+    def json(self):
+        return {"market": {"result": self._res}}
+
+
+def test_settlement_banks_a_finished_market(tmp_path, monkeypatch):
+    """Without this a running total is a lie: when a game ends the
+    market leaves the scan and its P&L silently evaporates."""
+    b = _bot(tmp_path, monkeypatch)
+    b.quote([_mk(yb=45, ya=55)])
+    b.check_fills([_tr(px=44, side="no", cnt=10)])     # long 10 @ 46
+    monkeypatch.setattr(ph.requests, "get", lambda *a, **k: _Resp("yes"))
+    assert b.settle_check([]) == 1                     # market gone
+    assert "KXMLBGAME-T1" not in b.inv
+    # bought 10 at 46c, settles at 100c: +540c minus fees
+    assert 500 < b.realized_c <= 540
+    assert b.settled[-1]["result"] == "yes"
+
+
+def test_settlement_takes_the_loss_too(tmp_path, monkeypatch):
+    b = _bot(tmp_path, monkeypatch)
+    b.quote([_mk(yb=45, ya=55)])
+    b.check_fills([_tr(px=44, side="no", cnt=10)])
+    monkeypatch.setattr(ph.requests, "get", lambda *a, **k: _Resp("no"))
+    b.settle_check([])
+    assert b.realized_c < -400          # paid 460c, got nothing
+
+
+def test_a_paired_market_settles_to_its_spread(tmp_path, monkeypatch):
+    """Fully matched inventory is indifferent to the outcome - that IS
+    the thesis, and settlement must prove it."""
+    b = _bot(tmp_path, monkeypatch)
+    b.quote([_mk(yb=45, ya=55)])                       # 46 / 54
+    b.check_fills([_tr(px=44, side="no", cnt=10, tid="b1"),
+                   _tr(px=57, side="yes", cnt=10, tid="a1")])
+    monkeypatch.setattr(ph.requests, "get", lambda *a, **k: _Resp("yes"))
+    b.settle_check([])
+    yes_pnl = b.realized_c
+    b2 = _bot(tmp_path, monkeypatch)
+    b2.realized_c = 0.0
+    b2.inv = {}
+    b2.quote([_mk(yb=45, ya=55)])
+    b2.check_fills([_tr(px=44, side="no", cnt=10, tid="b2"),
+                    _tr(px=57, side="yes", cnt=10, tid="a2")])
+    monkeypatch.setattr(ph.requests, "get", lambda *a, **k: _Resp("no"))
+    b2.settle_check([])
+    assert round(yes_pnl, 6) == round(b2.realized_c, 6)   # outcome-blind
+    assert yes_pnl > 0                                    # the spread
+
+
+def test_total_is_realized_plus_open(tmp_path, monkeypatch):
+    b = _bot(tmp_path, monkeypatch)
+    b.realized_c = 250.0
+    b.quote([_mk(yb=45, ya=55)])
+    b.check_fills([_tr(px=44, side="no", cnt=10)])
+    monkeypatch.setattr(b, "fetch_markets",
+                        lambda: ([_mk(yb=45, ya=55)], 1))
+    monkeypatch.setattr(b, "fetch_trades", lambda s: [])
+    monkeypatch.setattr(b, "settle_check", lambda m: 0)
+    st = b.step()
+    assert st["realized"] == 2.5
+    assert round(st["realized"] + st["open_pnl"], 2) == st["total"]
+    assert round(st["spread_pnl"] + st["risk_pnl"], 2) == st["open_pnl"]
+
+
+def test_realized_survives_a_restart(tmp_path, monkeypatch):
+    b = _bot(tmp_path, monkeypatch)
+    b.realized_c = 777.0
+    b.settled = [{"tk": "X", "pnl": 7.77}]
+    b.save({"era": ph.ERA})
+    b2 = _bot(tmp_path, monkeypatch)
+    assert b2.realized_c == 777.0 and b2.settled[0]["tk"] == "X"
