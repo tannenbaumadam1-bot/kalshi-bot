@@ -341,3 +341,41 @@ def test_net_reports_the_residual_against_the_spread(tmp_path, monkeypatch):
     st = b.step()
     assert st["net"] == round(st["locked"] + st["unreal"], 2)
     assert st["net"] < 0
+
+
+def test_event_label_reads_like_a_game_not_a_ticker():
+    """Adam 8/20: 'it doesn't show the real event'."""
+    assert ph.event_label(
+        "KXMLBTOTAL-26AUG201410SEAMIL") == "SEA vs MIL - total runs"
+    assert ph.event_label("KXWTAMATCH-26AUG21GAUKOS") == "GAU vs KOS - match"
+    assert ph.event_label(None) == "-"
+    assert ph.event_label("garbage")          # never raises
+
+
+def test_per_market_pnl_is_published(tmp_path, monkeypatch):
+    """Adam 8/20: 'why doesn't it show p/l for each event'."""
+    b = _bot(tmp_path, monkeypatch)
+    b.quote([_mk(tk="KXMLBTOTAL-26AUG201410SEAMIL", yb=45, ya=55,
+                 ev="KXMLBTOTAL-26AUG201410SEAMIL")])
+    b.check_fills([_tr(tk="KXMLBTOTAL-26AUG201410SEAMIL", px=44,
+                       side="no", cnt=10)])
+    bk = b.book([_mk(tk="KXMLBTOTAL-26AUG201410SEAMIL", yb=20, ya=30)])
+    r = bk["positions"][0]
+    assert r["net"] == 10 and r["pnl"] < 0
+    assert r["event"] == "SEA vs MIL - total runs"
+    c = bk["clusters"][0]
+    assert c["strikes"] == 1 and c["pnl"] == r["pnl"]
+
+
+def test_clusters_count_strikes_on_one_game(tmp_path, monkeypatch):
+    """Six run-total strikes on one game is ONE bet in six costumes."""
+    b = _bot(tmp_path, monkeypatch)
+    ev = "KXMLBTOTAL-26AUG201410SEAMIL"
+    mks = [_mk(tk=f"{ev}-{n}", yb=45, ya=55, ev=ev) for n in (7, 8, 9)]
+    b.quote(mks)
+    for m in mks:
+        b.check_fills([_tr(tk=m["tk"], px=44, side="no", cnt=10)])
+    bk = b.book(mks)
+    assert bk["clusters"][0]["strikes"] == 3
+    assert bk["clusters"][0]["net"] == 30
+    assert bk["cluster_n"] == 1

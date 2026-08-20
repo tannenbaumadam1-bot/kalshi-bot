@@ -111,6 +111,43 @@ def sport(ticker, title=""):
     return None
 
 
+_EV_TAIL = re.compile(r"^(\d{2}[A-Z]{3}\d{2})(\d{3,4})?([A-Z]{4,10})$")
+_SER_LABEL = {
+    "KXMLBGAME": "winner", "KXMLBTOTAL": "total runs",
+    "KXMLBF3": "first 3 innings", "KXMLBF5": "first 5 innings",
+    "KXMLBFIRSTINNING": "first inning", "KXMLBSTATCOUNT": "stat count",
+    "KXATPMATCH": "match", "KXWTAMATCH": "match",
+    "KXATPCHALLENGERMATCH": "challenger match",
+    "KXWTACHALLENGERMATCH": "challenger match",
+    "KXATPSETWINNER": "set winner", "KXATPANYSET": "any set",
+    "KXATPTIEBREAK": "tiebreak", "KXATPACES": "aces",
+    "KXWTAACES": "aces",
+}
+
+
+def event_label(ev):
+    """KXMLBTOTAL-26AUG201410SEAMIL -> 'SEA vs MIL - total runs'.
+    Adam, 8/20: 'it doesn't show the real event'. A ticker is not a
+    name; a cluster you can't read is a cluster you won't act on."""
+    if not ev:
+        return "-"
+    parts = str(ev).split("-")
+    ser = parts[0]
+    label = _SER_LABEL.get(ser) or ser.replace("KX", "").lower()
+    if len(parts) < 2:
+        return label
+    m = _EV_TAIL.match(parts[1])
+    if not m:
+        return f"{parts[1]} - {label}"
+    teams = m.group(3)
+    if len(teams) % 2 == 0:
+        h = len(teams) // 2
+        who = f"{teams[:h]} vs {teams[h:]}"
+    else:
+        who = teams
+    return f"{who} - {label}"
+
+
 def _cents(mk, base):
     """Kalshi dual schema: '<base>_dollars' string-floats or '<base>'
     int cents (same lesson as drift_live._kval / culture_scan._cents)."""
@@ -476,17 +513,19 @@ class PhantomBook:
                 mid[m["tk"]] = (m["yb"] + m["ya"]) / 2.0
         pairs = locked_c = unmatched_n = unreal_c = 0
         fees_c = 0
-        clusters = {}
+        clusters, rows = {}, []
         for tk, r in self.inv.items():
             bn, sn = r["bn"], r["sn"]
             matched = min(bn, sn)
+            m_locked = m_unreal = 0.0
             if matched:
                 abuy = r["bc"] / bn
                 asell = r["sc"] / sn
                 gross = (asell - abuy) * matched
                 f = (fee_c(abuy, matched) + fee_c(asell, matched))
                 pairs += matched
-                locked_c += gross - f
+                m_locked = gross - f
+                locked_c += m_locked
                 fees_c += f
             net = bn - sn
             if net:
@@ -494,15 +533,34 @@ class PhantomBook:
                 m = mid.get(tk)
                 if m is not None:
                     ref = (r["bc"] / bn) if net > 0 else (r["sc"] / sn)
-                    unreal_c += (m - ref) * net
-                ev = r.get("event") or tk
-                clusters[ev] = clusters.get(ev, 0) + abs(net)
+                    m_unreal = (m - ref) * net
+                    unreal_c += m_unreal
+            ev = r.get("event") or tk
+            c = clusters.setdefault(ev, {"net": 0, "strikes": 0,
+                                         "pnl_c": 0.0})
+            c["net"] += abs(net)
+            c["strikes"] += 1
+            c["pnl_c"] += m_locked + m_unreal
+            rows.append({
+                "tk": tk, "title": r.get("title") or tk,
+                "sport": r.get("sport"), "event": event_label(ev),
+                "bn": bn, "sn": sn, "net": net,
+                "px": round((r["bc"] / bn) if net > 0 else
+                            ((r["sc"] / sn) if net < 0 else
+                             (r["bc"] / bn if bn else 0)), 1),
+                "mid": round(mid.get(tk), 1) if mid.get(tk) else None,
+                "pnl": round((m_locked + m_unreal) / 100, 2)})
         self.stats["pairs"] = pairs
-        top = sorted(clusters.items(), key=lambda kv: -kv[1])[:6]
+        top = sorted(clusters.items(), key=lambda kv: -kv[1]["net"])[:8]
+        rows.sort(key=lambda r: abs(r["pnl"]), reverse=True)
         return {"pairs": pairs, "locked_c": round(locked_c, 1),
                 "fees_c": fees_c, "unmatched": unmatched_n,
                 "unreal_c": round(unreal_c, 1),
-                "clusters": [{"event": k, "net": v} for k, v in top],
+                "positions": rows[:14],
+                "clusters": [{"event": event_label(k), "ticker": k,
+                              "net": v["net"], "strikes": v["strikes"],
+                              "pnl": round(v["pnl_c"] / 100, 2)}
+                             for k, v in top],
                 "cluster_n": len(clusters)}
 
     def _adverse_summary(self):
@@ -552,6 +610,7 @@ class PhantomBook:
         tot_ct = 2 * bk["pairs"] + bk["unmatched"]
         match_ct = (2.0 * bk["pairs"] / tot_ct) if tot_ct else None
         hrs = max(1e-9, (time.time() - self._t0) / 3600.0)
+        _pos = {r["tk"]: r for r in bk["positions"]}
         by_sport = {}
         for m in mkts:
             by_sport[m["sport"]] = by_sport.get(m["sport"], 0) + 1
@@ -588,11 +647,15 @@ class PhantomBook:
                       "max_quotes": MAX_QUOTES,
                       "max_width": MAX_WIDTH_C,
                       "maker_rate": MAKER_RATE},
+            "positions": bk["positions"],
             "examples": [
                 {"tk": tk, "title": q["title"], "sport": q["sport"],
                  "bid": q["bid"], "ask": q["ask"],
-                 "mspread": q["mspread"]}
-                for tk, q in list(self.quotes.items())[:8]],
+                 "mspread": q["mspread"],
+                 "event": event_label(q.get("event")),
+                 "net": _pos.get(tk, {}).get("net", 0),
+                 "pnl": _pos.get(tk, {}).get("pnl", 0.0)}
+                for tk, q in list(self.quotes.items())[:10]],
         }
         self.last = state
         if self.rec is not None:

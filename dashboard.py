@@ -771,11 +771,16 @@ td.num,th.num{text-align:right}
 <h2 style="margin:0 0 10px">Book 4 &middot; Phantom <span id=phmode style="text-transform:none;letter-spacing:0"></span></h2>
 <div class=grid id=phtiles></div>
 <div style="margin-top:12px"><div class=t style="margin-bottom:6px">Live phantom quotes</div>
-<table><thead><tr><th>Market</th><th>Sport</th><th class=num>Their spread</th>
-<th class=num>Our bid</th><th class=num>Our ask</th><th class=num>Our edge</th></tr></thead>
+<table><thead><tr><th>Game</th><th>Market</th><th>Sport</th><th class=num>Their spread</th>
+<th class=num>Our bid</th><th class=num>Our ask</th><th class=num>Our edge</th>
+<th class=num>Pos</th><th class=num>P&amp;L</th></tr></thead>
 <tbody id=phq></tbody></table></div>
-<div style="margin-top:12px"><div class=t style="margin-bottom:6px">Correlated clusters (unmatched inventory by event)</div>
-<table><thead><tr><th>Event</th><th class=num>Net contracts</th></tr></thead>
+<div style="margin-top:12px"><div class=t style="margin-bottom:6px">Positions &amp; P&amp;L (per market)</div>
+<table><thead><tr><th>Game</th><th>Market</th><th class=num>Bought</th><th class=num>Sold</th>
+<th class=num>Net</th><th class=num>Our px</th><th class=num>Mkt mid</th><th class=num>P&amp;L</th></tr></thead>
+<tbody id=phpos></tbody></table></div>
+<div style="margin-top:12px"><div class=t style="margin-bottom:6px">Correlated clusters &mdash; one game is one bet, however many strikes we quote</div>
+<table><thead><tr><th>Game</th><th class=num>Strikes held</th><th class=num>Net contracts</th><th class=num>P&amp;L</th></tr></thead>
 <tbody id=phcl></tbody></table></div>
 </div>
 <!-- PAPER SECTIONS RETIRED 7/30 (Adam: 'get rid of the other two paper
@@ -1111,15 +1116,28 @@ async function load(){
       tile('Surface',(P.quoted||0)+' quoted','of '+(P.quotable||0)+' quotable / '+(P.scanned||0)+' scanned &middot; mlb '+((P.by_sport||{}).mlb||0)+' &middot; tennis '+((P.by_sport||{}).tennis||0)),
       tile('Unmatched mark','<span class="'+C(P.unreal)+'">'+M(P.unreal||0)+'</span>','directional residual &middot; '+(P.cluster_n||0)+' clusters &middot; quoting '+(R.min_spread||4)+'-'+(R.max_width||8)+'&cent; wide, '+(R.size||10)+' lots &middot; '+(P.tightened||0)+' tightened')
     ].join('');
-    $('phq').innerHTML=((P.examples)||[]).map(q=>'<tr><td>'+(q.title||q.tk)+'</td>'
+    $('phq').innerHTML=((P.examples)||[]).map(q=>'<tr><td class=mut>'+(q.event||'&ndash;')+'</td>'
+      +'<td>'+(q.title||q.tk)+'</td>'
       +'<td><span class=chip style="background:rgba(125,144,173,.15);color:var(--mut)">'+(q.sport||'')+'</span></td>'
       +'<td class=num>'+(q.mspread!=null?q.mspread+'&cent;':'&ndash;')+'</td>'
       +'<td class=num>'+q.bid+'&cent;</td><td class=num>'+q.ask+'&cent;</td>'
-      +'<td class=num>'+(q.ask-q.bid)+'&cent;</td></tr>').join('')
-      ||'<tr><td colspan=6 class=empty>Scanning MLB and tennis books for quotable spreads&hellip;</td></tr>';
+      +'<td class=num>'+(q.ask-q.bid)+'&cent;</td>'
+      +'<td class=num>'+(q.net?((q.net>0?'+':'')+q.net):'&ndash;')+'</td>'
+      +'<td class=num>'+(q.net?'<span class="'+C(q.pnl)+'">'+M(q.pnl||0)+'</span>':'&ndash;')+'</td></tr>').join('')
+      ||'<tr><td colspan=9 class=empty>Scanning MLB and tennis books for quotable spreads&hellip;</td></tr>';
+    $('phpos').innerHTML=((P.positions)||[]).map(r=>'<tr><td class=mut>'+(r.event||'')+'</td>'
+      +'<td>'+(r.title||r.tk)+'</td>'
+      +'<td class=num>'+(r.bn||0)+'</td><td class=num>'+(r.sn||0)+'</td>'
+      +'<td class=num>'+((r.net>0?'+':'')+r.net)+'</td>'
+      +'<td class=num>'+(r.px!=null?r.px+'&cent;':'&ndash;')+'</td>'
+      +'<td class=num>'+(r.mid!=null?r.mid+'&cent;':'&ndash;')+'</td>'
+      +'<td class=num><span class="'+C(r.pnl)+'">'+M(r.pnl||0)+'</span></td></tr>').join('')
+      ||'<tr><td colspan=8 class=empty>No phantom inventory yet &mdash; waiting for a print to trade through a quote&hellip;</td></tr>';
     $('phcl').innerHTML=((P.clusters)||[]).map(c=>'<tr><td>'+c.event+'</td>'
-      +'<td class=num>'+c.net+'</td></tr>').join('')
-      ||'<tr><td colspan=2 class=empty>No unmatched inventory &mdash; a perfectly balanced book&hellip;</td></tr>';
+      +'<td class=num>'+(c.strikes||1)+'</td>'
+      +'<td class=num>'+c.net+'</td>'
+      +'<td class=num><span class="'+C(c.pnl)+'">'+M(c.pnl||0)+'</span></td></tr>').join('')
+      ||'<tr><td colspan=4 class=empty>No unmatched inventory &mdash; a perfectly balanced book&hellip;</td></tr>';
   }
   {const strip=[];
    const fmtL=(tag,LV)=>{const L=LV.summary;const w=(L.k_wins!=null?L.k_wins:L.wins),l=(L.k_wins!=null?L.k_losses:L.losses);return tag+' '+(L.mode||'LIVE')+' '+M(L.net||0)+' ('+(w||0)+'W/'+(l||0)+'L)'
