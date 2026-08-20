@@ -653,15 +653,17 @@ def test_capital_is_reported_next_to_the_pnl(tmp_path, monkeypatch):
     assert bk["cap_c"] == 460          # 10 bought at 46c
 
 
-def test_fast_scan_skips_the_rotation(tmp_path, monkeypatch):
-    """8/20: the fast path re-prices only the series carrying flow, so
-    quotes refresh every cycle instead of every third."""
+def test_fast_scan_is_a_smaller_universe(tmp_path, monkeypatch):
+    """8/20: the fast path prices CORE+HOT plus a thin rotation slice,
+    so quotes refresh every cycle instead of every third - while the
+    wide lane keeps getting sampled."""
     b = _bot(tmp_path, monkeypatch)
     b._series = [f"KXMLBEXTRA{i}" for i in range(50)]
     b._ser_ts = time.time()
     b.hot = {"KXMLBHOT"}
     fast, full = b.targets(full=False), b.targets(full=True)
-    assert set(fast) == set(ph.CORE_SERIES) | {"KXMLBHOT"}
+    assert set(ph.CORE_SERIES) | {"KXMLBHOT"} <= set(fast)
+    assert len(fast) <= len(ph.CORE_SERIES) + 1 + ph.ROTATE_FAST
     assert len(full) > len(fast)
 
 
@@ -678,3 +680,39 @@ def test_fast_scan_never_settles(tmp_path, monkeypatch):
     assert not calls
     b.step(full=True)
     assert len(calls) == 1
+
+
+def test_book_stops_adding_at_its_collateral_limit(tmp_path, monkeypatch):
+    """A paper book carrying $507 of collateral is not simulating the
+    $135 account we actually have."""
+    b = _bot(tmp_path, monkeypatch)
+    monkeypatch.setattr(ph, "BOOK_CAPITAL_C", 500)     # $5 book
+    monkeypatch.setattr(ph, "SKEW_MAX_C", 0)
+    for i in range(6):
+        b.quote([_mk(tk=f"M{i}", yb=45, ya=55)])
+        b.check_fills([_tr(tk=f"M{i}", px=44, side="no", cnt=10,
+                           tid=f"f{i}")])
+    assert b._capital_c() <= 500 + 46 * 10        # cap plus one in flight
+    assert b.stats.get("cap_full", 0) > 0
+
+
+def test_capital_limit_never_blocks_getting_flat(tmp_path, monkeypatch):
+    b = _bot(tmp_path, monkeypatch)
+    monkeypatch.setattr(ph, "BOOK_CAPITAL_C", 1)       # instantly full
+    b.inv["KXMLBGAME-T1"] = {"bn": 10, "bc": 460, "sn": 0, "sc": 0,
+                             "fee": 4, "event": "E1", "title": "t",
+                             "lane": "wide", "sport": "mlb"}
+    b.quote([_mk(yb=45, ya=55)])
+    b.check_fills([_tr(px=57, side="yes", cnt=10)])    # sells = reducing
+    assert b.inv["KXMLBGAME-T1"]["sn"] == 10
+
+
+def test_fast_path_still_samples_the_wide_lane(tmp_path, monkeypatch):
+    """HOT is fed by prints and 97% of prints are tight books, so the
+    fast path would otherwise stop measuring the wide lane entirely."""
+    b = _bot(tmp_path, monkeypatch)
+    b._series = [f"KXMLBEXTRA{i}" for i in range(60)]
+    b._ser_ts = time.time()
+    fast = b.targets(full=False)
+    assert len([x for x in fast if x.startswith("KXMLBEXTRA")]) >= 1
+    assert len(fast) < len(b.targets(full=True))

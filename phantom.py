@@ -124,6 +124,17 @@ HIT_COOLDOWN_S = int(os.environ.get("PHANTOM_HIT_COOLDOWN", "300"))
 WIDEN_C = int(os.environ.get("PHANTOM_WIDEN", "2"))
 # settle at most this many finished markets per cycle (one API call each)
 SETTLE_BATCH = int(os.environ.get("PHANTOM_SETTLE_BATCH", "25"))
+# BOOK CAPITAL. Faster quoting accumulates inventory faster, and within
+# minutes the book was carrying $507 of collateral - a position the real
+# $135 account could never post, so its P&L is not a number we could
+# have earned. The book now stops ADDING at its collateral limit;
+# risk-reducing fills are always allowed.
+BOOK_CAPITAL_C = int(os.environ.get("PHANTOM_CAPITAL", "13500"))
+# the fast path must not become a tight-book-only sample: HOT is fed by
+# prints, and 97% of prints are in 1-3c books, so without a slice of
+# rotation the WIDE lane - the one that looked profitable - stops being
+# measured at all.
+ROTATE_FAST = int(os.environ.get("PHANTOM_ROTATE_FAST", "12"))
 # adverse-selection clocks
 ADV_FAST_S = int(os.environ.get("PHANTOM_ADV_FAST", "300"))     # 5 min
 ADV_SLOW_S = int(os.environ.get("PHANTOM_ADV_SLOW", "1800"))    # 30 min
@@ -329,17 +340,19 @@ class PhantomBook:
         carry flow - every 60s, and the full rotation runs occasionally
         to discover new ones. Shorter resting window = fills we can
         believe."""
-        ser = self.fetch_series() if full else []
+        ser = self.fetch_series()
         picked = list(CORE_SERIES)
         for s in sorted(self.hot):
             if s not in picked:
                 picked.append(s)
-        rest = [s for s in ser if s not in picked] if full else []
+        rest = [s for s in ser if s not in picked]
+        n = ROTATE_N if full else ROTATE_FAST
         if rest:
             i = self._rot % len(rest)
-            picked.extend((rest + rest)[i:i + ROTATE_N])
-            self._rot = (self._rot + ROTATE_N) % max(1, len(rest))
-        return picked[:MAX_SERIES]
+            picked.extend((rest + rest)[i:i + n])
+            self._rot = (self._rot + n) % max(1, len(rest))
+        return picked[:(MAX_SERIES if full else len(CORE_SERIES)
+                        + len(self.hot) + n)]
 
     def fetch_markets(self, full=True):
         """Open MLB + tennis markets with their books, fetched SERIES BY
@@ -575,12 +588,22 @@ class PhantomBook:
             return SIZE
         return max(0, MAX_POS - abs(net))
 
+    def _capital_c(self):
+        """Collateral this book would have posted: cash for the buys,
+        full collateral for the sells."""
+        return sum(r["bc"] + (r["sn"] * 100 - r["sc"])
+                   for r in self.inv.values())
+
     def _room(self, tk, q, taker_side):
         """Would this fill push us past the inventory cap? A taker
         buying yes makes us SHORT; a taker selling makes us LONG."""
         r = self.inv.get(tk)
         net = (r["bn"] - r["sn"]) if r else 0
         adding = -1 if taker_side == "yes" else 1
+        reducing = (net * adding) < 0
+        if not reducing and self._capital_c() >= BOOK_CAPITAL_C:
+            self.stats["cap_full"] = self.stats.get("cap_full", 0) + 1
+            return False
         if abs(net + adding) > MAX_POS and (net * adding) >= 0:
             return False
         ev = q.get("event")
@@ -894,6 +917,8 @@ class PhantomBook:
             "per_pair_c": (round(bk["locked_c"] / bk["pairs"], 2)
                            if bk["pairs"] else None),
             "pos_capped": self.stats.get("pos_capped", 0),
+            "cap_full": self.stats.get("cap_full", 0),
+            "capital_max": round(BOOK_CAPITAL_C / 100, 2),
             "stale_skipped": self.stats.get("stale_skipped", 0),
             "pre_quote": self.stats.get("pre_quote", 0),
             "widened": self.stats.get("widened", 0),
