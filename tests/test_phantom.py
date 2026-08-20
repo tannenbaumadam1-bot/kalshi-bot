@@ -716,3 +716,25 @@ def test_fast_path_still_samples_the_wide_lane(tmp_path, monkeypatch):
     fast = b.targets(full=False)
     assert len([x for x in fast if x.startswith("KXMLBEXTRA")]) >= 1
     assert len(fast) < len(b.targets(full=True))
+
+
+def test_capital_counts_only_the_net_position(tmp_path, monkeypatch):
+    """Buy 10 then sell 10 in one market and the exchange gives the
+    money back. The first formula summed gross both ways and read $676
+    on a book that was mostly flat."""
+    b = _bot(tmp_path, monkeypatch)
+    b.quote([_mk(yb=45, ya=55)])
+    b.check_fills([_tr(px=44, side="no", cnt=10, tid="b1")])
+    assert round(b._capital_c()) == 460               # long 10 @ 46c
+    b.quote([_mk(yb=45, ya=55)])
+    b.check_fills([_tr(px=57, side="yes", cnt=10, tid="a1")])
+    assert b._capital_c() == 0                        # flat: nothing held
+    bk = b.book([_mk(yb=45, ya=55)])
+    assert bk["cap_c"] == 0
+
+
+def test_short_inventory_posts_the_other_side(tmp_path, monkeypatch):
+    b = _bot(tmp_path, monkeypatch)
+    b.quote([_mk(yb=45, ya=55)])
+    b.check_fills([_tr(px=57, side="yes", cnt=10)])    # sold 10 @ 54c
+    assert round(b._capital_c()) == 460                # 10 x (100-54)

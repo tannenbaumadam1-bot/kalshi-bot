@@ -69,11 +69,13 @@ ROTATE_N = int(os.environ.get("PHANTOM_ROTATE", "30"))
 MAX_SERIES = int(os.environ.get("PHANTOM_MAX_SERIES", "60"))
 _SERIES_RX = re.compile(r"MLB|BASEBALL|ATP|WTA|TENNIS|USOPEN", re.I)
 TRADE_PAGES = int(os.environ.get("PHANTOM_TRADE_PAGES", "4"))
-# phantom2: the phantom1 ledger was generated with a LOOK-AHEAD bug
-# (quotes posted now, filled against prints from the previous 15
-# minutes) and is discarded rather than carried. A number built on a
-# time-travelling fill is not a small error, it's a different book.
-ERA = "phantom2"
+# phantom2 discarded phantom1 (LOOK-AHEAD bug: quotes posted now, then
+# filled against prints from the previous 15 minutes). phantom3 discards
+# phantom2, whose inventory was accumulated before the collateral cap
+# existed and under a capital formula that double-counted paired
+# positions the exchange would have netted flat. A ledger built over a
+# broken constraint can't be repaired in place - it has to restart.
+ERA = "phantom3"
 
 # --- quoting policy (all in cents) ---
 # Only quote where the market is wide enough that stepping inside still
@@ -589,10 +591,19 @@ class PhantomBook:
         return max(0, MAX_POS - abs(net))
 
     def _capital_c(self):
-        """Collateral this book would have posted: cash for the buys,
-        full collateral for the sells."""
-        return sum(r["bc"] + (r["sn"] * 100 - r["sc"])
-                   for r in self.inv.values())
+        """Collateral this book would ACTUALLY have tied up. Buying 10
+        then selling 10 in one market leaves us flat and the exchange
+        gives the money back, so only the NET position holds capital.
+        The first version summed gross buys and gross sells and read
+        $676 on a book that was mostly paired off."""
+        tot = 0.0
+        for r in self.inv.values():
+            net = r["bn"] - r["sn"]
+            if net > 0:
+                tot += net * (r["bc"] / r["bn"])
+            elif net < 0:
+                tot += -net * (100 - r["sc"] / r["sn"])
+        return tot
 
     def _room(self, tk, q, taker_side):
         """Would this fill push us past the inventory cap? A taker
@@ -684,13 +695,15 @@ class PhantomBook:
                 m_locked = (asell - abuy) * matched - r.get("fee", 0)
                 locked_c += m_locked
             fees_c += r.get("fee", 0)
-            # what Kalshi would actually have LOCKED UP for this
-            # position: cash for the buys, full collateral for the
-            # sells. The denominator nobody asks for until the P&L
-            # looks good.
-            cap_c += r["bc"] + (sn * 100 - r["sc"])
             net = bn - sn
             fee = r.get("fee", 0)
+            # what Kalshi would actually have LOCKED UP: only the NET
+            # position holds collateral. The denominator nobody asks
+            # for until the P&L looks good.
+            if net > 0:
+                cap_c += net * (r["bc"] / bn)
+            elif net < 0:
+                cap_c += -net * (100 - r["sc"] / sn)
             m = mid.get(tk)
             if net:
                 unmatched_n += abs(net)
