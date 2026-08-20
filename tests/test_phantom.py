@@ -379,3 +379,62 @@ def test_clusters_count_strikes_on_one_game(tmp_path, monkeypatch):
     assert bk["clusters"][0]["strikes"] == 3
     assert bk["clusters"][0]["net"] == 30
     assert bk["cluster_n"] == 1
+
+
+def test_inventory_cap_stops_the_martingale(tmp_path, monkeypatch):
+    """8/20 audit #2: quotes re-post every cycle, so one market piled up
+    40 lots on one side. A maker caps inventory; a gambler doesn't."""
+    b = _bot(tmp_path, monkeypatch)
+    monkeypatch.setattr(ph, "MAX_POS", 20)
+    for i in range(8):                       # 8 cycles of one-sided flow
+        b.quote([_mk(yb=45, ya=55)])
+        b.check_fills([_tr(px=44, side="no", cnt=10, tid=f"c{i}")])
+    r = b.inv["KXMLBGAME-T1"]
+    assert r["bn"] - r["sn"] <= 20
+    assert b.stats.get("pos_capped", 0) > 0
+
+
+def test_cap_never_blocks_a_fill_that_reduces_risk(tmp_path, monkeypatch):
+    """At the cap we must still be able to trade OUT - refusing the
+    other side would freeze us long exactly when we want to pair off."""
+    b = _bot(tmp_path, monkeypatch)
+    monkeypatch.setattr(ph, "MAX_POS", 20)
+    for i in range(4):
+        b.quote([_mk(yb=45, ya=55)])
+        b.check_fills([_tr(px=44, side="no", cnt=10, tid=f"b{i}")])
+    n0 = b.inv["KXMLBGAME-T1"]["bn"] - b.inv["KXMLBGAME-T1"]["sn"]
+    b.quote([_mk(yb=45, ya=55)])
+    b.check_fills([_tr(px=57, side="yes", cnt=10, tid="sell")])
+    assert b.inv["KXMLBGAME-T1"]["sn"] == 10          # the pairing filled
+    assert (b.inv["KXMLBGAME-T1"]["bn"]
+            - b.inv["KXMLBGAME-T1"]["sn"]) < n0
+
+
+def test_cluster_cap_limits_one_game(tmp_path, monkeypatch):
+    """Six strikes on one game is one bet - cap the GAME, not the row."""
+    b = _bot(tmp_path, monkeypatch)
+    monkeypatch.setattr(ph, "MAX_CLUSTER_POS", 30)
+    ev = "KXMLBTOTAL-26AUG201410SEAMIL"
+    mks = [_mk(tk=f"{ev}-{n}", yb=45, ya=55, ev=ev) for n in range(6)]
+    for i in range(3):
+        b.quote(mks)
+        for m in mks:
+            b.check_fills([_tr(tk=m["tk"], px=44, side="no", cnt=10,
+                               tid=f"{m['tk']}-{i}")])
+    total = sum(abs(v["bn"] - v["sn"]) for v in b.inv.values())
+    assert total <= 30 + ph.SIZE          # cap plus the fill in flight
+
+
+def test_pnl_splits_spread_from_directional_luck(tmp_path, monkeypatch):
+    """A headline that mixes them reports a coin flip as a strategy."""
+    b = _bot(tmp_path, monkeypatch)
+    b.quote([_mk(yb=45, ya=55)])
+    b.check_fills([_tr(px=44, side="no", cnt=10, tid="b1"),
+                   _tr(px=57, side="yes", cnt=5, tid="a1")])
+    monkeypatch.setattr(b, "fetch_markets",
+                        lambda: ([_mk(yb=95, ya=99)], 1))
+    monkeypatch.setattr(b, "fetch_trades", lambda s: [])
+    st = b.step()
+    assert round(st["spread_pnl"] + st["risk_pnl"], 2) == st["net"]
+    assert st["risk_pnl"] > st["spread_pnl"]      # luck dominates
+    assert st["per_pair_c"] is not None

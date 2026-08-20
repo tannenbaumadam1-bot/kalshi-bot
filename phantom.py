@@ -87,6 +87,14 @@ MAX_QUOTES = int(os.environ.get("PHANTOM_MAX_QUOTES", "400"))
 # COMPETITIVELY or not at all, so cap our own width and let the extra
 # room sit on the market's side of the spread.
 MAX_WIDTH_C = int(os.environ.get("PHANTOM_MAX_WIDTH", "8"))
+# 8/20 audit #2: quotes are re-posted every cycle with fresh size and
+# nothing capped the RESULT, so one market accumulated 40 lots on one
+# side over 13 cycles - a martingale, not a market. Real makers cap
+# inventory per market AND per correlated cluster, then skew price
+# rather than keep taking the same side. Without these caps the book
+# measures gambling instead of making.
+MAX_POS = int(os.environ.get("PHANTOM_MAX_POS", "20"))
+MAX_CLUSTER_POS = int(os.environ.get("PHANTOM_MAX_CLUSTER", "40"))
 # adverse-selection clocks
 ADV_FAST_S = int(os.environ.get("PHANTOM_ADV_FAST", "300"))     # 5 min
 ADV_SLOW_S = int(os.environ.get("PHANTOM_ADV_SLOW", "1800"))    # 30 min
@@ -445,21 +453,53 @@ class PhantomBook:
                 self.flow["blocks"] = self.flow.get("blocks", 0) + 1
                 continue
             side = (t.get("taker_side") or "").lower()
+            if not self._room(tk, q, side):
+                self.stats["pos_capped"] = self.stats.get(
+                    "pos_capped", 0) + 1
+                continue
             if side == "yes" and px >= q["ask"] and q["left_a"] > 0:
-                n = min(cnt, q["left_a"])
+                n = min(cnt, q["left_a"], self._headroom(tk, -1))
                 q["left_a"] -= n
+                if n <= 0:
+                    continue
                 self._book_fill(tk, q, "sell", q["ask"], n,
                                 strict=(px > q["ask"]))
                 n_new += 1
             elif side == "no" and px <= q["bid"] and q["left_b"] > 0:
-                n = min(cnt, q["left_b"])
+                n = min(cnt, q["left_b"], self._headroom(tk, 1))
                 q["left_b"] -= n
+                if n <= 0:
+                    continue
                 self._book_fill(tk, q, "buy", q["bid"], n,
                                 strict=(px < q["bid"]))
                 n_new += 1
         if len(self._seen) > 40000:
             self._seen = set(list(self._seen)[-20000:])
         return n_new
+
+    def _headroom(self, tk, direction):
+        """Contracts we may still add in this direction before the cap."""
+        r = self.inv.get(tk)
+        net = (r["bn"] - r["sn"]) if r else 0
+        if net * direction < 0:        # reducing: always allowed
+            return SIZE
+        return max(0, MAX_POS - abs(net))
+
+    def _room(self, tk, q, taker_side):
+        """Would this fill push us past the inventory cap? A taker
+        buying yes makes us SHORT; a taker selling makes us LONG."""
+        r = self.inv.get(tk)
+        net = (r["bn"] - r["sn"]) if r else 0
+        adding = -1 if taker_side == "yes" else 1
+        if abs(net + adding) > MAX_POS and (net * adding) >= 0:
+            return False
+        ev = q.get("event")
+        if ev:
+            cl = sum(abs(v["bn"] - v["sn"]) for v in self.inv.values()
+                     if v.get("event") == ev)
+            if cl >= MAX_CLUSTER_POS and (net * adding) >= 0:
+                return False
+        return True
 
     def _book_fill(self, tk, q, side, px, n, strict):
         rec = self.inv.setdefault(tk, {
@@ -634,6 +674,15 @@ class PhantomBook:
             "unmatched": bk["unmatched"],
             "unreal": round(bk["unreal_c"] / 100, 2),
             "net": round((bk["locked_c"] + bk["unreal_c"]) / 100, 2),
+            # THE distinction: spread earned by BEING THE BOOK vs the
+            # mark on unpaired inventory, which is a directional bet we
+            # did not choose. A headline that mixes them will report a
+            # coin flip as a strategy.
+            "spread_pnl": round(bk["locked_c"] / 100, 2),
+            "risk_pnl": round(bk["unreal_c"] / 100, 2),
+            "per_pair_c": (round(bk["locked_c"] / bk["pairs"], 2)
+                           if bk["pairs"] else None),
+            "pos_capped": self.stats.get("pos_capped", 0),
             "tightened": self.stats.get("tightened", 0),
             "clusters": bk["clusters"], "cluster_n": bk["cluster_n"],
             "adverse": self._adverse_summary(),
@@ -646,6 +695,7 @@ class PhantomBook:
                       "size": SIZE, "band": [MIN_PX_C, MAX_PX_C],
                       "max_quotes": MAX_QUOTES,
                       "max_width": MAX_WIDTH_C,
+                      "max_pos": MAX_POS, "max_cluster": MAX_CLUSTER_POS,
                       "maker_rate": MAKER_RATE},
             "positions": bk["positions"],
             "examples": [

@@ -1110,11 +1110,12 @@ async function load(){
     $('phtiles').innerHTML=[
       tile('Match rate',mr,'the KPI &middot; paired CONTRACTS / all contracts &middot; '+(P.contracts||0)+' filled &middot; by fill-event '+((P.match_events!=null)?(P.match_events*100).toFixed(0)+'%':'&ndash;')),
       tile('Phantom fills',(P.fills_strict||0)+' strict &middot; '+(P.fills_loose||0)+' loose','strict = traded THROUGH us &middot; '+(P.fills_per_h||0)+'/hr &middot; '+(P.trades_seen||0)+' prints seen'),
-      tile('Net','<span class="'+C(P.net)+'">'+M(P.net||0)+'</span>','locked spread '+M(P.locked||0)+' + residual mark '+M(P.unreal||0)+' &middot; THE number'),
-      tile('Locked spread','<span class="'+C(P.locked)+'">'+M(P.locked||0)+'</span>','matched pairs '+(P.pairs||0)+' &middot; maker fees '+M(-(P.fees||0))+' &middot; unmatched '+(P.unmatched||0)),
+      tile('Spread earned','<span class="'+C(P.spread_pnl)+'">'+M(P.spread_pnl||0)+'</span>','THE thesis &middot; '+(P.pairs||0)+' paired contracts &middot; '+((P.per_pair_c!=null)?P.per_pair_c.toFixed(2)+'&cent;/pair after fees':'no pairs yet')),
+      tile('Directional luck','<span class="'+C(P.risk_pnl)+'">'+M(P.risk_pnl||0)+'</span>','mark on '+(P.unmatched||0)+' UNPAIRED contracts &middot; not a strategy, a coin flip &middot; net '+M(P.net||0)),
+      tile('Fees paid','<span class=neg>'+M(-(P.fees||0))+'</span>','maker rate '+((R.maker_rate||0.0175)*100).toFixed(2)+'% &middot; '+(P.contracts||0)+' contracts filled &middot; '+(P.pos_capped||0)+' fills refused at the inventory cap'),
       tile('Adverse (5m)',af,'price drift after our fills &middot; negative = we get picked off &middot; n='+((A.fast&&A.fast.n)||0)),
       tile('Surface',(P.quoted||0)+' quoted','of '+(P.quotable||0)+' quotable / '+(P.scanned||0)+' scanned &middot; mlb '+((P.by_sport||{}).mlb||0)+' &middot; tennis '+((P.by_sport||{}).tennis||0)),
-      tile('Unmatched mark','<span class="'+C(P.unreal)+'">'+M(P.unreal||0)+'</span>','directional residual &middot; '+(P.cluster_n||0)+' clusters &middot; quoting '+(R.min_spread||4)+'-'+(R.max_width||8)+'&cent; wide, '+(R.size||10)+' lots &middot; '+(P.tightened||0)+' tightened')
+      tile('Unmatched mark','<span class="'+C(P.unreal)+'">'+M(P.unreal||0)+'</span>','across '+(P.cluster_n||0)+' clusters &middot; caps '+(R.max_pos||20)+'/mkt, '+(R.max_cluster||40)+'/game &middot; quoting '+(R.min_spread||4)+'-'+(R.max_width||8)+'&cent; wide')
     ].join('');
     $('phq').innerHTML=((P.examples)||[]).map(q=>'<tr><td class=mut>'+(q.event||'&ndash;')+'</td>'
       +'<td>'+(q.title||q.tk)+'</td>'
