@@ -672,3 +672,11 @@ def test_ovn_low_off_mode_restores_unrestricted(tmp_path, monkeypatch):
     tks = set(b.bets) | {o["ticker"] for o in b.pending.values()}
     assert "KXLOWTDEN-O1" in tks
     assert b.exec_stats.get("ovn_lo_blocked", 0) == 0
+
+
+def test_silent_mechanisms_publish_zeros(tmp_path, monkeypatch):
+    """The CUT lesson, applied to every quiet safety mechanism: a
+    counter that is absent reads the same as code that never runs."""
+    b = _bot(tmp_path, monkeypatch)
+    for k in ("cuts", "mslate_capped", "dip_capped", "ovn_lo_blocked"):
+        assert b.exec_stats.get(k) == 0, k

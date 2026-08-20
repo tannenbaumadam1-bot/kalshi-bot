@@ -687,7 +687,12 @@ class DriftLive:
         # 8/18: publish ZEROS for the new mechanisms. "cuts" absent from
         # the tracker is indistinguishable from "cut code not running" -
         # a silent safety mechanism must prove it is alive.
-        for k0 in ("cuts", "mslate_capped", "dip_capped"):
+        # 8/20: ovn_lo_blocked joins them. It read null on the tracker
+        # all evening, which is exactly the ambiguity this block exists
+        # to kill - "the block never had a candidate" and "the block is
+        # dead code" must never look the same.
+        for k0 in ("cuts", "mslate_capped", "dip_capped",
+                   "ovn_lo_blocked"):
             self.exec_stats.setdefault(k0, 0)
 
     # ---- persistence ----
