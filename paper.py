@@ -807,11 +807,17 @@ def main():
                               f"sold {sp_bot.sold}")
                 except Exception as e:
                     print(f"  sports paper step skipped: {e}")
-            if ph_bot is not None and n % 3 == 1:
-                # props move fast and settle in minutes: quote often,
-                # and re-read the tape before our quotes go stale
+            if ph_bot is not None:
+                # 8/20 (Adam: "tighten the refresh so we can have as
+                # accurate a paper book as possible"): EVERY cycle, not
+                # every third. A quote resting 3 minutes in an in-play
+                # market is stale before we check it, and the staleness
+                # guard was refusing 87% of candidate fills. The fast
+                # path re-prices only the series carrying flow (~3s);
+                # the full rotation, which also settles finished
+                # markets, runs every 10th cycle.
                 try:
-                    ps = ph_bot.step()
+                    ps = ph_bot.step(full=(n % 10 == 1))
                     mr = ps.get("match_rate")
                     print(f"  PHANTOM(quote): {ps['scanned']} mkts | "
                           f"{ps['quoted']}/{ps['quotable']} quoted | "

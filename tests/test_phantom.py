@@ -185,7 +185,7 @@ def test_match_rate_is_published(tmp_path, monkeypatch):
     is contract-weighted (see test_match_rate_is_contract_weighted)."""
     b = _bot(tmp_path, monkeypatch)
     b.stats["fills_bid"], b.stats["fills_ask"] = 3, 1
-    monkeypatch.setattr(b, "fetch_markets", lambda: ([], False))
+    monkeypatch.setattr(b, "fetch_markets", lambda full=True: ([], False))
     monkeypatch.setattr(b, "fetch_trades", lambda s: [])
     st = b.step()
     assert st["match_events"] == 0.5        # 2*min(3,1)/(3+1)
@@ -335,7 +335,7 @@ def test_match_rate_is_contract_weighted(tmp_path, monkeypatch):
     b.check_fills([_tr(px=44, side="no", cnt=2, tid="b1"),
                    _tr(px=57, side="yes", cnt=10, tid="a1")])
     monkeypatch.setattr(b, "fetch_markets",
-                        lambda: ([_mk(yb=45, ya=55)], 1))
+                        lambda full=True: ([_mk(yb=45, ya=55)], 1))
     monkeypatch.setattr(b, "fetch_trades", lambda s: [])
     st = b.step()
     assert st["match_events"] == 1.0        # one fill each side
@@ -349,7 +349,7 @@ def test_net_reports_the_residual_against_the_spread(tmp_path, monkeypatch):
     b.quote([_mk(yb=45, ya=55)])
     b.check_fills([_tr(px=44, side="no", cnt=10, tid="b1")])
     monkeypatch.setattr(b, "fetch_markets",
-                        lambda: ([_mk(yb=20, ya=30)], 1))
+                        lambda full=True: ([_mk(yb=20, ya=30)], 1))
     monkeypatch.setattr(b, "fetch_trades", lambda s: [])
     st = b.step()
     assert st["net"] == round(st["locked"] + st["unreal"], 2)
@@ -446,7 +446,7 @@ def test_pnl_splits_spread_from_directional_luck(tmp_path, monkeypatch):
     b.check_fills([_tr(px=44, side="no", cnt=10, tid="b1"),
                    _tr(px=57, side="yes", cnt=5, tid="a1")])
     monkeypatch.setattr(b, "fetch_markets",
-                        lambda: ([_mk(yb=95, ya=99)], 1))
+                        lambda full=True: ([_mk(yb=95, ya=99)], 1))
     monkeypatch.setattr(b, "fetch_trades", lambda s: [])
     st = b.step()
     assert round(st["spread_pnl"] + st["risk_pnl"], 2) == st["net"]
@@ -613,7 +613,7 @@ def test_total_is_realized_plus_open(tmp_path, monkeypatch):
     b.quote([_mk(yb=45, ya=55)])
     b.check_fills([_tr(px=44, side="no", cnt=10)])
     monkeypatch.setattr(b, "fetch_markets",
-                        lambda: ([_mk(yb=45, ya=55)], 1))
+                        lambda full=True: ([_mk(yb=45, ya=55)], 1))
     monkeypatch.setattr(b, "fetch_trades", lambda s: [])
     monkeypatch.setattr(b, "settle_check", lambda m: 0)
     st = b.step()
@@ -651,3 +651,30 @@ def test_capital_is_reported_next_to_the_pnl(tmp_path, monkeypatch):
     b.check_fills([_tr(px=44, side="no", cnt=10)])
     bk = b.book([_mk(yb=45, ya=55)])
     assert bk["cap_c"] == 460          # 10 bought at 46c
+
+
+def test_fast_scan_skips_the_rotation(tmp_path, monkeypatch):
+    """8/20: the fast path re-prices only the series carrying flow, so
+    quotes refresh every cycle instead of every third."""
+    b = _bot(tmp_path, monkeypatch)
+    b._series = [f"KXMLBEXTRA{i}" for i in range(50)]
+    b._ser_ts = time.time()
+    b.hot = {"KXMLBHOT"}
+    fast, full = b.targets(full=False), b.targets(full=True)
+    assert set(fast) == set(ph.CORE_SERIES) | {"KXMLBHOT"}
+    assert len(full) > len(fast)
+
+
+def test_fast_scan_never_settles(tmp_path, monkeypatch):
+    """'Not scanned' must never be mistaken for 'finished'."""
+    b = _bot(tmp_path, monkeypatch)
+    b.inv["HELD"] = {"bn": 10, "bc": 460, "sn": 0, "sc": 0, "fee": 4,
+                     "event": "E", "title": "t", "lane": "wide"}
+    calls = []
+    monkeypatch.setattr(b, "settle_check", lambda m: calls.append(1))
+    monkeypatch.setattr(b, "fetch_markets", lambda full=True: ([], 0))
+    monkeypatch.setattr(b, "fetch_trades", lambda s: [])
+    b.step(full=False)
+    assert not calls
+    b.step(full=True)
+    assert len(calls) == 1

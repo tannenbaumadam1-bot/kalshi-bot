@@ -316,30 +316,38 @@ class PhantomBook:
             self._ser_ts = time.time()
         return self._series
 
-    def targets(self):
+    def targets(self, full=True):
         """Which series to price this cycle. CORE is the known-liquid
         spine (game/match lines), HOT is anything the tape has shown
         printing in our sports - flow earns a permanent slot - and the
-        rest rotates so the whole surface gets seen over time."""
-        ser = self.fetch_series()
+        rest rotates so the whole surface gets seen over time.
+
+        8/20 (Adam: "tighten the refresh"): a quote that rests 3 minutes
+        in an in-play baseball market is stale by the time we check it,
+        and the staleness guard was refusing 87% of candidate fills. So
+        the FAST path re-prices only CORE+HOT - the series that actually
+        carry flow - every 60s, and the full rotation runs occasionally
+        to discover new ones. Shorter resting window = fills we can
+        believe."""
+        ser = self.fetch_series() if full else []
         picked = list(CORE_SERIES)
         for s in sorted(self.hot):
             if s not in picked:
                 picked.append(s)
-        rest = [s for s in ser if s not in picked]
+        rest = [s for s in ser if s not in picked] if full else []
         if rest:
             i = self._rot % len(rest)
             picked.extend((rest + rest)[i:i + ROTATE_N])
             self._rot = (self._rot + ROTATE_N) % max(1, len(rest))
         return picked[:MAX_SERIES]
 
-    def fetch_markets(self):
+    def fetch_markets(self, full=True):
         """Open MLB + tennis markets with their books, fetched SERIES BY
         SERIES. The /events sweep looked cheaper but buried today's games
         behind years of long-dated prospect props - the same failure the
         crypto book hit in August, same fix: ask for the series."""
         out, hit = [], 0
-        for st in self.targets():
+        for st in self.targets(full):
             try:
                 d = requests.get(KALSHI + "/markets",
                                  params={"series_ticker": st,
@@ -806,8 +814,8 @@ class PhantomBook:
         return prof
 
     # ---------------- the cycle ----------------
-    def step(self):
-        mkts, series_hit = self.fetch_markets()
+    def step(self, full=True):
+        mkts, series_hit = self.fetch_markets(full)
         # ORDER MATTERS. A resting order can only be hit by a print that
         # happens AFTER it is posted. So: settle the window that just
         # elapsed against the quotes that were actually resting during
@@ -821,7 +829,12 @@ class PhantomBook:
         self.resting = self.quotes
         self._last_ts = now0
         self.score_adverse(mkts)
-        self.settle_check(mkts)
+        # only on a FULL scan: on the fast path a held market simply
+        # wasn't looked at, and "not scanned" must never be mistaken for
+        # "finished" - that would spend the settle budget every cycle
+        # asking the exchange about games still in progress.
+        if full:
+            self.settle_check(mkts)
         bk = self.book(mkts)
         self.stats["cycles"] += 1
         fs, fl = self.stats["fills_strict"], self.stats["fills_loose"]
@@ -848,6 +861,7 @@ class PhantomBook:
             "scanned": len(mkts), "by_sport": by_sport,
             "quotable": quotable, "quoted": len(self.quotes),
             "series_hit": series_hit, "series_known": len(self._series),
+            "scan": "full" if full else "fast",
             "hot_series": len(self.hot), "flow": dict(self.flow),
             "fills_strict": fs, "fills_loose": fl,
             "fills_bid": fb, "fills_ask": fa,
