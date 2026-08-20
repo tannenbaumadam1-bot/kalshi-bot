@@ -113,7 +113,10 @@ SKEW_MAX_C = int(os.environ.get("PHANTOM_SKEW_MAX", "3"))
 # where we quoted, a real maker has already cancelled; anyone still
 # hitting us knows something. And after being hit, back off briefly.
 STALE_C = int(os.environ.get("PHANTOM_STALE", "8"))
-HIT_COOLDOWN_S = int(os.environ.get("PHANTOM_HIT_COOLDOWN", "120"))
+# 300s not 120s: phantom quotes refresh every ~3rd paper cycle, so a
+# 120s cooldown always expired before the next quote and the back-off
+# could never fire (widened read 0 on the first live pass).
+HIT_COOLDOWN_S = int(os.environ.get("PHANTOM_HIT_COOLDOWN", "300"))
 WIDEN_C = int(os.environ.get("PHANTOM_WIDEN", "2"))
 # adverse-selection clocks
 ADV_FAST_S = int(os.environ.get("PHANTOM_ADV_FAST", "300"))     # 5 min
