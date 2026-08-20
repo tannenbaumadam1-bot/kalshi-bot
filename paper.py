@@ -611,6 +611,19 @@ def main():
         except Exception as e:
             print(f"culture scanner unavailable: {e}")
             cu_bot = None
+    # PHANTOM BOOK (8/20, Adam: "I want to be the book for retail...
+    # please build this paper trading model"): two-sided paper quoting
+    # across MLB + tennis props. Measures the three numbers that decide
+    # whether we can be the house - flow, holdable spread, and adverse
+    # selection - with ZERO dollars at risk. PAPER_PHANTOM=0 kills it.
+    ph_bot = None
+    if os.environ.get("PAPER_PHANTOM", "1") == "1":
+        try:
+            import phantom
+            ph_bot = phantom.PhantomBook()
+        except Exception as e:
+            print(f"phantom book unavailable: {e}")
+            ph_bot = None
     mb_bot = None
     if os.environ.get("PAPER_MIDBAND", "0") == "1":
         try:
@@ -785,6 +798,20 @@ def main():
                               f"sold {sp_bot.sold}")
                 except Exception as e:
                     print(f"  sports paper step skipped: {e}")
+            if ph_bot is not None and n % 3 == 1:
+                # props move fast and settle in minutes: quote often,
+                # and re-read the tape before our quotes go stale
+                try:
+                    ps = ph_bot.step()
+                    mr = ps.get("match_rate")
+                    print(f"  PHANTOM(quote): {ps['scanned']} mkts | "
+                          f"{ps['quoted']}/{ps['quotable']} quoted | "
+                          f"fills {ps['fills_strict']}s/"
+                          f"{ps['fills_loose']}l | "
+                          f"match {('%.0f%%' % (mr * 100)) if mr else '-'}"
+                          f" | locked ${ps['locked']:+.2f}")
+                except Exception as e:
+                    print(f"  phantom step skipped: {e}")
             if cu_bot is not None and n % 10 == 4:
                 try:
                     cs2 = cu_bot.step()

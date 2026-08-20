@@ -430,6 +430,17 @@ def build_data():
             out["culture"] = json.load(open(_cu))
     except Exception:
         pass
+    # PHANTOM BOOK (8/20): paper market-making telemetry. The inv/fills
+    # detail stays on the server - the tracker gets the verdict only.
+    try:
+        _ph = os.path.join("logs", "phantom_state.json")
+        if os.path.exists(_ph):
+            _pd = json.load(open(_ph))
+            _pd.pop("inv", None)
+            _pd.pop("fills", None)
+            out["phantom"] = _pd
+    except Exception:
+        pass
     for key, fname in (("clive", "crypto_live_state.json"),):
         fpath = os.path.join("logs", fname)
         if os.path.exists(fpath):
@@ -771,6 +782,17 @@ td.num,th.num{text-align:right}
 <tbody id=spopen></tbody></table></div>
 </div>
 <!-- Book 4 (mid-band) panel retired 8/19 - see payload note -->
+<div id=phwrap style="display:none;border:1.5px solid rgba(139,124,246,.45);border-radius:12px;padding:14px 18px;margin:14px 0 4px;background:linear-gradient(180deg,rgba(139,124,246,.05),transparent)">
+<h2 style="margin:0 0 10px">Book 4 &middot; Phantom <span id=phmode style="text-transform:none;letter-spacing:0"></span></h2>
+<div class=grid id=phtiles></div>
+<div style="margin-top:12px"><div class=t style="margin-bottom:6px">Live phantom quotes</div>
+<table><thead><tr><th>Market</th><th>Sport</th><th class=num>Their spread</th>
+<th class=num>Our bid</th><th class=num>Our ask</th><th class=num>Our edge</th></tr></thead>
+<tbody id=phq></tbody></table></div>
+<div style="margin-top:12px"><div class=t style="margin-bottom:6px">Correlated clusters (unmatched inventory by event)</div>
+<table><thead><tr><th>Event</th><th class=num>Net contracts</th></tr></thead>
+<tbody id=phcl></tbody></table></div>
+</div>
 <!-- PAPER SECTIONS RETIRED 7/30 (Adam: 'get rid of the other two paper
      strategies for now') - hidden, not deleted; ledgers archived on the
      server as *_retired.json. Set display:block + revive the books in
@@ -1117,6 +1139,30 @@ async function load(){
       +'<td class=num>'+b.count+'</td>'
       +'<td>'+(b.anchors===2?'<span class=chip style="background:rgba(47,208,140,.13);color:var(--grn)">PM+SHARP</span>':'<span class=chip style="background:rgba(125,144,173,.15);color:var(--mut)">SINGLE</span>')+'</td></tr>').join('')
       ||'<tr><td colspan=8 class=empty>Scanning sports books for anchored edge&hellip;</td></tr>';
+  }
+  if(d.phantom){const P=d.phantom,R=P.rules||{},A=P.adverse||{};
+    $('phwrap').style.display='block';
+    const mr=(P.match_rate!=null)?(P.match_rate*100).toFixed(0)+'%':'&ndash;';
+    const af=(A.fast&&A.fast.avg!=null)?(A.fast.avg>0?'+':'')+A.fast.avg.toFixed(1)+'&cent;':'&ndash;';
+    $('phmode').innerHTML='<span class=chip style="background:rgba(139,124,246,.16);color:#a99bff">PAPER &middot; NO MONEY</span>'
+      +' <span class=mut style="font-size:11px">era '+(P.era||'phantom1')+' &middot; two-sided quoting on MLB + tennis props &middot; fills only when a REAL print trades through us &middot; being the book for retail</span>';
+    $('phtiles').innerHTML=[
+      tile('Match rate',mr,'the KPI &middot; paired fills / all fills &middot; '+(P.fills_bid||0)+' bid / '+(P.fills_ask||0)+' ask'),
+      tile('Phantom fills',(P.fills_strict||0)+' strict &middot; '+(P.fills_loose||0)+' loose','strict = traded THROUGH us &middot; '+(P.fills_per_h||0)+'/hr &middot; '+(P.trades_seen||0)+' prints seen'),
+      tile('Locked spread','<span class="'+C(P.locked)+'">'+M(P.locked||0)+'</span>','matched pairs '+(P.pairs||0)+' &middot; maker fees '+M(-(P.fees||0))+' &middot; unmatched '+(P.unmatched||0)),
+      tile('Adverse (5m)',af,'price drift after our fills &middot; negative = we get picked off &middot; n='+((A.fast&&A.fast.n)||0)),
+      tile('Surface',(P.quoted||0)+' quoted','of '+(P.quotable||0)+' quotable / '+(P.scanned||0)+' scanned &middot; mlb '+((P.by_sport||{}).mlb||0)+' &middot; tennis '+((P.by_sport||{}).tennis||0)),
+      tile('Unmatched mark','<span class="'+C(P.unreal)+'">'+M(P.unreal||0)+'</span>','directional residual &middot; '+(P.cluster_n||0)+' clusters &middot; quoting &ge;'+(R.min_spread||4)+'&cent; books, '+(R.size||10)+' lots')
+    ].join('');
+    $('phq').innerHTML=((P.examples)||[]).map(q=>'<tr><td>'+(q.title||q.tk)+'</td>'
+      +'<td><span class=chip style="background:rgba(125,144,173,.15);color:var(--mut)">'+(q.sport||'')+'</span></td>'
+      +'<td class=num>'+(q.mspread!=null?q.mspread+'&cent;':'&ndash;')+'</td>'
+      +'<td class=num>'+q.bid+'&cent;</td><td class=num>'+q.ask+'&cent;</td>'
+      +'<td class=num>'+(q.ask-q.bid)+'&cent;</td></tr>').join('')
+      ||'<tr><td colspan=6 class=empty>Scanning MLB and tennis books for quotable spreads&hellip;</td></tr>';
+    $('phcl').innerHTML=((P.clusters)||[]).map(c=>'<tr><td>'+c.event+'</td>'
+      +'<td class=num>'+c.net+'</td></tr>').join('')
+      ||'<tr><td colspan=2 class=empty>No unmatched inventory &mdash; a perfectly balanced book&hellip;</td></tr>';
   }
   {const strip=[];
    const fmtL=(tag,LV)=>{const L=LV.summary;const w=(L.k_wins!=null?L.k_wins:L.wins),l=(L.k_wins!=null?L.k_losses:L.losses);return tag+' '+(L.mode||'LIVE')+' '+M(L.net||0)+' ('+(w||0)+'W/'+(l||0)+'L)'

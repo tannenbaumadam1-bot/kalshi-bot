@@ -1,0 +1,287 @@
+"""Phantom book (8/20): the paper market-making desk.
+
+The whole value of this module is that its fills are HONEST. Paper
+books lie by filling at our price instantly; this one only fills when a
+real print says it would have. These tests exist to keep it honest.
+"""
+import os
+import sys
+import time
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+import phantom as ph
+
+
+def _bot(tmp_path, monkeypatch):
+    monkeypatch.setattr(ph, "STATE", str(tmp_path / "ph.json"))
+    b = ph.PhantomBook()
+    b.rec = None
+    return b
+
+
+def _mk(tk="KXMLBGAME-T1", yb=45, ya=55, sp="mlb", ev="E1", vol=100):
+    return {"tk": tk, "event": ev, "title": "team a beats team b",
+            "sport": sp, "yb": yb, "ya": ya, "vol": vol, "oi": 10}
+
+
+def _tr(tk="KXMLBGAME-T1", px=57, cnt=10, side="yes", tid=None):
+    return {"trade_id": tid or f"t{time.time_ns()}", "ticker": tk,
+            "yes_price": px, "count": cnt, "taker_side": side}
+
+
+# ---------------- classification & schema ----------------
+
+def test_sport_classifier_finds_adams_two_sports():
+    assert ph.sport("KXMLBGAME-26AUG20", "Yankees vs Red Sox") == "mlb"
+    assert ph.sport("KXATPMATCH-X", "Alcaraz to win") == "tennis"
+    assert ph.sport("KXUSOPEN-X", "US Open winner") == "tennis"
+    assert ph.sport("KXHIGHNY-26AUG20", "NYC high temp") is None
+
+
+def test_dual_schema_prices():
+    assert ph._cents({"yes_bid": 45}, "yes_bid") == 45
+    assert ph._cents({"yes_bid_dollars": "0.45"}, "yes_bid") == 45
+    assert ph._cents({}, "yes_bid") is None
+
+
+def test_fee_follows_kalshi_schedule():
+    # taker at 50c on 100 contracts: 0.07 x 100 x .25 = $1.75 = 175c
+    assert ph.fee_c(50, 100, maker=False) == 175
+    # maker is a quarter of that
+    assert ph.fee_c(50, 100, maker=True) == 44
+    # the tails are cheap - this is why the live book lives at 85-98c
+    assert ph.fee_c(95, 100, maker=False) < 40
+
+
+# ---------------- quoting policy ----------------
+
+def test_quotes_inside_a_wide_market(tmp_path, monkeypatch):
+    b = _bot(tmp_path, monkeypatch)
+    b.quote([_mk(yb=45, ya=55)])
+    q = b.quotes["KXMLBGAME-T1"]
+    assert q["bid"] == 46 and q["ask"] == 54      # stepped inside by 1
+    assert q["ask"] > q["bid"]                    # overround survives
+
+
+def test_refuses_tight_markets(tmp_path, monkeypatch):
+    """A 2c market has no overround left after we step inside."""
+    b = _bot(tmp_path, monkeypatch)
+    assert b.quote([_mk(yb=49, ya=51)]) == 0
+    assert not b.quotes
+
+
+def test_refuses_one_sided_and_extreme_books(tmp_path, monkeypatch):
+    b = _bot(tmp_path, monkeypatch)
+    b.quote([_mk(tk="A", yb=0, ya=55), _mk(tk="B", yb=45, ya=0),
+             _mk(tk="C", yb=2, ya=9), _mk(tk="D", yb=93, ya=99)])
+    assert not b.quotes
+
+
+def test_quote_cap_prefers_volume(tmp_path, monkeypatch):
+    b = _bot(tmp_path, monkeypatch)
+    monkeypatch.setattr(ph, "MAX_QUOTES", 2)
+    b.quote([_mk(tk=f"T{i}", vol=i) for i in range(6)])
+    assert len(b.quotes) == 2
+    assert "T5" in b.quotes and "T4" in b.quotes   # busiest books first
+
+
+# ---------------- fill realism: THE point ----------------
+
+def test_strict_fill_requires_trading_through_us(tmp_path, monkeypatch):
+    b = _bot(tmp_path, monkeypatch)
+    b.quote([_mk(yb=45, ya=55)])                  # our ask = 54
+    b.check_fills([_tr(px=57, side="yes")])        # printed THROUGH 54
+    assert b.stats["fills_strict"] == 1
+    assert b.stats["fills_loose"] == 0
+    assert b.inv["KXMLBGAME-T1"]["sn"] == 10
+
+
+def test_loose_fill_when_print_is_at_our_price(tmp_path, monkeypatch):
+    """At our price = queue-dependent. Counted, but never as strict."""
+    b = _bot(tmp_path, monkeypatch)
+    b.quote([_mk(yb=45, ya=55)])
+    b.check_fills([_tr(px=54, side="yes")])
+    assert b.stats["fills_loose"] == 1 and b.stats["fills_strict"] == 0
+
+
+def test_print_that_never_reaches_us_is_no_fill(tmp_path, monkeypatch):
+    b = _bot(tmp_path, monkeypatch)
+    b.quote([_mk(yb=45, ya=55)])                  # bid 46 / ask 54
+    b.check_fills([_tr(px=50, side="yes"), _tr(px=50, side="no")])
+    assert b.stats["fills_strict"] == b.stats["fills_loose"] == 0
+    assert not b.inv
+
+
+def test_taker_side_decides_which_of_our_orders_fills(tmp_path,
+                                                      monkeypatch):
+    b = _bot(tmp_path, monkeypatch)
+    b.quote([_mk(yb=45, ya=55)])
+    b.check_fills([_tr(px=44, side="no")])         # hit bids, through 46
+    r = b.inv["KXMLBGAME-T1"]
+    assert r["bn"] == 10 and r["sn"] == 0
+    assert b.stats["fills_bid"] == 1
+
+
+def test_fill_size_capped_by_print_and_by_our_size(tmp_path, monkeypatch):
+    b = _bot(tmp_path, monkeypatch)
+    b.quote([_mk(yb=45, ya=55)])
+    b.check_fills([_tr(px=57, cnt=3, tid="a")])    # small print
+    assert b.inv["KXMLBGAME-T1"]["sn"] == 3
+    b.check_fills([_tr(px=57, cnt=999, tid="b")])  # huge print
+    assert b.inv["KXMLBGAME-T1"]["sn"] == ph.SIZE  # capped at our size
+
+
+def test_a_trade_is_only_scored_once(tmp_path, monkeypatch):
+    b = _bot(tmp_path, monkeypatch)
+    b.quote([_mk(yb=45, ya=55)])
+    t = _tr(px=57, cnt=2, tid="dup")
+    b.check_fills([t])
+    b.check_fills([t])
+    assert b.stats["fills_strict"] == 1
+
+
+# ---------------- the KPI: match rate ----------------
+
+def test_matched_pair_locks_the_spread(tmp_path, monkeypatch):
+    b = _bot(tmp_path, monkeypatch)
+    b.quote([_mk(yb=45, ya=55)])                  # 46 / 54 -> 8c wide
+    b.check_fills([_tr(px=44, side="no", cnt=10, tid="b1"),
+                   _tr(px=57, side="yes", cnt=10, tid="a1")])
+    bk = b.book([_mk(yb=45, ya=55)])
+    assert bk["pairs"] == 10
+    # gross 10 x 8c = 80c, minus maker fees both legs, still solidly +
+    assert 40 < bk["locked_c"] <= 80
+    assert bk["unmatched"] == 0
+
+
+def test_one_sided_flow_leaves_directional_risk(tmp_path, monkeypatch):
+    """Retail flow is one-sided by nature - this is the failure mode
+    the whole experiment exists to measure."""
+    b = _bot(tmp_path, monkeypatch)
+    b.quote([_mk(yb=45, ya=55)])
+    b.check_fills([_tr(px=57, side="yes", cnt=10)])   # only sells fill
+    bk = b.book([_mk(yb=45, ya=55)])
+    assert bk["pairs"] == 0
+    assert bk["unmatched"] == 10
+    assert bk["cluster_n"] == 1
+
+
+def test_match_rate_is_published(tmp_path, monkeypatch):
+    b = _bot(tmp_path, monkeypatch)
+    b.stats["fills_bid"], b.stats["fills_ask"] = 3, 1
+    monkeypatch.setattr(b, "fetch_markets", lambda: ([], False))
+    monkeypatch.setattr(b, "fetch_trades", lambda s: [])
+    st = b.step()
+    assert st["match_rate"] == 0.5          # 2*min(3,1)/(3+1)
+
+
+def test_unmatched_inventory_marks_against_us(tmp_path, monkeypatch):
+    b = _bot(tmp_path, monkeypatch)
+    b.quote([_mk(yb=45, ya=55)])
+    b.check_fills([_tr(px=44, side="no", cnt=10)])   # we bought at 46
+    bk = b.book([_mk(yb=20, ya=30)])                 # mid collapsed to 25
+    assert bk["unreal_c"] < 0
+
+
+# ---------------- adverse selection ----------------
+
+def test_adverse_scored_after_the_clock(tmp_path, monkeypatch):
+    b = _bot(tmp_path, monkeypatch)
+    b.quote([_mk(yb=45, ya=55)])
+    b.check_fills([_tr(px=44, side="no", cnt=10)])   # bought, mid was 50
+    b.score_adverse([_mk(yb=35, ya=45)])             # mid now 40
+    assert b.fills[-1]["adv_f"] is None              # too soon
+    b.fills[-1]["ts"] = time.time() - ph.ADV_FAST_S - 1
+    b.score_adverse([_mk(yb=35, ya=45)])
+    assert b.fills[-1]["adv_f"] == -10.0             # ran us over
+    s = b._adverse_summary()
+    assert s["fast"]["n"] == 1 and s["fast"]["avg"] == -10.0
+
+
+def test_adverse_sign_flips_for_sells(tmp_path, monkeypatch):
+    b = _bot(tmp_path, monkeypatch)
+    b.quote([_mk(yb=45, ya=55)])
+    b.check_fills([_tr(px=57, side="yes", cnt=10)])  # we sold at 54
+    b.fills[-1]["ts"] = time.time() - ph.ADV_FAST_S - 1
+    b.score_adverse([_mk(yb=35, ya=45)])             # mid fell: good
+    assert b.fills[-1]["adv_f"] == 10.0
+
+
+# ---------------- safety & plumbing ----------------
+
+def test_it_cannot_trade():
+    """No client, no key, no order path. Phase 0 means phase 0."""
+    src = open(os.path.join(os.path.dirname(os.path.dirname(
+        os.path.abspath(__file__))), "phantom.py")).read()
+    for forbidden in ("create_order", "/portfolio/orders", "KalshiClient",
+                      "place_order", "private_key"):
+        assert forbidden not in src
+
+
+def test_state_round_trips(tmp_path, monkeypatch):
+    b = _bot(tmp_path, monkeypatch)
+    b.quote([_mk(yb=45, ya=55)])
+    b.check_fills([_tr(px=57, side="yes", cnt=10)])
+    b.save({"era": ph.ERA})
+    b2 = _bot(tmp_path, monkeypatch)
+    assert b2.inv["KXMLBGAME-T1"]["sn"] == 10
+
+
+def test_era_change_discards_stale_state(tmp_path, monkeypatch):
+    b = _bot(tmp_path, monkeypatch)
+    b.inv["X"] = {"bn": 1, "bc": 1, "sn": 0, "sc": 0}
+    b.save({"era": "somethingelse"})
+    b2 = _bot(tmp_path, monkeypatch)
+    assert not b2.inv
+
+
+def test_step_survives_a_dead_exchange(tmp_path, monkeypatch):
+    """Never break the paper loop - the tape matters more than any
+    single cycle."""
+    b = _bot(tmp_path, monkeypatch)
+
+    def boom(*a, **k):
+        raise RuntimeError("kalshi down")
+    monkeypatch.setattr(ph.requests, "get", boom)
+    st = b.step()
+    assert st["scanned"] == 0 and st["quoted"] == 0
+    assert st["era"] == ph.ERA
+
+
+def test_count_fp_string_is_the_real_field(tmp_path, monkeypatch):
+    """Kalshi sends count_fp as a string ('55.00'); reading 'count'
+    would have meant zero fills forever - a silent empty experiment."""
+    b = _bot(tmp_path, monkeypatch)
+    b.quote([_mk(yb=45, ya=55)])
+    b.check_fills([{"trade_id": "x", "ticker": "KXMLBGAME-T1",
+                    "yes_price_dollars": "0.5700", "count_fp": "6.00",
+                    "taker_side": "yes"}])
+    assert b.inv["KXMLBGAME-T1"]["sn"] == 6
+    assert b.stats["fills_strict"] == 1
+
+
+def test_block_trades_are_flow_not_fills(tmp_path, monkeypatch):
+    """Negotiated off-book: it never touched our resting order."""
+    b = _bot(tmp_path, monkeypatch)
+    b.quote([_mk(yb=45, ya=55)])
+    b.check_fills([{"trade_id": "b1", "ticker": "KXMLBGAME-T1",
+                    "yes_price": 57, "count_fp": "500",
+                    "taker_side": "yes", "is_block_trade": True}])
+    assert not b.inv
+    assert b.flow.get("blocks") == 1
+
+
+def test_flow_bucketed_by_the_spread_it_printed_in(tmp_path, monkeypatch):
+    """The decisive early question: do the WIDE books have customers?"""
+    b = _bot(tmp_path, monkeypatch)
+    tight = _mk(tk="TIGHT", yb=49, ya=51)
+    wide = _mk(tk="WIDE", yb=45, ya=55)
+    b.quote([tight, wide])
+    b.score_flow([{"ticker": "TIGHT", "count_fp": "5"},
+                  {"ticker": "TIGHT", "count_fp": "5"},
+                  {"ticker": "WIDE", "count_fp": "5"}], [tight, wide])
+    assert b.flow["by_spread"]["1-3"] == 2
+    assert b.flow["by_spread"]["8-14"] == 1
+    assert b.flow["prints"] == 3 and b.flow["contracts"] == 15
+    assert b.flow["in_ours"] == 1          # only WIDE was quotable
