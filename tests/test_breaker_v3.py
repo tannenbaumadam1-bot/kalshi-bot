@@ -32,6 +32,7 @@ def _bot(tmp_path, monkeypatch):
     # exercise BUCKET_ALLOW set it explicitly
     monkeypatch.setattr(dl, "BUCKET_ALLOW", set())
     monkeypatch.setattr(dl, "GATE_FORCE", "")   # tests grade the gate honestly
+    monkeypatch.setattr(dl, "OVN_LO_MODE", "off")  # ovn tests set explicitly
     return dl.DriftLive(None, mode="DRY")
 
 
@@ -578,8 +579,8 @@ def test_ewin_keys_split_by_metric(tmp_path, monkeypatch):
 
 
 def test_overnight_low_entries_half_size(tmp_path, monkeypatch):
-    """Adam 1+2: LOW entries >8h to settlement size at half; the 5-lot
-    floor holds; HIGH entries at the same horizon are untouched."""
+    """8/19 half mode (superseded by block as default 8/20, kept as the
+    fallback behavior): LOW entries >8h size at half; highs untouched."""
     monkeypatch.setattr(dl, "GATE_FORCE", "scale")   # full size live
     monkeypatch.setattr(dl, "CITY_CAP_PCT", 1.0)
     monkeypatch.setattr(dl, "SLATE_CAP_PCT", 1.0)
@@ -589,6 +590,7 @@ def test_overnight_low_entries_half_size(tmp_path, monkeypatch):
     b = _bot(tmp_path, monkeypatch)
     monkeypatch.setattr(dl, "BUCKET_ALLOW", {"level:85-89"})
     monkeypatch.setattr(dl, "GATE_FORCE", "scale")
+    monkeypatch.setattr(dl, "OVN_LO_MODE", "half")
     b.dry_balance_c = 60000
     b._refresh_caps(b.balance_c())
     b.place(mkts=[_mk("KXLOWTDEN-OV1", bid=85, ask=88, is_low=True,
@@ -618,3 +620,52 @@ def test_short_horizon_lows_keep_full_size(tmp_path, monkeypatch):
     lo = next(v for v in b.bets.values() if v["city"] == "seattle")
     assert lo["count"] > dl.MIN_CONTRACTS
     assert b.exec_stats.get("ovn_lo_halved", 0) == 0
+
+
+# ---------------- 8/20: overnight-lows HARD BLOCK ----------------
+
+def test_ovn_low_block_refuses_the_entry_entirely(tmp_path, monkeypatch):
+    """The 8/20 verdict build: a LOW entry >8h from settlement is
+    REFUSED (not halved); a same-morning low and an overnight HIGH
+    both still place."""
+    b = _bot(tmp_path, monkeypatch)
+    monkeypatch.setattr(dl, "OVN_LO_MODE", "block")
+    monkeypatch.setattr(dl, "METRIC_SLATE_PCT", 1.0)
+    b.dry_balance_c = 10000
+    n = b.place(mkts=[
+        _mk("KXLOWTDEN-B1", bid=85, ask=88, is_low=True, city="denver",
+            hrs=12.0),                              # overnight low: NO
+        _mk("KXLOWTSATX-B2", bid=85, ask=88, is_low=True,
+            city="san antonio", hrs=5.0),           # same-morning low: OK
+        _mk("KXHIGHMIA-B3", bid=85, ask=88, is_low=False, city="miami",
+            hrs=12.0)])                             # overnight high: OK
+    tks = set(b.bets) | {o["ticker"] for o in b.pending.values()}
+    assert "KXLOWTDEN-B1" not in tks
+    assert "KXLOWTSATX-B2" in tks and "KXHIGHMIA-B3" in tks
+    assert b.exec_stats.get("ovn_lo_blocked", 0) >= 1
+
+
+def test_ovn_low_block_covers_the_dip_lane(tmp_path, monkeypatch):
+    b = _bot(tmp_path, monkeypatch)
+    monkeypatch.setattr(dl, "OVN_LO_MODE", "block")
+    b.last_nav_c = 10000.0
+    b.quote_dips([_mk("KXLOWTSEA-D1", bid=88, ask=90, is_low=True,
+                      city="seattle", hrs=14.0)], 10000, {})
+    assert "KXLOWTSEA-D1" not in b.dips
+    assert b.exec_stats.get("ovn_lo_blocked", 0) >= 1
+    # same-day low dip still quotes
+    b.quote_dips([_mk("KXLOWTSEA-D2", bid=88, ask=90, is_low=True,
+                      city="seattle", hrs=4.0)], 10000, {})
+    assert "KXLOWTSEA-D2" in b.dips
+
+
+def test_ovn_low_off_mode_restores_unrestricted(tmp_path, monkeypatch):
+    b = _bot(tmp_path, monkeypatch)
+    monkeypatch.setattr(dl, "OVN_LO_MODE", "off")
+    monkeypatch.setattr(dl, "METRIC_SLATE_PCT", 1.0)
+    b.dry_balance_c = 10000
+    b.place(mkts=[_mk("KXLOWTDEN-O1", bid=85, ask=88, is_low=True,
+                      city="denver", hrs=12.0)])
+    tks = set(b.bets) | {o["ticker"] for o in b.pending.values()}
+    assert "KXLOWTDEN-O1" in tks
+    assert b.exec_stats.get("ovn_lo_blocked", 0) == 0

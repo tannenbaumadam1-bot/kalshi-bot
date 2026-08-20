@@ -26,6 +26,7 @@ def _bot(tmp_path, monkeypatch):
     # exercise BUCKET_ALLOW set it explicitly
     monkeypatch.setattr(dl, "BUCKET_ALLOW", set())
     monkeypatch.setattr(dl, "GATE_FORCE", "")   # tests grade the gate honestly
+    monkeypatch.setattr(dl, "OVN_LO_MODE", "off")  # ovn tests set explicitly
     b = dl.DriftLive(None, mode="DRY")
     return b
 

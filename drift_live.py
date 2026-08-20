@@ -466,16 +466,24 @@ CUT_ON = os.environ.get("DRIFT_LIVE_CUT", "1") == "1"
 CUT_C = float(os.environ.get("DRIFT_LIVE_CUT_C", "50"))
 CUT_CONFIRM = int(os.environ.get("DRIFT_LIVE_CUT_CONFIRM", "2"))
 CUT_MIN_ENTRY_C = int(os.environ.get("DRIFT_LIVE_CUT_MIN_ENTRY", "80"))
-# --- 8/19 OVERNIGHT-LOWS SOFT BLOCK (Adam: "do 1+2 together, ship it").
-# The weekend's entire disaster class was evening-entered LOW positions
-# held overnight (8-16h). The ewin bucket mixing lows with morning highs
-# means a hard window block would amputate the good cohort too - so the
-# known suspect is HALF-SIZED instead: low-side entries placed more than
-# OVN_LO_H hours before settlement size at half (5-lot floor holds).
-# Highs untouched; evidence keeps flowing; tail exposure of the new
-# full-size config is cut roughly in half where it lives.
-# REVERT: export DRIFT_LIVE_OVN_LO_HALF=0.
-OVN_LO_HALF = os.environ.get("DRIFT_LIVE_OVN_LO_HALF", "1") == "1"
+# --- 8/20 OVERNIGHT-LOWS HARD BLOCK (Adam: "please build and
+# implement this right now"). The 8/19 half-size collected the
+# evidence; the 8/20 ewin metric split delivered the verdict: lo-side
+# entries are negative in BOTH windows (lo:16+ -0.044/ch, lo:na
+# -0.101/ch, n12 -$7.02) while hi-side is positive in both, and the
+# settle tail (-$57.23 lifetime) is overwhelmingly overnight-low
+# busts (MIN B57.5 -4.36 just last night). CUT has never fired on
+# this class because the busts happen in the closed-market gap -
+# no exit exists. The only fix is not entering the trade.
+# MODE: "block" = refuse LOW-side entries/dips/pyramid-adds placed
+# more than OVN_LO_H hours before settlement (same-morning lows,
+# which are profitable, still trade); "half" = the 8/19 behavior;
+# "off" = no restriction. Lows re-open at full hours when the
+# nowcast can price them. REVERT: export DRIFT_LIVE_OVN_LO=half|off.
+OVN_LO_MODE = os.environ.get(
+    "DRIFT_LIVE_OVN_LO",
+    "half" if os.environ.get("DRIFT_LIVE_OVN_LO_HALF") == "1"
+    else "block").strip()
 OVN_LO_H = float(os.environ.get("DRIFT_LIVE_OVN_LO_H", "8"))
 
 
@@ -1319,7 +1327,7 @@ class DriftLive:
                           "day_basis": getattr(self, "day_halt_basis",
                                                "realized"),
                           "gate_force": GATE_FORCE or None,
-                          "ovn_lo_half": OVN_LO_HALF,
+                          "ovn_lo": OVN_LO_MODE,
                           "allow": sorted(BUCKET_ALLOW),
                           "dyn": DYN_CAPS, "floor": ENTRY_FLOOR,
                           "chase": CHASE_MAX_E, "rest_h": REST_MAX_H,
@@ -3474,16 +3482,21 @@ class DriftLive:
                     if size < 1:
                         continue
                 size = max(size, MIN_CONTRACTS)   # fee-rounding floor
-                # 8/19 soft block: overnight LOW entries at half size
+                # 8/20 overnight-low policy: block (default) or halve
                 try:
                     _h2s = float(mk.get("hrs"))
                 except (TypeError, ValueError):
                     _h2s = None
-                if (OVN_LO_HALF and mk["is_low"] and _h2s is not None
+                if (mk["is_low"] and _h2s is not None
                         and _h2s > OVN_LO_H):
-                    size = max(MIN_CONTRACTS, size // 2)
-                    self.exec_stats["ovn_lo_halved"] = (
-                        self.exec_stats.get("ovn_lo_halved", 0) + 1)
+                    if OVN_LO_MODE == "block":
+                        self.exec_stats["ovn_lo_blocked"] = (
+                            self.exec_stats.get("ovn_lo_blocked", 0) + 1)
+                        continue
+                    if OVN_LO_MODE == "half":
+                        size = max(MIN_CONTRACTS, size // 2)
+                        self.exec_stats["ovn_lo_halved"] = (
+                            self.exec_stats.get("ovn_lo_halved", 0) + 1)
                 # ...and trims to the matching dollar ceiling
                 _cap = (getattr(self, "max_bet_pv_c", 0) or self.max_bet_c
                         ) if _pv else self.max_bet_c
@@ -3661,6 +3674,17 @@ class DriftLive:
             sq = side_quotes(mk)
             if not sq:
                 continue
+            # 8/20: a LOW dip filled overnight carries the same
+            # closed-market gap risk as a level entry - same policy
+            try:
+                _dh = float(mk.get("hrs"))
+            except (TypeError, ValueError):
+                _dh = None
+            if (OVN_LO_MODE == "block" and mk.get("is_low")
+                    and _dh is not None and _dh > OVN_LO_H):
+                self.exec_stats["ovn_lo_blocked"] = (
+                    self.exec_stats.get("ovn_lo_blocked", 0) + 1)
+                continue
             side, sbid, smid = sq
             b0 = self.bets.get(tk)
             if b0 is not None and b0.get("side") != side:
@@ -3837,6 +3861,16 @@ class DriftLive:
         b["adds"] = int(b.get("adds", 0)) + 1
 
     def _maybe_pyramid_order(self, tk, mk, mid, gate_mode, balance_c):
+        # 8/20: no ADDING to low-side exposure across the overnight gap
+        try:
+            _ph = float(mk.get("hrs"))
+        except (TypeError, ValueError):
+            _ph = None
+        if (OVN_LO_MODE == "block" and mk.get("is_low")
+                and _ph is not None and _ph > OVN_LO_H):
+            self.exec_stats["ovn_lo_blocked"] = (
+                self.exec_stats.get("ovn_lo_blocked", 0) + 1)
+            return False
         """Rest a probe-size ADD on a runner (paper-identical: +PYRAMID_UP_C
         past avg entry, never nickels, capped adds, probe-active unless
         DRIFT_PYRAMID_PROBE=0)."""
