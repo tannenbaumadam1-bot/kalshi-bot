@@ -33,6 +33,9 @@ def _bot(tmp_path, monkeypatch):
     monkeypatch.setattr(dl, "BUCKET_ALLOW", set())
     monkeypatch.setattr(dl, "GATE_FORCE", "")   # tests grade the gate honestly
     monkeypatch.setattr(dl, "OVN_LO_MODE", "off")  # ovn tests set explicitly
+    # 8/20: live floor is 7 (Adam order); these fixtures were hand-sized
+    # for 5-lots. The floor itself is graded in test_floor_is_seven_live.
+    monkeypatch.setattr(dl, "MIN_CONTRACTS", 5)
     return dl.DriftLive(None, mode="DRY")
 
 

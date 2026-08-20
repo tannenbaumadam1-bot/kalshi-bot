@@ -27,8 +27,35 @@ def _bot(tmp_path, monkeypatch):
     monkeypatch.setattr(dl, "BUCKET_ALLOW", set())
     monkeypatch.setattr(dl, "GATE_FORCE", "")   # tests grade the gate honestly
     monkeypatch.setattr(dl, "OVN_LO_MODE", "off")  # ovn tests set explicitly
+    # 8/20 Adam order raised the live floor to 7. Legacy tests grade cap /
+    # offer / dip MECHANICS with numbers hand-computed at the historic
+    # 5-lot fixture scale; the floor itself is graded in
+    # test_floor_is_seven_live. Pinning here keeps both honest.
+    monkeypatch.setattr(dl, "MIN_CONTRACTS", 5)
     b = dl.DriftLive(None, mode="DRY")
     return b
+
+
+def test_floor_is_seven_live(tmp_path, monkeypatch):
+    """8/20 Adam order: minimum position is 7 contracts, live default."""
+    assert int(os.environ.get("DRIFT_LIVE_MIN_CONTRACTS", "7")) == 7
+    monkeypatch.setattr(dl, "STATE", str(tmp_path / "s7.json"))
+    monkeypatch.setattr(dl, "BETS", str(tmp_path / "b7.csv"))
+    monkeypatch.setattr(dl, "BUCKET_ALLOW", set())
+    monkeypatch.setattr(dl, "GATE_FORCE", "")
+    monkeypatch.setattr(dl, "OVN_LO_MODE", "off")
+    b = dl.DriftLive(None, mode="DRY")   # module default floor: 7
+    b.dry_balance_c = 100000             # roomy caps so the floor decides
+    assert dl.MIN_CONTRACTS == 7
+    assert b.place(mkts=[{
+        "ticker": "KXHIGHNY-26AUG-T86", "city": "nyc", "is_low": False,
+        "strike": 86, "kind": "ge", "cap": None, "yes_bid": 87,
+        "yes_ask": 89, "date": _dt.date.today().isoformat(), "hrs": 3.0,
+        "title": "", "sub": "", "bid_size": 50.0, "ask_size": 50.0,
+        "vol": 100.0}]) == 1
+    n = next(iter(b.bets.values()))["count"] if b.bets else \
+        next(iter(b.pending.values()))["count"]
+    assert n >= 7, n
 
 
 def test_dry_default_and_caps(tmp_path, monkeypatch):
@@ -99,9 +126,9 @@ def test_nickel_size_steps_on_proof(tmp_path, monkeypatch):
 
 
 def test_pyramid_add_on_runner(tmp_path, monkeypatch):
-    monkeypatch.setattr(dl, "MIN_CONTRACTS", 1)  # not what this tests
     monkeypatch.setattr(dl, "TAKER_FIRST", False)  # nor is execution
     b3 = _bot(tmp_path, monkeypatch)
+    monkeypatch.setattr(dl, "MIN_CONTRACTS", 1)  # not what this tests
     b3.place(mkts=[_mk(bid=80, ask=83)])         # level entry at 80
     tk3 = next(iter(b3.bets))
     b3.place(mkts=[_mk(bid=90, ask=92)])         # smid 91 >= 80+10 -> add at 90
@@ -211,8 +238,8 @@ def test_evidence_weighted_kelly_fraction(tmp_path, monkeypatch):
 
 def test_proven_bucket_sizes_up(tmp_path, monkeypatch):
     monkeypatch.setattr(dl, 'WX_ALLOC', 1.0)   # cap math, pre-split
-    monkeypatch.setattr(dl, "MIN_CONTRACTS", 1)  # measuring Kelly, not the floor
     b = _bot(tmp_path, monkeypatch)
+    monkeypatch.setattr(dl, "MIN_CONTRACTS", 1)  # measuring Kelly, not the floor
     b.history = _proven_hist()                 # gate=scale + proven 85-89
     assert b._gate()[0] == "scale"
     assert b.place(mkts=[_mk(bid=87, ask=89)]) == 1
@@ -220,19 +247,20 @@ def test_proven_bucket_sizes_up(tmp_path, monkeypatch):
     assert next(iter(b.bets.values()))["count"] == 4   # half-Kelly, 8% cap
     monkeypatch.setattr(dl, "KELLY_PROVEN_N", 999)     # same lane, unproven
     b2 = _bot(tmp_path, monkeypatch)
+    monkeypatch.setattr(dl, "MIN_CONTRACTS", 1)  # helper re-pins; Kelly again
     b2.history = _proven_hist()
     assert b2.place(mkts=[_mk(bid=87, ask=89)]) == 1
     assert next(iter(b2.bets.values()))["count"] == 2  # quarter-Kelly
 
 
 def test_taker_falls_back_to_maker_when_toll_too_big(tmp_path, monkeypatch):
-    monkeypatch.setattr(dl, "MIN_CONTRACTS", 1)  # not what this tests
     # regression (7/28): scale mode used to Kelly-size takers AT THE ASK,
     # where f*=0 by construction -> every high-mid tight-spread candidate
     # was dropped entirely (no maker join either). Now: edge measured at
     # the bid; if a taker lot doesn't fit, rest a maker join instead.
     monkeypatch.setattr(dl, "KELLY_PROVEN_N", 999)
     b = _bot(tmp_path, monkeypatch)
+    monkeypatch.setattr(dl, "MIN_CONTRACTS", 1)  # not what this tests
     b.history = _proven_hist()
     b.dry_balance_c = 4600            # taker lot at 89c doesn't fit Kelly
     assert b.place(mkts=[_mk(bid=87, ask=89)]) == 1

@@ -272,7 +272,11 @@ ENTRY_FLOOR = int(os.environ.get("DRIFT_LIVE_ENTRY_FLOOR", "80"))
 # semantics as 8/7 - the floor beats the per-bet cap; balance/reserve
 # and the OPEN cap still bind. The nickel lane's own trim floor rises
 # to match (it was allowed to trim to 1).
-MIN_CONTRACTS = int(os.environ.get("DRIFT_LIVE_MIN_CONTRACTS", "5"))
+# 8/20 ADAM ORDER: floor 5 -> 7 ("move the minimum position up...
+# we gotta get more aggressive"). Recorded per the ceiling rule: his
+# dial, his call. Raises the smallest level/dip entries ~40% (a 7-lot
+# at 88c = ~$6.16). REVERT: export DRIFT_LIVE_MIN_CONTRACTS=5.
+MIN_CONTRACTS = int(os.environ.get("DRIFT_LIVE_MIN_CONTRACTS", "7"))
 # --- 8/10 TWO-SIDED QUOTING (Adam-approved): the taker-first entries
 # are the BID side of a market-making book; this is the OFFER side.
 # Every filled position rests a maker SELL at a premium price -
