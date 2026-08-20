@@ -584,8 +584,17 @@ def main():
             pass
     # SPORTS PAPER BOOK (8/12, Adam): the offer-side template on sports,
     # Polymarket-anchored, zero dollars, building the go-live dataset.
+    # SPORTS PAPER BOOK RETIRED 8/20 (Adam: "please shut down this
+    # paperbook"). 4 settled turns in 8 days against a 200-turn gate -
+    # 2W/2L, -$3.04, offer side never lifted once. Three widenings
+    # (edge 3c->1c, spread 5c->14c, band 60-94c) bought 2 extra
+    # placements, so the funnel was not the binding constraint: the
+    # anchor was. Superseded by the phantom book, which measures the
+    # same sports surface from the MAKER side with 100x the sample
+    # rate. Lessons filed in SPORTS_AUTOPSY.md; state preserved.
+    # Revive with PAPER_SPORTS=1.
     sp_bot = None
-    if os.environ.get("PAPER_SPORTS", "1") == "1":
+    if os.environ.get("PAPER_SPORTS", "0") == "1":
         try:
             import sports_paper
             sp_bot = sports_paper.SportsPaper()

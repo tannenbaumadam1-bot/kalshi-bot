@@ -397,23 +397,15 @@ def build_data():
     # drift1 paper book retired 7/25; driftw2-fin retired 7/30
     # driftc = LANE 2 AUDITION (7/31): crypto drift paper book, gate 100
     # driftc paper audition retired 8/3 (gate passed -> live book)
-    # SPORTS PAPER BOOK (8/12): its state renders as Book 3
-    try:
-        _sp = os.path.join("logs", "sports_paper_state.json")
-        if os.path.exists(_sp):
-            _sd = json.load(open(_sp))
-            _sd["history"] = (_sd.get("history") or [])[-30:]
-            _sd.pop("sold_log", None)
-            # 8/13 (Adam: "why are the sports not showing up"): the
-            # Recent-trades table only lists CLOSED trades, and the open
-            # ones were being stripped here - so a book holding live
-            # paper positions looked idle. Publish them, trimmed.
-            _sd["open_positions"] = [dict(v, ticker=k) for k, v
-                                     in (_sd.get("bets") or {}).items()][:12]
-            _sd.pop("bets", None)
-            out["sports"] = _sd
-    except Exception:
-        pass
+    # SPORTS PAPER BOOK (8/12) RETIRED 8/20 (Adam: "please shut down
+    # this paperbook"). It reached 4 settled turns of a 200-turn gate in
+    # 8 days: 2W/2L, -$3.04, offer side 0 lifted. The taker thesis
+    # (Polymarket-anchored edge) never got a sample worth grading, and
+    # the phantom book now reads the same sports surface from the maker
+    # side at 100x the rate. Payload block removed so a dead panel can't
+    # masquerade as a live book. State file preserved on the server;
+    # lessons in SPORTS_AUTOPSY.md. To revive: restore this block +
+    # PAPER_SPORTS=1 + un-hide #sportswrap.
     # MID-BAND PAPER BOOK RETIRED 8/19 (Adam: "cut things that are a
     # distraction"). The book stopped trading 8/14: it filled all 12
     # slots and then froze - no fair value to tell it when a thesis had
@@ -769,18 +761,11 @@ td.num,th.num{text-align:right}
 <th class=num>Exit/Settle</th><th class=num>Qty</th><th>Result</th><th class=num>P&amp;L</th></tr></thead>
 <tbody id=clreal></tbody></table></div>
 </div>
-<div id=sportswrap style="display:none;border:1.5px solid rgba(47,208,140,.45);border-radius:12px;padding:14px 18px;margin:14px 0 4px;background:linear-gradient(180deg,rgba(47,208,140,.04),transparent)">
-<h2 style="margin:0 0 10px">Book 3 &middot; Sports <span id=spmode style="text-transform:none;letter-spacing:0"></span></h2>
-<div class=grid id=sptiles></div>
-<div style="margin-top:12px"><div class=t style="margin-bottom:6px">Recent trades</div>
-<table><thead><tr><th>Closed</th><th>Game</th><th>Team</th><th class=num>Fair</th>
-<th class=num>Entry</th><th class=num>Exit</th><th class=num>Qty</th><th>Result</th><th class=num>P&amp;L</th></tr></thead>
-<tbody id=sptbl></tbody></table></div>
-<div style="margin-top:12px"><div class=t style="margin-bottom:6px">Open now</div>
-<table><thead><tr><th>Opened</th><th>Game</th><th>Team</th><th class=num>Fair</th>
-<th class=num>Entry</th><th class=num>Edge</th><th class=num>Qty</th><th>Anchors</th></tr></thead>
-<tbody id=spopen></tbody></table></div>
-</div>
+<!-- Book 3 (sports, taker) panel retired 8/20 (Adam: "please shut
+     down this paperbook"). 4/200 gate in 8 days, 2W/2L, -$3.04,
+     0 lifted. The phantom book reads the same surface from the
+     maker side. Revive: restore this panel + the payload block +
+     PAPER_SPORTS=1. Lessons: SPORTS_AUTOPSY.md -->
 <!-- Book 4 (mid-band) panel retired 8/19 - see payload note -->
 <div id=phwrap style="display:none;border:1.5px solid rgba(139,124,246,.45);border-radius:12px;padding:14px 18px;margin:14px 0 4px;background:linear-gradient(180deg,rgba(139,124,246,.05),transparent)">
 <h2 style="margin:0 0 10px">Book 4 &middot; Phantom <span id=phmode style="text-transform:none;letter-spacing:0"></span></h2>
@@ -1111,35 +1096,6 @@ async function load(){
         +'<td class=num>'+h.count+'</td>'
         +'<td>'+(h.outcome===1?'<span class=pos>WON</span>':(h.outcome===0?'<span class=neg>LOST</span>':'STOP'))+'</td>'
         +'<td class=num><span class="'+C(h.pnl)+'">'+M(h.pnl)+'</span></td></tr>').join('');}}
-  if(d.sports&&d.sports.summary){const SP=d.sports.summary;
-    $('sportswrap').style.display='block';
-    const g=SP.gate||{},R=SP.rules||{};
-    $('spmode').innerHTML='<span class=chip style="background:rgba(125,144,173,.15);color:var(--mut)">PAPER</span>'
-      +' <span class=mut style="font-size:11px">era sports1 &middot; Polymarket-anchored entries &middot; the weather offer-side template &middot; real asks + exact fees &middot; lifts only on bid-through (conservative)</span>';
-    $('sptiles').innerHTML=[
-      tile('Go-live gate',(g.n||0)+' / '+(g.need||200)+' settled'+(g.ready?' &middot; <span class=pos>READY</span>':''),(g.lb!=null&&g.be!=null)?('Wilson LB '+(g.lb*100).toFixed(1)+'% vs breakeven '+(g.be*100).toFixed(1)+'%'):'accumulating evidence &middot; the ledger decides'),
-      tile('Record',(SP.wins||0)+'W / '+(SP.losses||0)+'L &middot; <span class="'+C(SP.net)+'">'+M(SP.net||0)+'</span>','paper, after exact fees &middot; '+(SP.open||0)+' open &middot; '+(SP.placed||0)+' placed'),
-      tile('Offer side',(SP.sold||0)+' lifted &middot; <span class="'+C(SP.sold_net)+'">'+M(SP.sold_net||0)+'</span>','sells at '+((R.sell||[97,99]).join('/'))+'&cent; &middot; bid-through only'),
-      tile("Today's P&L",'<span class="'+C(SP.day_pnl)+'">'+M(SP.day_pnl||0)+'</span>','edge &ge;'+(R.edge_min_c||3)+'&cent; vs anchor &middot; band '+((R.band||[65,90]).join('-'))+'&cent; &middot; '+(R.size||5)+' lots')
-    ].join('');
-    $('sptbl').innerHTML=((d.sports.history)||[]).slice().reverse().slice(0,12).map(h=>'<tr><td class=mut>'+String(h.ts||'').slice(5,16).replace('T',' ')+'</td>'
-      +'<td>'+(h.title||'')+'</td><td>'+(h.team||'')+'</td>'
-      +'<td class=num>'+(h.fair!=null?Math.round(h.fair*100)+'%':'&ndash;')+'</td>'
-      +'<td class=num>'+h.entry+'&cent;</td>'
-      +'<td class=num>'+(h.exit_px!=null?h.exit_px+'&cent;':'&ndash;')+'</td>'
-      +'<td class=num>'+h.count+'</td>'
-      +'<td>'+(h.sold?'<span class=chip style="background:rgba(47,208,140,.13);color:var(--grn)">SOLD</span>':('<span class="'+(Number(h.pnl)>0?'won':'lost')+'">'+(Number(h.pnl)>0?'WON':'LOST')+'</span>'))+'</td>'
-      +'<td class=num><span class="'+C(h.pnl)+'">'+M(h.pnl)+'</span></td></tr>').join('')
-      ||'<tr><td colspan=9 class=empty>No closed trades yet &mdash; open positions are listed below&hellip;</td></tr>';
-    $('spopen').innerHTML=((d.sports.open_positions)||[]).map(b=>'<tr><td class=mut>'+String(b.ots||'').slice(5,16).replace('T',' ')+'</td>'
-      +'<td>'+(b.title||'')+'</td><td>'+(b.team||'')+'</td>'
-      +'<td class=num>'+(b.fair!=null?Math.round(b.fair*100)+'%':'&ndash;')+'</td>'
-      +'<td class=num>'+b.entry+'&cent;</td>'
-      +'<td class=num>'+(b.edge!=null?b.edge+'&cent;':'&ndash;')+'</td>'
-      +'<td class=num>'+b.count+'</td>'
-      +'<td>'+(b.anchors===2?'<span class=chip style="background:rgba(47,208,140,.13);color:var(--grn)">PM+SHARP</span>':'<span class=chip style="background:rgba(125,144,173,.15);color:var(--mut)">SINGLE</span>')+'</td></tr>').join('')
-      ||'<tr><td colspan=8 class=empty>Scanning sports books for anchored edge&hellip;</td></tr>';
-  }
   if(d.phantom){const P=d.phantom,R=P.rules||{},A=P.adverse||{};
     $('phwrap').style.display='block';
     const mr=(P.match_rate!=null)?(P.match_rate*100).toFixed(0)+'%':'&ndash;';
