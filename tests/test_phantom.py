@@ -168,12 +168,15 @@ def test_one_sided_flow_leaves_directional_risk(tmp_path, monkeypatch):
 
 
 def test_match_rate_is_published(tmp_path, monkeypatch):
+    """Event-weighted rate lives on as match_events; match_rate itself
+    is contract-weighted (see test_match_rate_is_contract_weighted)."""
     b = _bot(tmp_path, monkeypatch)
     b.stats["fills_bid"], b.stats["fills_ask"] = 3, 1
     monkeypatch.setattr(b, "fetch_markets", lambda: ([], False))
     monkeypatch.setattr(b, "fetch_trades", lambda s: [])
     st = b.step()
-    assert st["match_rate"] == 0.5          # 2*min(3,1)/(3+1)
+    assert st["match_events"] == 0.5        # 2*min(3,1)/(3+1)
+    assert st["match_rate"] is None         # no contracts filled yet
 
 
 def test_unmatched_inventory_marks_against_us(tmp_path, monkeypatch):
@@ -298,3 +301,43 @@ def test_fill_counters_survive_a_restart(tmp_path, monkeypatch):
     b2 = _bot(tmp_path, monkeypatch)
     assert b2.stats["fills_bid"] == 1 and b2.stats["fills_ask"] == 1
     assert b2.stats["fills_strict"] == 2
+
+
+def test_wide_books_get_a_competitive_quote_not_a_silly_one(
+        tmp_path, monkeypatch):
+    """8/20 audit: a 25c book was producing a 23c-wide 'quote' that only
+    informed flow would ever cross."""
+    b = _bot(tmp_path, monkeypatch)
+    b.quote([_mk(yb=27, ya=52)])                  # 25c wide
+    q = b.quotes["KXMLBGAME-T1"]
+    assert q["ask"] - q["bid"] <= ph.MAX_WIDTH_C
+    assert q["bid"] > 27 and q["ask"] < 52        # inside their market
+    assert b.stats["tightened"] == 1
+
+
+def test_match_rate_is_contract_weighted(tmp_path, monkeypatch):
+    """One 2-lot fill + one 20-lot fill is not a 100% matched book."""
+    b = _bot(tmp_path, monkeypatch)
+    b.quote([_mk(yb=45, ya=55)])
+    b.check_fills([_tr(px=44, side="no", cnt=2, tid="b1"),
+                   _tr(px=57, side="yes", cnt=10, tid="a1")])
+    monkeypatch.setattr(b, "fetch_markets",
+                        lambda: ([_mk(yb=45, ya=55)], 1))
+    monkeypatch.setattr(b, "fetch_trades", lambda s: [])
+    st = b.step()
+    assert st["match_events"] == 1.0        # one fill each side
+    assert st["match_rate"] == 0.333       # only 4 paired of 12 total
+    assert st["contracts"] == 12
+
+
+def test_net_reports_the_residual_against_the_spread(tmp_path, monkeypatch):
+    """Locked spread alone flatters the book; net is the truth."""
+    b = _bot(tmp_path, monkeypatch)
+    b.quote([_mk(yb=45, ya=55)])
+    b.check_fills([_tr(px=44, side="no", cnt=10, tid="b1")])
+    monkeypatch.setattr(b, "fetch_markets",
+                        lambda: ([_mk(yb=20, ya=30)], 1))
+    monkeypatch.setattr(b, "fetch_trades", lambda s: [])
+    st = b.step()
+    assert st["net"] == round(st["locked"] + st["unreal"], 2)
+    assert st["net"] < 0

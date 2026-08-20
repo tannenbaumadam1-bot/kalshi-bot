@@ -1103,12 +1103,13 @@ async function load(){
     $('phmode').innerHTML='<span class=chip style="background:rgba(139,124,246,.16);color:#a99bff">PAPER &middot; NO MONEY</span>'
       +' <span class=mut style="font-size:11px">era '+(P.era||'phantom1')+' &middot; two-sided quoting on MLB + tennis props &middot; fills only when a REAL print trades through us &middot; being the book for retail</span>';
     $('phtiles').innerHTML=[
-      tile('Match rate',mr,'the KPI &middot; paired fills / all fills &middot; '+(P.fills_bid||0)+' bid / '+(P.fills_ask||0)+' ask'),
+      tile('Match rate',mr,'the KPI &middot; paired CONTRACTS / all contracts &middot; '+(P.contracts||0)+' filled &middot; by fill-event '+((P.match_events!=null)?(P.match_events*100).toFixed(0)+'%':'&ndash;')),
       tile('Phantom fills',(P.fills_strict||0)+' strict &middot; '+(P.fills_loose||0)+' loose','strict = traded THROUGH us &middot; '+(P.fills_per_h||0)+'/hr &middot; '+(P.trades_seen||0)+' prints seen'),
+      tile('Net','<span class="'+C(P.net)+'">'+M(P.net||0)+'</span>','locked spread '+M(P.locked||0)+' + residual mark '+M(P.unreal||0)+' &middot; THE number'),
       tile('Locked spread','<span class="'+C(P.locked)+'">'+M(P.locked||0)+'</span>','matched pairs '+(P.pairs||0)+' &middot; maker fees '+M(-(P.fees||0))+' &middot; unmatched '+(P.unmatched||0)),
       tile('Adverse (5m)',af,'price drift after our fills &middot; negative = we get picked off &middot; n='+((A.fast&&A.fast.n)||0)),
       tile('Surface',(P.quoted||0)+' quoted','of '+(P.quotable||0)+' quotable / '+(P.scanned||0)+' scanned &middot; mlb '+((P.by_sport||{}).mlb||0)+' &middot; tennis '+((P.by_sport||{}).tennis||0)),
-      tile('Unmatched mark','<span class="'+C(P.unreal)+'">'+M(P.unreal||0)+'</span>','directional residual &middot; '+(P.cluster_n||0)+' clusters &middot; quoting &ge;'+(R.min_spread||4)+'&cent; books, '+(R.size||10)+' lots')
+      tile('Unmatched mark','<span class="'+C(P.unreal)+'">'+M(P.unreal||0)+'</span>','directional residual &middot; '+(P.cluster_n||0)+' clusters &middot; quoting '+(R.min_spread||4)+'-'+(R.max_width||8)+'&cent; wide, '+(R.size||10)+' lots &middot; '+(P.tightened||0)+' tightened')
     ].join('');
     $('phq').innerHTML=((P.examples)||[]).map(q=>'<tr><td>'+(q.title||q.tk)+'</td>'
       +'<td><span class=chip style="background:rgba(125,144,173,.15);color:var(--mut)">'+(q.sport||'')+'</span></td>'

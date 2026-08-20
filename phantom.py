@@ -80,6 +80,13 @@ MIN_PX_C = int(os.environ.get("PHANTOM_MIN_PX", "8"))
 MAX_PX_C = int(os.environ.get("PHANTOM_MAX_PX", "92"))
 SIZE = int(os.environ.get("PHANTOM_SIZE", "10"))      # phantom lots/side
 MAX_QUOTES = int(os.environ.get("PHANTOM_MAX_QUOTES", "400"))
+# 8/20 audit: in a 25c-wide book, stepping 1c inside each side posts a
+# 23c-wide "quote" that no ordinary customer will ever cross - only
+# someone who knows something will. Those fills are pure adverse
+# selection and they poison the adverse metric. Real makers quote
+# COMPETITIVELY or not at all, so cap our own width and let the extra
+# room sit on the market's side of the spread.
+MAX_WIDTH_C = int(os.environ.get("PHANTOM_MAX_WIDTH", "8"))
 # adverse-selection clocks
 ADV_FAST_S = int(os.environ.get("PHANTOM_ADV_FAST", "300"))     # 5 min
 ADV_SLOW_S = int(os.environ.get("PHANTOM_ADV_SLOW", "1800"))    # 30 min
@@ -327,6 +334,12 @@ class PhantomBook:
             bid, ask = yb + EDGE_C, ya - EDGE_C
             if ask - bid < 2:          # no overround left after stepping in
                 continue
+            if ask - bid > MAX_WIDTH_C:
+                # tighten toward the mid until we're a real quote
+                mid = (yb + ya) / 2.0
+                bid = int(round(mid - MAX_WIDTH_C / 2.0))
+                ask = bid + MAX_WIDTH_C
+                self.stats["tightened"] = self.stats.get("tightened", 0) + 1
             self.quotes[m["tk"]] = {
                 "bid": bid, "ask": ask, "ts": time.time(),
                 "mid": (yb + ya) / 2.0, "left_b": SIZE, "left_a": SIZE,
@@ -530,7 +543,14 @@ class PhantomBook:
         tot_fills = fs + fl
         # match rate: how much of our filled flow paired off. THE number.
         fb, fa = self.stats["fills_bid"], self.stats["fills_ask"]
+        # 8/20 audit: the event-weighted rate treats a 3-lot fill and a
+        # 100-lot fill as equals and read 67% while the book was only
+        # 39% paired BY CONTRACT. Contracts are what carry risk, so the
+        # contract-weighted number is the headline and the event one is
+        # kept beside it.
         match_rate = (2.0 * min(fb, fa) / (fb + fa)) if (fb + fa) else None
+        tot_ct = 2 * bk["pairs"] + bk["unmatched"]
+        match_ct = (2.0 * bk["pairs"] / tot_ct) if tot_ct else None
         hrs = max(1e-9, (time.time() - self._t0) / 3600.0)
         by_sport = {}
         for m in mkts:
@@ -545,12 +565,17 @@ class PhantomBook:
             "hot_series": len(self.hot), "flow": dict(self.flow),
             "fills_strict": fs, "fills_loose": fl,
             "fills_bid": fb, "fills_ask": fa,
-            "match_rate": (round(match_rate, 3)
-                           if match_rate is not None else None),
+            "match_rate": (round(match_ct, 3)
+                           if match_ct is not None else None),
+            "match_events": (round(match_rate, 3)
+                             if match_rate is not None else None),
+            "contracts": tot_ct,
             "pairs": bk["pairs"], "locked": round(bk["locked_c"] / 100, 2),
             "fees": round(bk["fees_c"] / 100, 2),
             "unmatched": bk["unmatched"],
             "unreal": round(bk["unreal_c"] / 100, 2),
+            "net": round((bk["locked_c"] + bk["unreal_c"]) / 100, 2),
+            "tightened": self.stats.get("tightened", 0),
             "clusters": bk["clusters"], "cluster_n": bk["cluster_n"],
             "adverse": self._adverse_summary(),
             "spreads": self._spread_profile(mkts),
@@ -561,6 +586,7 @@ class PhantomBook:
             "rules": {"min_spread": MIN_SPREAD_C, "edge": EDGE_C,
                       "size": SIZE, "band": [MIN_PX_C, MAX_PX_C],
                       "max_quotes": MAX_QUOTES,
+                      "max_width": MAX_WIDTH_C,
                       "maker_rate": MAKER_RATE},
             "examples": [
                 {"tk": tk, "title": q["title"], "sport": q["sport"],
