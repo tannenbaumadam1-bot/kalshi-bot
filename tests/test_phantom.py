@@ -847,9 +847,12 @@ def test_budget_flows_to_the_lane_that_earns(tmp_path, monkeypatch):
     runs size where the edge is measured and starves the rest."""
     b = _bot(tmp_path, monkeypatch)
     b.last = {"by_lane": {
-        "fav":   {"pairs": 400, "per_pair_c": 1.5},
-        "wide":  {"pairs": 400, "per_pair_c": 0.5},
-        "tight": {"pairs": 400, "per_pair_c": -0.9}}}
+        "fav":   {"pairs": 400, "unmatched": 0, "mkts": 50, "spread": 6.0,
+                  "risk": 0.0},
+        "wide":  {"pairs": 400, "unmatched": 0, "mkts": 50, "spread": 2.0,
+                  "risk": 0.0},
+        "tight": {"pairs": 400, "unmatched": 0, "mkts": 50, "spread": -4.0,
+                  "risk": 0.0}}}
     got, mode = b._lane_budgets()
     assert mode == "earned"
     assert got["fav"] > got["wide"] > got["tight"]
@@ -860,9 +863,13 @@ def test_budget_flows_to_the_lane_that_earns(tmp_path, monkeypatch):
 def test_every_lane_keeps_a_floor_so_evidence_never_stops(tmp_path,
                                                           monkeypatch):
     b = _bot(tmp_path, monkeypatch)
-    b.last = {"by_lane": {"fav": {"pairs": 999, "per_pair_c": 5.0},
-                          "wide": {"pairs": 999, "per_pair_c": -2.0},
-                          "tight": {"pairs": 999, "per_pair_c": -3.0}}}
+    b.last = {"by_lane": {
+        "fav": {"pairs": 999, "unmatched": 0, "mkts": 9, "spread": 5.0,
+                "risk": 0.0},
+        "wide": {"pairs": 999, "unmatched": 0, "mkts": 9, "spread": -2.0,
+                 "risk": 0.0},
+        "tight": {"pairs": 999, "unmatched": 0, "mkts": 9, "spread": -3.0,
+                  "risk": 0.0}}}
     got, _ = b._lane_budgets()
     assert min(got.values()) >= ph.LANE_FLOOR
 
@@ -870,7 +877,8 @@ def test_every_lane_keeps_a_floor_so_evidence_never_stops(tmp_path,
 def test_thin_evidence_falls_back_to_base_budgets(tmp_path, monkeypatch):
     """Never reallocate on noise."""
     b = _bot(tmp_path, monkeypatch)
-    b.last = {"by_lane": {"fav": {"pairs": 3, "per_pair_c": 40.0}}}
+    b.last = {"by_lane": {"fav": {"pairs": 3, "unmatched": 1, "mkts": 1,
+                                  "spread": 9.0, "risk": 0.0}}}
     got, mode = b._lane_budgets()
     assert mode == "base" and got == ph.LANE_BUDGET
 
@@ -927,3 +935,22 @@ def test_both_favorite_sides_are_quotable(tmp_path, monkeypatch):
              _mk(tk="NOFAV", yb=9, ya=12)])
     assert {q["lane"] for q in b.quotes.values()} == {"fav"}
     assert len(b.quotes) == 2
+
+
+def test_allocator_can_actually_see_the_favorite_lane(tmp_path,
+                                                      monkeypatch):
+    """8/21 pre-run catch: scoring on cents-per-PAIR made the fav lane
+    invisible. It accumulates and waits for drift, so its pairs stay
+    near zero for hours - the allocator would have starved the one lane
+    the book was rebuilt around, however much money it made."""
+    b = _bot(tmp_path, monkeypatch)
+    b.last = {"by_lane": {
+        # fav: no pairs at all, plenty of contracts, clearly profitable
+        "fav":   {"pairs": 0, "unmatched": 400, "mkts": 40,
+                  "spread": 0.0, "risk": 12.0, "per_pair_c": None},
+        "tight": {"pairs": 500, "unmatched": 100, "mkts": 40,
+                  "spread": -5.0, "risk": -1.0, "per_pair_c": -0.5}}}
+    got, mode = b._lane_budgets()
+    assert mode == "earned"
+    assert got["fav"] > got["tight"]
+    assert got["tight"] == ph.LANE_FLOOR

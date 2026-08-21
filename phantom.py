@@ -189,7 +189,10 @@ LANE_BUDGET = {"fav": int(os.environ.get("PHANTOM_BUDGET_FAV", "320")),
 # the floor. Same logic as the live book's bucket gating, applied to
 # attention instead of capital.
 LANE_FLOOR = int(os.environ.get("PHANTOM_LANE_FLOOR", "60"))
-LANE_MIN_PAIRS = int(os.environ.get("PHANTOM_LANE_MIN_PAIRS", "150"))
+# judge a lane on CONTRACTS traded, not pairs: the fav lane holds for
+# hours and pairs late, so a pair-based threshold would silently starve
+# the one lane we built the book around.
+LANE_MIN_CT = int(os.environ.get("PHANTOM_LANE_MIN_CT", "200"))
 # CAPITAL RECYCLING. Collateral parked in a position that will not clear
 # is collateral that cannot turn, and turnover IS the business. Any
 # position still open after AGE_CLEAR_S gets an extra shove toward flat
@@ -933,9 +936,21 @@ class PhantomBook:
         rep = (self.last or {}).get("by_lane") or {}
         pos = {}
         for ln, L in rep.items():
-            if ((L.get("pairs") or 0) >= LANE_MIN_PAIRS
-                    and (L.get("per_pair_c") or 0) > 0):
-                pos[ln] = L["per_pair_c"]
+            # 8/21: scoring on cents-per-PAIR could never see the fav
+            # lane. Fav doesn't scalp a spread - it accumulates and waits
+            # for the favorite to drift into a 96c ask, so its pairs stay
+            # near zero for hours and the allocator would have starved
+            # it forever no matter how much money it made. Score every
+            # lane on the money it actually produced per market quoted,
+            # and let CONTRACTS (not pairs) decide when there's enough
+            # sample to judge.
+            ct = 2 * (L.get("pairs") or 0) + (L.get("unmatched") or 0)
+            if ct < LANE_MIN_CT:
+                continue
+            pnl = (L.get("spread") or 0) + (L.get("risk") or 0)
+            per_q = pnl / max(1, L.get("mkts") or 1)
+            if per_q > 0:
+                pos[ln] = per_q
         if not pos:
             return base, "base"
         pot = max(0, MAX_QUOTES - LANE_FLOOR * len(base))
