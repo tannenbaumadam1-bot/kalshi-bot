@@ -1123,6 +1123,7 @@ async function load(){
       tile('Phantom fills',(P.fills_strict||0)+' strict &middot; '+(P.fills_loose||0)+' loose','strict = traded THROUGH us &middot; '+(P.fills_per_h||0)+'/hr &middot; '+(P.trades_seen||0)+' prints seen'),
       tile('Spread earned','<span class="'+C(P.spread_pnl)+'">'+M(P.spread_pnl||0)+'</span>','THE thesis &middot; '+(P.pairs||0)+' paired contracts &middot; '+((P.per_pair_c!=null)?P.per_pair_c.toFixed(2)+'&cent;/pair after fees':'no pairs yet')),
       tile('Directional luck','<span class="'+C(P.risk_pnl)+'">'+M(P.risk_pnl||0)+'</span>','mark on '+(P.unmatched||0)+' UNPAIRED contracts &middot; not a strategy, a coin flip &middot; net '+M(P.net||0)),
+      tile('Spread vs fees',((P.per_pair_c!=null)?P.per_pair_c.toFixed(2)+'&cent;':'&ndash;')+' <span class=mut style="font-size:12px">net/pair</span>','gross '+(((P.spread_pnl!=null&&P.fees!=null&&P.pairs)?((P.spread_pnl+P.fees)/P.pairs*100):0).toFixed(2))+'&cent; &minus; fees '+(((P.fees&&P.pairs)?(P.fees/P.pairs*100):0).toFixed(2))+'&cent; &middot; Kalshi&rsquo;s fee peaks at 50&cent;'),
       tile('Fees paid','<span class=neg>'+M(-(P.fees||0))+'</span>','maker rate '+((R.maker_rate||0.0175)*100).toFixed(2)+'% &middot; '+(P.contracts||0)+' contracts &middot; refused: '+(P.pos_capped||0)+' at cap, '+(P.stale_skipped||0)+' stale &middot; '+(P.widened||0)+' backed off after a hit'),
       tile('Adverse (5m)',af,'price drift after our fills &middot; negative = we get picked off &middot; n='+((A.fast&&A.fast.n)||0)),
       tile('Surface',(P.quoted||0)+' quoted','of '+(P.quotable||0)+' quotable / '+(P.scanned||0)+' scanned &middot; mlb '+((P.by_sport||{}).mlb||0)+' &middot; tennis '+((P.by_sport||{}).tennis||0)),
@@ -1146,7 +1147,8 @@ async function load(){
       +'<td class=num><span class="'+C(r.pnl)+'">'+M(r.pnl||0)+'</span></td></tr>').join('')
       ||'<tr><td colspan=9 class=empty>Nothing settled yet &mdash; positions bank when their game finishes&hellip;</td></tr>';
     $('phlane').innerHTML=Object.keys(P.by_lane||{}).sort().map(k=>{const L=P.by_lane[k];
-      return '<tr><td>'+(k==='wide'?'<span class=chip style="background:rgba(139,124,246,.16);color:#a99bff">WIDE &ge;4&cent;</span>':'<span class=chip style="background:rgba(47,208,140,.13);color:var(--grn)">TIGHT 1-3&cent;</span>')+'</td>'
+      const chip=(k==='fav')?'<span class=chip style="background:rgba(240,163,60,.16);color:#f0a33c">FAV 80-95&cent;</span>':(k==='wide'?'<span class=chip style="background:rgba(139,124,246,.16);color:#a99bff">WIDE &ge;4&cent;</span>':'<span class=chip style="background:rgba(47,208,140,.13);color:var(--grn)">TIGHT 1-3&cent;</span>');
+      return '<tr><td>'+chip+'</td>'
       +'<td class=num>'+(L.quoted||0)+'</td><td class=num>'+(L.pairs||0)+'</td>'
       +'<td class=num>'+(L.unmatched||0)+'</td>'
       +'<td class=num>'+((L.match!=null)?(L.match*100).toFixed(0)+'%':'&ndash;')+'</td>'

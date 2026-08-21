@@ -69,7 +69,10 @@ ROTATE_N = int(os.environ.get("PHANTOM_ROTATE", "30"))
 MAX_SERIES = int(os.environ.get("PHANTOM_MAX_SERIES", "60"))
 _SERIES_RX = re.compile(r"MLB|BASEBALL|ATP|WTA|TENNIS|USOPEN", re.I)
 TRADE_PAGES = int(os.environ.get("PHANTOM_TRADE_PAGES", "4"))
-# phantom4 (Adam: "reset the paper money to $100 and start flat") is the
+# phantom5: the favorite lane. phantom4 was correct and still lost, for
+# a reason no amount of correctness fixes - see FAV_LO_C below. Fresh
+# ledger so the new shape is graded on its own tape.
+# phantom4 (Adam: "reset the paper money to $100 and start flat") was the
 # first ledger with every constraint correct from cycle 1.
 # phantom2 discarded phantom1 (LOOK-AHEAD bug: quotes posted now, then
 # filled against prints from the previous 15 minutes). phantom3 discards
@@ -77,7 +80,7 @@ TRADE_PAGES = int(os.environ.get("PHANTOM_TRADE_PAGES", "4"))
 # existed and under a capital formula that double-counted paired
 # positions the exchange would have netted flat. A ledger built over a
 # broken constraint can't be repaired in place - it has to restart.
-ERA = "phantom4"
+ERA = "phantom5"
 
 # --- quoting policy (all in cents) ---
 # Only quote where the market is wide enough that stepping inside still
@@ -85,7 +88,10 @@ ERA = "phantom4"
 MIN_SPREAD_C = int(os.environ.get("PHANTOM_MIN_SPREAD", "4"))
 EDGE_C = int(os.environ.get("PHANTOM_EDGE", "1"))     # improve by this
 MIN_PX_C = int(os.environ.get("PHANTOM_MIN_PX", "8"))
-MAX_PX_C = int(os.environ.get("PHANTOM_MAX_PX", "92"))
+# 92 -> 97 (8/21). The old ceiling existed to keep a MID-BAND maker out
+# of the expensive tails; it was excluding exactly the favorite band the
+# fav lane is built to trade. A 92/94 book was being refused outright.
+MAX_PX_C = int(os.environ.get("PHANTOM_MAX_PX", "97"))
 SIZE = int(os.environ.get("PHANTOM_SIZE", "10"))      # phantom lots/side
 MAX_QUOTES = int(os.environ.get("PHANTOM_MAX_QUOTES", "400"))
 # 8/20 audit: in a 25c-wide book, stepping 1c inside each side posts a
@@ -139,6 +145,37 @@ BOOK_CAPITAL_C = int(os.environ.get("PHANTOM_CAPITAL", "10000"))
 # rotation the WIDE lane - the one that looked profitable - stops being
 # measured at all.
 ROTATE_FAST = int(os.environ.get("PHANTOM_ROTATE_FAST", "12"))
+# ---- 8/21 THE FAVORITE LANE (era phantom5) ----------------------------
+# 20 hours of tape gave a verdict with no ambiguity left in it:
+#     2,062 pairs | gross +$11.26 (0.55c/pair) | fees -$19.66 (0.95c)
+# The exchange took 1.7x what we captured. That is not an execution
+# problem to out-clever; Kalshi's fee is 0.07 x P x (1-P), a parabola
+# whose PEAK is exactly 50c - and we built a book that quotes the mid.
+# We were being the house in the most expensive square on the board.
+#
+# At 90c the maker fee is 0.16c instead of 0.44c, so a 2c spread nets
+# 1.69c instead of 1.12c and even a 1c spread survives (0.68c vs 0.12c).
+# And it happens to be where our LIVE book has made every dollar it has
+# ever made: buy the 85-95c favorite, sell it into the drift toward
+# resolution. Sports moneylines JUMP (that's why sports1 died) but an
+# IN-PLAY favorite grinds toward 100 as the game eats outs - the same
+# convergence the weather book harvests all day.
+#
+# So the fav lane doesn't make a market. It runs Leonard's shape:
+# accumulate on the bid in the favorite band, then rest the ask on the
+# live book's ladder instead of a penny above mid.
+FAV_LO_C = int(os.environ.get("PHANTOM_FAV_LO", "80"))
+FAV_HI_C = int(os.environ.get("PHANTOM_FAV_HI", "95"))
+FAV_ASK_MIN_C = int(os.environ.get("PHANTOM_FAV_ASK_MIN", "96"))
+FAV_MARKUP_C = int(os.environ.get("PHANTOM_FAV_MARKUP", "6"))
+ASK_CAP_C = 99
+# reserved quote budget per lane. The rotation slice did NOT fix the
+# sampling problem: wide got 8 quotes out of 400 because tight books
+# are sorted first by volume and volume lives in penny books. A lane
+# with no slots is a lane with no evidence.
+LANE_BUDGET = {"fav": int(os.environ.get("PHANTOM_BUDGET_FAV", "180")),
+               "wide": int(os.environ.get("PHANTOM_BUDGET_WIDE", "120")),
+               "tight": int(os.environ.get("PHANTOM_BUDGET_TIGHT", "100"))}
 # a mark older than this is not a price, it's a memory. The 8/17 live
 # book showed a $137 "all-time high" that was entirely stale marks; the
 # real NAV was $117. Never let that happen silently again.
@@ -437,6 +474,7 @@ class PhantomBook:
         book - there is nothing to be the other side OF."""
         self.quotes = {}
         quotable = 0
+        used = {}
         now = time.time()
         for m in sorted(mkts, key=lambda r: -_num(r.get("vol"))):
             yb, ya = m["yb"], m["ya"]
@@ -447,11 +485,31 @@ class PhantomBook:
             spread = ya - yb
             if spread < TIGHT_MIN_C:
                 continue
-            lane = "wide" if spread >= MIN_SPREAD_C else "tight"
+            mid0 = (yb + ya) / 2.0
+            if FAV_LO_C <= mid0 <= FAV_HI_C:
+                lane = "fav"
+            elif spread >= MIN_SPREAD_C:
+                lane = "wide"
+            else:
+                lane = "tight"
             quotable += 1
             if len(self.quotes) >= MAX_QUOTES:
                 continue
-            if lane == "wide":
+            # reserved slots: a lane with no budget is a lane with no
+            # evidence, and that is how we spent a day disproving the
+            # cheap lane while never testing the expensive one
+            if used.get(lane, 0) >= LANE_BUDGET.get(lane, MAX_QUOTES):
+                continue
+            if lane == "fav":
+                # Leonard's shape, not a market maker's: accumulate on
+                # the bid, rest the ask on the ladder and let the
+                # favorite drift into it.
+                bid = yb + EDGE_C
+                ask = min(ASK_CAP_C,
+                          max(FAV_ASK_MIN_C, int(round(mid0)) + FAV_MARKUP_C))
+                if ask <= bid:
+                    continue
+            elif lane == "wide":
                 bid, ask = yb + EDGE_C, ya - EDGE_C
                 if ask - bid < 2:      # no overround left after stepping in
                     continue
@@ -481,6 +539,7 @@ class PhantomBook:
                 "mid": (yb + ya) / 2.0, "left_b": SIZE, "left_a": SIZE,
                 "sport": m["sport"], "event": m["event"], "skew": sk,
                 "title": m["title"], "mspread": spread}
+            used[lane] = used.get(lane, 0) + 1
         self.stats["quoted"] += len(self.quotes)
         return quotable
 

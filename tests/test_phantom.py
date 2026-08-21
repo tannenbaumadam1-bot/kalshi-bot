@@ -773,4 +773,68 @@ def test_daily_pnl_series_records_the_shape(tmp_path, monkeypatch):
 def test_book_starts_at_one_hundred_dollars():
     """Adam, 8/20: 'reset the paper money to $100 and start flat'."""
     assert ph.BOOK_CAPITAL_C == 10000
-    assert ph.ERA == "phantom4"
+    assert ph.ERA == "phantom5"      # 8/21: the favorite lane
+
+
+# ---------------- 8/21: the favorite lane ----------------
+
+def test_favorite_lane_runs_leonards_shape(tmp_path, monkeypatch):
+    """Not a market maker's quote: accumulate on the bid in the 80-95c
+    band, then rest the ask on the ladder and let the favorite drift
+    into it. This is the only shape that has ever made us money."""
+    b = _bot(tmp_path, monkeypatch)
+    b.quote([_mk(yb=88, ya=91)])              # mid 89.5 -> favorite
+    q = b.quotes["KXMLBGAME-T1"]
+    assert q["lane"] == "fav"
+    assert q["bid"] == 89                      # stepped inside their bid
+    assert q["ask"] >= ph.FAV_ASK_MIN_C        # the ladder, not mid+1
+    # and the width is the POINT, so the market-maker tightening that
+    # protects the other lanes must not apply here: an 80c favorite
+    # still rests its ask up at the ladder, 15c away.
+    b2 = _bot(tmp_path, monkeypatch)
+    b2.quote([_mk(yb=80, ya=83)])
+    q2 = b2.quotes["KXMLBGAME-T1"]
+    assert q2["lane"] == "fav" and q2["ask"] >= ph.FAV_ASK_MIN_C
+    assert q2["ask"] - q2["bid"] > ph.MAX_WIDTH_C
+
+
+def test_favorite_band_beats_the_mid_on_fees():
+    """The reason the lane exists: Kalshi's fee peaks at 50c."""
+    mid_fee = ph.fee_c(50, 100) + ph.fee_c(50, 100)
+    fav_fee = ph.fee_c(90, 100) + ph.fee_c(96, 100)
+    assert fav_fee < mid_fee / 2
+
+
+def test_lane_budgets_guarantee_every_lane_gets_evidence(tmp_path,
+                                                         monkeypatch):
+    """The rotation slice did not fix sampling: wide got 8 quotes of
+    400 because volume lives in penny books. Slots are reserved now."""
+    b = _bot(tmp_path, monkeypatch)
+    monkeypatch.setattr(ph, "LANE_BUDGET", {"fav": 2, "wide": 2,
+                                            "tight": 2})
+    mkts = ([_mk(tk=f"T{i}", yb=49, ya=51, vol=9000) for i in range(20)]
+            + [_mk(tk=f"W{i}", yb=45, ya=55, vol=5) for i in range(20)]
+            + [_mk(tk=f"F{i}", yb=88, ya=91, vol=5) for i in range(20)])
+    b.quote(mkts)
+    lanes = {}
+    for q in b.quotes.values():
+        lanes[q["lane"]] = lanes.get(q["lane"], 0) + 1
+    assert lanes == {"fav": 2, "wide": 2, "tight": 2}
+
+
+def test_favorite_lane_never_quotes_a_crossed_book(tmp_path, monkeypatch):
+    b = _bot(tmp_path, monkeypatch)
+    b.quote([_mk(yb=94, ya=95)])               # mid 94.5, ask floor 96
+    q = b.quotes.get("KXMLBGAME-T1")
+    if q:
+        assert q["ask"] > q["bid"]
+
+
+def test_the_favorite_band_is_actually_reachable(tmp_path, monkeypatch):
+    """8/21: MAX_PX_C=92 was refusing 92/94 and 94/96 books outright -
+    the fav lane existed but could not see most favorites."""
+    b = _bot(tmp_path, monkeypatch)
+    b.quote([_mk(tk="A", yb=92, ya=94), _mk(tk="B", yb=94, ya=96)])
+    assert len(b.quotes) == 2
+    for q in b.quotes.values():
+        assert q["lane"] == "fav" and q["ask"] > q["bid"]
