@@ -384,8 +384,31 @@ SELL_MIN_PROVEN_C = int(os.environ.get("DRIFT_LIVE_SELL_MIN_PROVEN", "96"))
 # (below every sell floor), so it must not consume the open-cap budget
 # that live inventory needs. It still settles normally.
 DUST_MAX_ENTRY_C = int(os.environ.get("DRIFT_LIVE_DUST_ENTRY_C", "3"))
-NICKEL_SELL_MIN_C = int(os.environ.get("DRIFT_LIVE_NICKEL_SELL_MIN", "98"))
-SELL_MARKUP_C = int(os.environ.get("DRIFT_LIVE_SELL_MARKUP", "6"))
+# 8/21 (Adam: "please ship it") - THE SETTLES->LIFTS CONVERSION.
+# The autopsy segmented all 462 turns by how they ended:
+#     lift   334  +$67.88  (+0.027/capital-hour)  = +$0.203 each
+#     settle 112  -$73.56  (-0.033/capital-hour)  = -$0.657 each
+# Selling makes money and holding destroys it, by nearly the same
+# magnitude. So every constant below exists to move inventory OUT of
+# the settle column. Per-rung conversion says the same thing: 96c
+# converts at 1.22 lifts per placement vs 0.26 at 98 and 0.25 at 99,
+# and on EV per placement that is $0.238 vs $0.055 and $0.094.
+#
+# The cost of selling early is small and measured: across 197 graded
+# sales, selling instead of holding cost -$3.81 total (~2c a sale).
+# The cost of NOT selling is the -$73.56 settle tail. That is the trade.
+#
+# NICKEL FLOOR 98 -> 96. The old comment here said "21-0, do not touch
+# a perfect lane". That is stale: the lane is now 7W/1L and NET
+# -$6.07, because the single loss (-$9.32, an overnight low) ate seven
+# wins. A 93c nickel quoting at 99 almost never lifts, so it settles -
+# and settling is exactly where its losses come from.
+# REVERT: DRIFT_LIVE_NICKEL_SELL_MIN=98 DRIFT_LIVE_SELL_MARKUP=6
+NICKEL_SELL_MIN_C = int(os.environ.get("DRIFT_LIVE_NICKEL_SELL_MIN", "96"))
+# markup 6 -> 4: an 88c entry could not be quoted below 94c no matter
+# what the decay ladder said, so mid-band inventory had no path out
+# except settlement.
+SELL_MARKUP_C = int(os.environ.get("DRIFT_LIVE_SELL_MARKUP", "4"))
 SELL_CAP_C = 99
 # 8/11 OFFER LADDER (Adam-approved): night one lifted 60% of quotes at
 # a flat 97c - the shelf was priced too low. Quotes now split across
@@ -408,11 +431,30 @@ DECAY_ON = os.environ.get("DRIFT_LIVE_SELL_DECAY", "1") == "1"
 # steps track the clock closely enough to behave like a continuous walk.
 # The lane floor in _sell_rungs still binds, so a nickel never quotes
 # below 98 no matter what this table says.
-DECAY_LADDER = ((6.0, 98, 99), (3.0, 98, 99), (1.5, 96, 98),
-                (0.5, 95, 97), (0.0, 94, 96))
+# 8/21: the walk starts EARLIER and goes LOWER. The old table held 98
+# until 1.5h before close, which meant a position bought in the morning
+# spent its whole life quoted above where it would ever trade, then
+# settled. Each tier now steps a cent sooner.
+DECAY_LADDER = ((6.0, 97, 99), (3.0, 96, 98), (1.5, 95, 97),
+                (0.5, 94, 96), (0.0, 92, 95))
 # dip lane: context-only was the training-wheels version - inventory is
 # the constraint, so any scanned favorite is now fair game
 DIP_CONTEXT_ONLY = os.environ.get("DRIFT_LIVE_DIP_CONTEXT", "0") == "1"
+
+
+def _git_build():
+    """Short SHA of the running code. 8/21: verifying a deploy meant
+    inferring it from behaviour; publish the build instead."""
+    try:
+        import subprocess
+        return subprocess.check_output(
+            ["git", "rev-parse", "--short", "HEAD"],
+            stderr=subprocess.DEVNULL, timeout=5).decode().strip()
+    except Exception:
+        return "?"
+
+
+_BUILD = _git_build()
 CYCLE_S = int(os.environ.get("DRIFT_LIVE_CYCLE_S", "600"))
 # 8/13 velocity: during US trading hours the book re-scans every
 # ACTIVE_CYCLE_S instead of the full nap - more requotes, more lifts,
@@ -1370,6 +1412,7 @@ class DriftLive:
                  # 8/15: per-ask-price conversion. offers_placed also
                  # counts decay requotes, so the "20% conversion" figure
                  # was never real - this is.
+                 "build": _BUILD,
                  "rungs": self._rung_summary(),
                  "dust": round(self.dust_c() / 100.0, 2),
                  "rebid_n": len(getattr(self, "rebid", None) or {}),

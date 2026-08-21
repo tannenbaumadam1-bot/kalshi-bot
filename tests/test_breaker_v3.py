@@ -219,7 +219,10 @@ def test_metric_cap_counts_exchange_view_via_ticker(tmp_path, monkeypatch):
 
 def test_97_rung_is_gone_from_the_base_ladder():
     assert dl.SELL_MIN_C >= 98
-    assert all(lo != 97 or h_min < 2.0
+    # 8/21: 97 is allowed again ONLY at the top tier (>=6h), where it
+    # replaced 98 to start the walk earlier. It must never be a
+    # mid-ladder rung.
+    assert all(lo != 97 or h_min >= 6.0 or h_min < 2.0
                for h_min, lo, hi in dl.DECAY_LADDER)
 
 

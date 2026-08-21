@@ -741,7 +741,11 @@ def test_settlement_receivable_bridges_nav(tmp_path, monkeypatch):
 
 def test_offer_defaults():
     assert dl.QUOTE_ON is True
-    assert dl.SELL_MIN_C == 98 and dl.NICKEL_SELL_MIN_C == 98
+    # 8/21 settles->lifts: nickel floor 98 -> 96 (the "21-0 perfect
+    # lane" note was stale; it is 7W/1L and NET -$6.07 because the one
+    # settle loss ate seven wins), markup 6 -> 4
+    assert dl.SELL_MIN_C == 98 and dl.NICKEL_SELL_MIN_C == 96
+    assert dl.SELL_MARKUP_C == 4
     assert dl.SELL_CAP_C == 99
 
 
@@ -1408,14 +1412,12 @@ def test_flatten_leaves_positions_with_time_left(tmp_path, monkeypatch):
 def test_sell_ladder_walks_down_as_close_approaches(tmp_path, monkeypatch):
     b = _bot(tmp_path, monkeypatch)
     pos = dict(_stale_order(entry=85, count=10), fee=0)
+    # 8/21: the walk starts earlier and goes lower, because a position
+    # quoted above where it will ever trade just settles (-$0.657) when
+    # a lift is worth +$0.203.
     assert [r[0] for r in b._sell_rungs(pos, 8.0)] == [98, 99]
-    assert [r[0] for r in b._sell_rungs(pos, 3.0)] == [98, 99]
-    # 8/15 finer ladder: 1.0h now lands on the 0.5h rung (95/97),
-    # and 2.0h on the new 1.5h rung (96/98)
-    assert [r[0] for r in b._sell_rungs(pos, 1.0)] == [95, 97]
-    # at 2.0h the SELL_MIN_C floor (98 since 8/17) binds over the 96
-    # rung AND meets the tier's 98 ceiling, so the two rungs collapse
-    # into one full-size 98 leg (unproven lane keeps the floor)
+    assert [r[0] for r in b._sell_rungs(pos, 3.0)] == [98]
+    assert [r[0] for r in b._sell_rungs(pos, 1.0)] == [94, 96]
     assert [r[0] for r in b._sell_rungs(pos, 2.0)] == [98]
     # never at or below cost
     assert b._sell_rungs(dict(pos, entry=99), 1.0) is None
@@ -1429,7 +1431,7 @@ def test_decay_requote_replaces_stale_rungs(tmp_path, monkeypatch):
     b.quote_offers([_mk(tk=tk, hrs=8.0)])
     assert b.offers[tk]["rungs"] == [98, 99]
     b.quote_offers([_mk(tk=tk, hrs=1.0)])     # time ran on: walk it down
-    assert b.offers[tk]["rungs"] == [95, 97]
+    assert b.offers[tk]["rungs"] == [94, 96]
     assert b.exec_stats.get("decay_requotes") == 1
     assert "L1" not in b.client.canceled       # (old legs were of-* ids)
 
@@ -2183,17 +2185,18 @@ def _rungs_book():
 
 
 def test_proven_lane_may_quote_a_cent_lower():
-    """96 on proven lanes only. Nickels stay 98 - never loosen a 21-0
-    lane. Unproven lanes keep the 98 floor (8/17: the 97 rung is
-    retired), so this is a probe on earned ground."""
+    """96 on proven lanes only; unproven lanes keep the 98 floor, so
+    this is a probe on earned ground. (8/21: nickels no longer stay at
+    98 - see test_offer_defaults for why that note went stale.)"""
     b = _rungs_book()
     proven = {"level:80-84": {"n": 47, "wins": 43, "net": 13.5,
                               "blocked": False}}
     b.history = [{"tk": f"T{i}", "ots": f"o{i}", "trig": "level",
                   "entry": 82, "pnl": 0.29} for i in range(47)]
     pos = {"entry": 82, "count": 4, "trig": "level"}
-    # far from close the ladder's own 98 rung dominates either way
-    assert b._sell_rungs(pos, 8.0)[0][0] == 98
+    # far from close the ladder's own top rung dominates either way
+    # (8/21: that top rung is 97, not 98 - the walk starts earlier)
+    assert b._sell_rungs(pos, 8.0)[0][0] == 97
     # NOTE: below 2h the floor deliberately relaxes to 1 so the book can
     # flatten, so the lane floor only bites at >= 2h. At 2.0h the ladder
     # offers 96 and a PROVEN lane is allowed to take it.
