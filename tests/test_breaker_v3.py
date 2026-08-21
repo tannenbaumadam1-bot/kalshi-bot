@@ -680,3 +680,26 @@ def test_silent_mechanisms_publish_zeros(tmp_path, monkeypatch):
     b = _bot(tmp_path, monkeypatch)
     for k in ("cuts", "mslate_capped", "dip_capped", "ovn_lo_blocked"):
         assert b.exec_stats.get(k) == 0, k
+
+
+def test_ovn_block_covers_the_nickel_lane(tmp_path, monkeypatch):
+    """8/21 autopsy: the guard sat inside the non-nickel sizing branch,
+    so nickels walked past it. KXLOWTBOS 93c x10 settled -$9.32."""
+    b = _bot(tmp_path, monkeypatch)
+    monkeypatch.setattr(dl, "OVN_LO_MODE", "block")
+    b.dry_balance_c = 50000
+    lo = _mk(tk="KXLOWTBOS-26AUG21-T66", bid=93, ask=95, city="boston",
+             is_low=True, hrs=14.0)          # overnight, nickel-priced
+    assert b.place(mkts=[lo]) == 0
+    assert b.exec_stats.get("ovn_lo_blocked", 0) >= 1
+    assert not b.bets and not b.pending
+
+
+def test_same_morning_lows_still_trade(tmp_path, monkeypatch):
+    """The block is about the overnight GAP, not about lows."""
+    b = _bot(tmp_path, monkeypatch)
+    monkeypatch.setattr(dl, "OVN_LO_MODE", "block")
+    b.dry_balance_c = 50000
+    lo = _mk(tk="KXLOWTBOS-26AUG21-T66", bid=87, ask=89, city="boston",
+             is_low=True, hrs=3.0)
+    assert b.place(mkts=[lo]) == 1

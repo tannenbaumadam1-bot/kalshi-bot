@@ -3402,6 +3402,21 @@ class DriftLive:
                     if (0 < ask_side - entry <= TAKER_MAX_SPREAD
                             and ask_side <= dp.DRIFT_MAX_ENTRY):
                         entry, exec_kind = ask_side, "taker"
+            # 8/21 HOLE FOUND IN AUTOPSY: the overnight-low block lived
+            # inside the non-nickel sizing branch, so the NICKEL lane
+            # walked straight past it. That is not academic - it put
+            # KXLOWTBOS-26AUG20-T66 (93c x10) on the book after the
+            # block shipped, and it settled -$9.32 this morning, most
+            # of the day's loss. Adam's policy applies to EVERY lane.
+            if OVN_LO_MODE == "block" and mk.get("is_low"):
+                try:
+                    _hh = float(mk.get("hrs"))
+                except (TypeError, ValueError):
+                    _hh = None
+                if _hh is not None and _hh > OVN_LO_H:
+                    self.exec_stats["ovn_lo_blocked"] = (
+                        self.exec_stats.get("ovn_lo_blocked", 0) + 1)
+                    continue
             # capital routing: never re-enter a bucket the live ledger has
             # already proven negative (n >= BUCKET_MIN_N, net < 0)
             if trig != "nickel" and self._bucket_blocked(bstats, trig, entry):
