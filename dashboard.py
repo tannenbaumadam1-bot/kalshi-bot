@@ -784,7 +784,8 @@ td.num,th.num{text-align:right}
 <table><thead><tr><th>Lane</th><th class=num>Quoted</th><th class=num>Paired</th>
 <th class=num>Unpaired</th><th class=num>Match</th><th class=num>Spread P&amp;L</th>
 <th class=num>&cent;/pair</th><th class=num>Adverse 5m</th><th class=num>Directional</th></tr></thead>
-<tbody id=phlane></tbody></table></div>
+<tbody id=phlane></tbody></table>
+<div class=mut style="font-size:11px;margin-top:6px">Quote budget is ALLOCATED by measured &cent;/pair once a lane has enough pairs to judge &mdash; earners grow, bleeders shrink to the floor. <span id=phbudget></span></div></div>
 <div style="margin-top:12px"><div class=t style="margin-bottom:6px">Positions &amp; P&amp;L (per market)</div>
 <table><thead><tr><th>Game</th><th>Market</th><th class=num>Bought</th><th class=num>Sold</th>
 <th class=num>Net</th><th class=num>Our px</th><th class=num>Mkt mid</th><th class=num>P&amp;L</th></tr></thead>
@@ -1126,6 +1127,7 @@ async function load(){
       tile('Spread vs fees',((P.per_pair_c!=null)?P.per_pair_c.toFixed(2)+'&cent;':'&ndash;')+' <span class=mut style="font-size:12px">net/pair</span>','gross '+(((P.spread_pnl!=null&&P.fees!=null&&P.pairs)?((P.spread_pnl+P.fees)/P.pairs*100):0).toFixed(2))+'&cent; &minus; fees '+(((P.fees&&P.pairs)?(P.fees/P.pairs*100):0).toFixed(2))+'&cent; &middot; Kalshi&rsquo;s fee peaks at 50&cent;'),
       tile('Fees paid','<span class=neg>'+M(-(P.fees||0))+'</span>','maker rate '+((R.maker_rate||0.0175)*100).toFixed(2)+'% &middot; '+(P.contracts||0)+' contracts &middot; refused: '+(P.pos_capped||0)+' at cap, '+(P.stale_skipped||0)+' stale &middot; '+(P.widened||0)+' backed off after a hit'),
       tile('Adverse (5m)',af,'price drift after our fills &middot; negative = we get picked off &middot; n='+((A.fast&&A.fast.n)||0)),
+      tile('Capital turnover',((P.velocity&&P.velocity.turns_h!=null)?P.velocity.turns_h.toFixed(2)+'x':'&ndash;')+' <span class=mut style="font-size:12px">/hr</span>','the desk number &middot; '+((P.velocity&&P.velocity.contracts_h)||0)+' contracts/hr &middot; '+((P.velocity&&P.velocity.pairs_h)||0)+' pairs/hr &middot; budget '+((P.velocity&&P.velocity.budget_mode)||'base')),
       tile('Surface',(P.quoted||0)+' quoted','of '+(P.quotable||0)+' quotable / '+(P.scanned||0)+' scanned &middot; mlb '+((P.by_sport||{}).mlb||0)+' &middot; tennis '+((P.by_sport||{}).tennis||0)),
       tile('Unmatched mark','<span class="'+C(P.unreal)+'">'+M(P.unreal||0)+'</span>','across '+(P.cluster_n||0)+' clusters &middot; caps '+(R.max_pos||20)+'/mkt, '+(R.max_cluster||40)+'/game &middot; quoting '+(R.min_spread||4)+'-'+(R.max_width||8)+'&cent; wide')
     ].join('');
@@ -1157,6 +1159,8 @@ async function load(){
       +'<td class=num>'+((L.adverse!=null)?'<span class="'+C(L.adverse)+'">'+L.adverse.toFixed(1)+'&cent;</span> <span class=mut style="font-size:10px">n='+(L.adv_n||0)+'</span>':'&ndash;')+'</td>'
       +'<td class=num><span class="'+C(L.risk)+'">'+M(L.risk||0)+'</span></td></tr>';}).join('')
       ||'<tr><td colspan=9 class=empty>No lane data yet&hellip;</td></tr>';
+    {const bg=(P.velocity&&P.velocity.budgets)||{};
+     $('phbudget').innerHTML=Object.keys(bg).sort().map(k=>k+' '+bg[k]).join(' &middot; ');}
     $('phpos').innerHTML=((P.positions)||[]).map(r=>'<tr><td class=mut>'+(r.event||'')+'</td>'
       +'<td>'+(r.title||r.tk)+'</td>'
       +'<td class=num>'+(r.bn||0)+'</td><td class=num>'+(r.sn||0)+'</td>'

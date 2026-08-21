@@ -838,3 +838,72 @@ def test_the_favorite_band_is_actually_reachable(tmp_path, monkeypatch):
     assert len(b.quotes) == 2
     for q in b.quotes.values():
         assert q["lane"] == "fav" and q["ask"] > q["bid"]
+
+
+# ---------------- 8/21: run it like a desk ----------------
+
+def test_budget_flows_to_the_lane_that_earns(tmp_path, monkeypatch):
+    """Adam wants SIG volume. A desk does not run size everywhere - it
+    runs size where the edge is measured and starves the rest."""
+    b = _bot(tmp_path, monkeypatch)
+    b.last = {"by_lane": {
+        "fav":   {"pairs": 400, "per_pair_c": 1.5},
+        "wide":  {"pairs": 400, "per_pair_c": 0.5},
+        "tight": {"pairs": 400, "per_pair_c": -0.9}}}
+    got, mode = b._lane_budgets()
+    assert mode == "earned"
+    assert got["fav"] > got["wide"] > got["tight"]
+    assert got["tight"] == ph.LANE_FLOOR          # a bleeder gets the floor
+    assert got["fav"] > ph.LANE_FLOOR * 3         # the earner gets the pot
+
+
+def test_every_lane_keeps_a_floor_so_evidence_never_stops(tmp_path,
+                                                          monkeypatch):
+    b = _bot(tmp_path, monkeypatch)
+    b.last = {"by_lane": {"fav": {"pairs": 999, "per_pair_c": 5.0},
+                          "wide": {"pairs": 999, "per_pair_c": -2.0},
+                          "tight": {"pairs": 999, "per_pair_c": -3.0}}}
+    got, _ = b._lane_budgets()
+    assert min(got.values()) >= ph.LANE_FLOOR
+
+
+def test_thin_evidence_falls_back_to_base_budgets(tmp_path, monkeypatch):
+    """Never reallocate on noise."""
+    b = _bot(tmp_path, monkeypatch)
+    b.last = {"by_lane": {"fav": {"pairs": 3, "per_pair_c": 40.0}}}
+    got, mode = b._lane_budgets()
+    assert mode == "base" and got == ph.LANE_BUDGET
+
+
+def test_old_inventory_gets_shoved_toward_flat(tmp_path, monkeypatch):
+    """Collateral that cannot turn is collateral that is not working."""
+    b = _bot(tmp_path, monkeypatch)
+    monkeypatch.setattr(ph, "HIT_COOLDOWN_S", 0)
+    b.quote([_mk(yb=45, ya=55)])
+    b.check_fills([_tr(px=44, side="no", cnt=10)])     # long 10
+    fresh = b._skew("KXMLBGAME-T1")
+    b.inv["KXMLBGAME-T1"]["age_ts"] = time.time() - ph.AGE_CLEAR_S * 2 - 1
+    old = b._skew("KXMLBGAME-T1")
+    assert old > fresh + 3            # a harder shove in the same direction
+    b.quote([_mk(yb=45, ya=55)])
+    assert b.quotes["KXMLBGAME-T1"]["ask"] < 54       # easier to sell out
+
+
+def test_going_flat_resets_the_age_clock(tmp_path, monkeypatch):
+    b = _bot(tmp_path, monkeypatch)
+    b.quote([_mk(yb=45, ya=55)])
+    b.check_fills([_tr(px=44, side="no", cnt=10, tid="b1")])
+    assert "age_ts" in b.inv["KXMLBGAME-T1"]
+    b.quote([_mk(yb=45, ya=55)])
+    b.check_fills([_tr(px=57, side="yes", cnt=10, tid="a1")])
+    assert "age_ts" not in b.inv["KXMLBGAME-T1"]
+
+
+def test_velocity_reports_capital_turnover(tmp_path, monkeypatch):
+    b = _bot(tmp_path, monkeypatch)
+    monkeypatch.setattr(b, "fetch_markets", lambda full=True: ([], 0))
+    monkeypatch.setattr(b, "fetch_trades", lambda s: [])
+    v = b.step()["velocity"]
+    for k in ("fills_h", "pairs_h", "contracts_h", "turns_h", "quotes",
+              "budget_mode", "budgets"):
+        assert k in v

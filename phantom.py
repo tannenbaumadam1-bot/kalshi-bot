@@ -65,8 +65,8 @@ CORE_SERIES = tuple(x for x in os.environ.get(
     "KXMLBGAME,KXMLBTOTAL,KXWTAMATCH,KXATPMATCH,"
     "KXATPCHALLENGERMATCH,KXWTACHALLENGERMATCH,KXATPSETWINNER,"
     "KXATPANYSET,KXATPTIEBREAK,KXATPACES,KXWTAACES").split(",") if x)
-ROTATE_N = int(os.environ.get("PHANTOM_ROTATE", "30"))
-MAX_SERIES = int(os.environ.get("PHANTOM_MAX_SERIES", "60"))
+ROTATE_N = int(os.environ.get("PHANTOM_ROTATE", "45"))
+MAX_SERIES = int(os.environ.get("PHANTOM_MAX_SERIES", "90"))
 _SERIES_RX = re.compile(r"MLB|BASEBALL|ATP|WTA|TENNIS|USOPEN", re.I)
 TRADE_PAGES = int(os.environ.get("PHANTOM_TRADE_PAGES", "4"))
 # phantom5: the favorite lane. phantom4 was correct and still lost, for
@@ -93,7 +93,7 @@ MIN_PX_C = int(os.environ.get("PHANTOM_MIN_PX", "8"))
 # fav lane is built to trade. A 92/94 book was being refused outright.
 MAX_PX_C = int(os.environ.get("PHANTOM_MAX_PX", "97"))
 SIZE = int(os.environ.get("PHANTOM_SIZE", "10"))      # phantom lots/side
-MAX_QUOTES = int(os.environ.get("PHANTOM_MAX_QUOTES", "400"))
+MAX_QUOTES = int(os.environ.get("PHANTOM_MAX_QUOTES", "700"))
 # 8/20 audit: in a 25c-wide book, stepping 1c inside each side posts a
 # 23c-wide "quote" that no ordinary customer will ever cross - only
 # someone who knows something will. Those fills are pure adverse
@@ -144,7 +144,7 @@ BOOK_CAPITAL_C = int(os.environ.get("PHANTOM_CAPITAL", "10000"))
 # prints, and 97% of prints are in 1-3c books, so without a slice of
 # rotation the WIDE lane - the one that looked profitable - stops being
 # measured at all.
-ROTATE_FAST = int(os.environ.get("PHANTOM_ROTATE_FAST", "12"))
+ROTATE_FAST = int(os.environ.get("PHANTOM_ROTATE_FAST", "20"))
 # ---- 8/21 THE FAVORITE LANE (era phantom5) ----------------------------
 # 20 hours of tape gave a verdict with no ambiguity left in it:
 #     2,062 pairs | gross +$11.26 (0.55c/pair) | fees -$19.66 (0.95c)
@@ -173,9 +173,30 @@ ASK_CAP_C = 99
 # sampling problem: wide got 8 quotes out of 400 because tight books
 # are sorted first by volume and volume lives in penny books. A lane
 # with no slots is a lane with no evidence.
-LANE_BUDGET = {"fav": int(os.environ.get("PHANTOM_BUDGET_FAV", "180")),
-               "wide": int(os.environ.get("PHANTOM_BUDGET_WIDE", "120")),
-               "tight": int(os.environ.get("PHANTOM_BUDGET_TIGHT", "100"))}
+LANE_BUDGET = {"fav": int(os.environ.get("PHANTOM_BUDGET_FAV", "320")),
+               "wide": int(os.environ.get("PHANTOM_BUDGET_WIDE", "220")),
+               "tight": int(os.environ.get("PHANTOM_BUDGET_TIGHT", "160"))}
+# ---- 8/21 RUN IT LIKE A DESK (Adam: "high volume like a Jane St or a
+# SIG... performing like a hedge fund and recycling capital all the
+# time") -----------------------------------------------------------
+# The trap in "more volume" is that volume on a NEGATIVE edge is just a
+# faster way to lose - phantom4 proved that at 2,062 pairs. A desk does
+# not run size everywhere; it runs size where the edge is measured and
+# starves the rest. So the quote budget is now ALLOCATED, not fixed:
+# every lane keeps a floor so it never stops generating evidence, and
+# the rest of the pot is split in proportion to each lane's measured
+# cents-per-pair. Lanes that earn get bigger; lanes that bleed shrink to
+# the floor. Same logic as the live book's bucket gating, applied to
+# attention instead of capital.
+LANE_FLOOR = int(os.environ.get("PHANTOM_LANE_FLOOR", "60"))
+LANE_MIN_PAIRS = int(os.environ.get("PHANTOM_LANE_MIN_PAIRS", "150"))
+# CAPITAL RECYCLING. Collateral parked in a position that will not clear
+# is collateral that cannot turn, and turnover IS the business. Any
+# position still open after AGE_CLEAR_S gets an extra shove toward flat
+# on top of the inventory skew - the phantom's version of the live
+# book's decay ladder.
+AGE_CLEAR_S = int(os.environ.get("PHANTOM_AGE_CLEAR", "900"))
+AGE_SKEW_C = int(os.environ.get("PHANTOM_AGE_SKEW", "4"))
 # a mark older than this is not a price, it's a memory. The 8/17 live
 # book showed a $137 "all-time high" that was entirely stale marks; the
 # real NAV was $117. Never let that happen silently again.
@@ -304,6 +325,7 @@ class PhantomBook:
         self._seen = set()    # trade ids already scored
         self._series, self._ser_ts, self._rot = [], 0.0, 0
         self.hit_ts = {}      # tk -> when flow last ran into our quote
+        self.budgets, self.budget_mode = dict(LANE_BUDGET), "base"
         self.resting = {}     # the quotes that were live LAST window
         self._last_ts = 0.0
         self.realized_c = 0.0  # settled, banked, never re-marked
@@ -475,6 +497,8 @@ class PhantomBook:
         self.quotes = {}
         quotable = 0
         used = {}
+        budgets, self.budget_mode = self._lane_budgets()
+        self.budgets = budgets
         now = time.time()
         for m in sorted(mkts, key=lambda r: -_num(r.get("vol"))):
             yb, ya = m["yb"], m["ya"]
@@ -498,7 +522,7 @@ class PhantomBook:
             # reserved slots: a lane with no budget is a lane with no
             # evidence, and that is how we spent a day disproving the
             # cheap lane while never testing the expensive one
-            if used.get(lane, 0) >= LANE_BUDGET.get(lane, MAX_QUOTES):
+            if used.get(lane, 0) >= budgets.get(lane, MAX_QUOTES):
                 continue
             if lane == "fav":
                 # Leonard's shape, not a market maker's: accumulate on
@@ -650,8 +674,15 @@ class PhantomBook:
         net = r["bn"] - r["sn"]
         if not net:
             return 0
-        return int(round(SKEW_MAX_C * max(-1.0, min(1.0,
-                                                    net / float(MAX_POS)))))
+        sk = SKEW_MAX_C * max(-1.0, min(1.0, net / float(MAX_POS)))
+        # capital that cannot turn is capital that is not working: an
+        # old position gets shoved harder toward flat, in the same
+        # direction the inventory skew is already pushing.
+        age = time.time() - (r.get("age_ts") or time.time())
+        if age > AGE_CLEAR_S:
+            steps = min(3, int(age // AGE_CLEAR_S))
+            sk += (AGE_SKEW_C * steps) * (1 if net > 0 else -1)
+        return int(round(sk))
 
     def _headroom(self, tk, direction):
         """Contracts we may still add in this direction before the cap."""
@@ -712,6 +743,10 @@ class PhantomBook:
             rec["sn"] += n
             rec["sc"] += px * n
             self.stats["fills_ask"] += 1
+        if rec["bn"] - rec["sn"] == 0:
+            rec.pop("age_ts", None)          # flat: the clock resets
+        else:
+            rec.setdefault("age_ts", time.time())
         self.stats["fills_strict" if strict else "fills_loose"] += 1
         self.fills.append({"tk": tk, "side": side, "px": px, "n": n,
                            "ts": time.time(), "mid": q["mid"],
@@ -872,6 +907,26 @@ class PhantomBook:
             done += 1
         return done
 
+    def _lane_budgets(self):
+        """Move attention toward whoever is making money. Floors keep
+        every lane generating evidence; the rest of the pot is split by
+        measured cents-per-pair."""
+        base = dict(LANE_BUDGET)
+        rep = (self.last or {}).get("by_lane") or {}
+        pos = {}
+        for ln, L in rep.items():
+            if ((L.get("pairs") or 0) >= LANE_MIN_PAIRS
+                    and (L.get("per_pair_c") or 0) > 0):
+                pos[ln] = L["per_pair_c"]
+        if not pos:
+            return base, "base"
+        pot = max(0, MAX_QUOTES - LANE_FLOOR * len(base))
+        tot = sum(pos.values())
+        out = {ln: LANE_FLOOR for ln in base}
+        for ln, v in pos.items():
+            out[ln] += int(pot * v / tot)
+        return out, "earned"
+
     def _lane_report(self, lanes):
         """Which WIDTH is the business? Same book, same inventory - the
         tag is what lets the ledger answer. wide = we stepped inside a
@@ -1026,6 +1081,19 @@ class PhantomBook:
             "cycles": self.stats["cycles"],
             "hours": round(hrs, 2),
             "fills_per_h": round(tot_fills / hrs, 1),
+            # --- desk KPIs: this is how a trading floor is judged ---
+            # turns/h is CAPITAL TURNOVER: how many times the book's
+            # whole collateral is recycled every hour. Volume alone is
+            # vanity; turnover x edge is the P&L.
+            "velocity": {
+                "fills_h": round(tot_fills / hrs, 1),
+                "pairs_h": round(bk["pairs"] / hrs, 1),
+                "contracts_h": round(tot_ct / hrs, 1),
+                "turns_h": (round((tot_ct * 50.0 / 100.0)
+                                  / hrs / (BOOK_CAPITAL_C / 100.0), 2)),
+                "quotes": len(self.quotes),
+                "budget_mode": self.budget_mode,
+                "budgets": self.budgets},
             "rules": {"min_spread": MIN_SPREAD_C, "edge": EDGE_C,
                       "size": SIZE, "band": [MIN_PX_C, MAX_PX_C],
                       "max_quotes": MAX_QUOTES,
