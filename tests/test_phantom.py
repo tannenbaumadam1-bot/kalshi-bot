@@ -907,3 +907,23 @@ def test_velocity_reports_capital_turnover(tmp_path, monkeypatch):
     for k in ("fills_h", "pairs_h", "contracts_h", "turns_h", "quotes",
               "budget_mode", "budgets"):
         assert k in v
+
+
+def test_favorite_lane_sees_the_no_side_too(tmp_path, monkeypatch):
+    """A 12/15 YES book is an 85/88 NO book - the same favorite, the
+    same fee (0.07*P*(1-P) is symmetric). We were seeing half of them."""
+    b = _bot(tmp_path, monkeypatch)
+    b.quote([_mk(yb=12, ya=15)])
+    q = b.quotes["KXMLBGAME-T1"]
+    assert q["lane"] == "fav"
+    assert q["ask"] == 14                      # accumulate short yes
+    assert q["bid"] <= 100 - ph.FAV_ASK_MIN_C  # cover far below
+    assert q["ask"] > q["bid"]
+
+
+def test_both_favorite_sides_are_quotable(tmp_path, monkeypatch):
+    b = _bot(tmp_path, monkeypatch)
+    b.quote([_mk(tk="YESFAV", yb=88, ya=91),
+             _mk(tk="NOFAV", yb=9, ya=12)])
+    assert {q["lane"] for q in b.quotes.values()} == {"fav"}
+    assert len(b.quotes) == 2

@@ -504,13 +504,22 @@ class PhantomBook:
             yb, ya = m["yb"], m["ya"]
             if not yb or not ya or ya <= yb:
                 continue
-            if yb < MIN_PX_C or ya > MAX_PX_C:
+            if ya > MAX_PX_C or yb < (100 - MAX_PX_C):
                 continue
             spread = ya - yb
             if spread < TIGHT_MIN_C:
                 continue
             mid0 = (yb + ya) / 2.0
-            if FAV_LO_C <= mid0 <= FAV_HI_C:
+            # 8/21: the favorite band has a MIRROR. A market quoted
+            # 12/15 on YES is an 85/88 book on NO - the identical trade,
+            # identical fees (0.07*P*(1-P) is symmetric), just expressed
+            # from the other side. We were seeing only half the
+            # favorites on the exchange: 63 quotes where there should
+            # have been twice that. In YES terms, being long the NO
+            # favorite means resting our ASK just under their ask to
+            # accumulate, and covering with a bid down near 4c.
+            fav_no = (FAV_LO_C <= (100.0 - mid0) <= FAV_HI_C)
+            if FAV_LO_C <= mid0 <= FAV_HI_C or fav_no:
                 lane = "fav"
             elif spread >= MIN_SPREAD_C:
                 lane = "wide"
@@ -524,13 +533,22 @@ class PhantomBook:
             # cheap lane while never testing the expensive one
             if used.get(lane, 0) >= budgets.get(lane, MAX_QUOTES):
                 continue
-            if lane == "fav":
+            if lane == "fav" and not fav_no:
                 # Leonard's shape, not a market maker's: accumulate on
                 # the bid, rest the ask on the ladder and let the
                 # favorite drift into it.
                 bid = yb + EDGE_C
                 ask = min(ASK_CAP_C,
                           max(FAV_ASK_MIN_C, int(round(mid0)) + FAV_MARKUP_C))
+                if ask <= bid:
+                    continue
+            elif lane == "fav":
+                # the mirror: the NO side is the favorite, so we
+                # accumulate SHORT yes just under their ask and cover
+                # far below - the same trade seen from the other side.
+                ask = ya - EDGE_C
+                bid = max(1, min(100 - FAV_ASK_MIN_C,
+                                 int(round(mid0)) - FAV_MARKUP_C))
                 if ask <= bid:
                     continue
             elif lane == "wide":
