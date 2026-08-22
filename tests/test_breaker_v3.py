@@ -706,3 +706,41 @@ def test_same_morning_lows_still_trade(tmp_path, monkeypatch):
     lo = _mk(tk="KXLOWTBOS-26AUG21-T66", bid=87, ask=89, city="boston",
              is_low=True, hrs=3.0)
     assert b.place(mkts=[lo]) == 1
+
+
+def test_flatten_rescues_positions_the_scan_missed(tmp_path, monkeypatch):
+    """8/22 autopsy: 114 settles against 16 flattens. The scan is
+    today-forward, so a position whose window has arrived is often
+    absent from mkts - and it was skipped, then settled. At +$0.203 a
+    lift versus -$0.657 a settle that is ~86c of avoidable damage each.
+    """
+    b = _bot(tmp_path, monkeypatch)
+    b.bets["GONE"] = _no_pos("GONE", entry=88, count=7,
+                             date=_dt.date.today().isoformat())
+    monkeypatch.setattr(dl.dp.DriftPaper, "_quotes",
+                        lambda self, tks: {"GONE": (30, 34)})
+    assert b.flatten(mkts=[]) == 1              # sold, not settled
+    assert "GONE" not in b.bets
+    assert b.exec_stats.get("flatten_rescued", 0) >= 1
+
+
+def test_flatten_leaves_tomorrows_positions_alone(tmp_path, monkeypatch):
+    """Only positions whose settlement window has ARRIVED get rescued -
+    a market simply absent from one scan must not be dumped early."""
+    b = _bot(tmp_path, monkeypatch)
+    future = (_dt.date.today() + _dt.timedelta(days=2)).isoformat()
+    b.bets["LATER"] = _no_pos("LATER", entry=88, count=7, date=future)
+    monkeypatch.setattr(dl.dp.DriftPaper, "_quotes",
+                        lambda self, tks: {"LATER": (30, 34)})
+    assert b.flatten(mkts=[]) == 0
+    assert "LATER" in b.bets
+
+
+def test_flatten_still_defers_when_there_is_no_bid(tmp_path, monkeypatch):
+    b = _bot(tmp_path, monkeypatch)
+    b.bets["NOBID"] = _no_pos("NOBID", entry=88, count=7,
+                              date=_dt.date.today().isoformat())
+    monkeypatch.setattr(dl.dp.DriftPaper, "_quotes",
+                        lambda self, tks: {"NOBID": (0, 0)})
+    assert b.flatten(mkts=[]) == 0
+    assert "NOBID" in b.bets            # settlement decides, as before

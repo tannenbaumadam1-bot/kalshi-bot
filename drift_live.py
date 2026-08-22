@@ -734,7 +734,7 @@ class DriftLive:
         # to kill - "the block never had a candidate" and "the block is
         # dead code" must never look the same.
         for k0 in ("cuts", "mslate_capped", "dip_capped",
-                   "ovn_lo_blocked"):
+                   "ovn_lo_blocked", "flatten_rescued"):
             self.exec_stats.setdefault(k0, 0)
 
     # ---- persistence ----
@@ -2307,6 +2307,31 @@ class DriftLive:
         if not FLATTEN_ON or not self.bets:
             return 0
         by_tk = {m["ticker"]: m for m in (mkts or [])}
+        # 8/22 BLIND-SPOT FIX - the same one CUT had on 8/18, found by
+        # the autopsy: 114 settles against only 16 flattens. The scan is
+        # TODAY-FORWARD, so a position whose settlement window has
+        # already arrived often is not in `mkts` at all - and this pass
+        # skipped it, so it settled instead of being sold. Since a lift
+        # is worth +$0.203 and a settle -$0.657, every one of those was
+        # ~86c of avoidable damage. Fetch quotes directly for held
+        # positions whose date has come and that the scan missed; treat
+        # them as at-close, which by definition they are. A market with
+        # no bid still falls through to settlement, exactly as before.
+        _today = datetime.date.today().isoformat()
+        missing = [tk for tk, b in self.bets.items()
+                   if tk not in by_tk and not self._is_dust(b)
+                   and str(b.get("date") or "9999") <= _today]
+        if missing:
+            try:
+                for tk0, (yb0, ya0) in dp.DriftPaper._quotes(
+                        self, missing).items():
+                    by_tk[tk0] = {"ticker": tk0, "yes_bid": yb0,
+                                  "yes_ask": ya0, "hrs": 0.0}
+                self.exec_stats["flatten_rescued"] = (
+                    self.exec_stats.get("flatten_rescued", 0)
+                    + len(missing))
+            except Exception:
+                pass
         done = 0
         for tk, b in list(self.bets.items()):
             mk = by_tk.get(tk)

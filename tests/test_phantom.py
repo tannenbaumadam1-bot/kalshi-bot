@@ -78,6 +78,7 @@ def test_tight_markets_join_the_touch(tmp_path, monkeypatch):
     can't step INSIDE a 2c market, but we can join it - same book, one
     inventory, tagged so the ledger can still split wide from tight."""
     b = _bot(tmp_path, monkeypatch)
+    monkeypatch.setattr(ph, "TIGHT_ON", True)   # lane retired 8/22
     assert b.quote([_mk(yb=49, ya=51)]) == 1
     q = b.quotes["KXMLBGAME-T1"]
     assert q["lane"] == "tight"
@@ -291,6 +292,7 @@ def test_block_trades_are_flow_not_fills(tmp_path, monkeypatch):
 def test_flow_bucketed_by_the_spread_it_printed_in(tmp_path, monkeypatch):
     """The decisive early question: do the WIDE books have customers?"""
     b = _bot(tmp_path, monkeypatch)
+    monkeypatch.setattr(ph, "TIGHT_ON", True)   # lane retired 8/22
     tight = _mk(tk="TIGHT", yb=49, ya=51)
     wide = _mk(tk="WIDE", yb=45, ya=55)
     b.quote([tight, wide])
@@ -488,6 +490,7 @@ def test_quotes_never_cross_or_go_marketable(tmp_path, monkeypatch):
     """Skew and widening must never post an order that trades instantly
     - that would make us a taker, paying 4x the fee."""
     b = _bot(tmp_path, monkeypatch)
+    monkeypatch.setattr(ph, "TIGHT_ON", True)   # lane retired 8/22
     monkeypatch.setattr(ph, "SKEW_MAX_C", 20)
     b.quote([_mk(yb=49, ya=51)])
     b.check_fills([_tr(px=48, side="no", cnt=10)])
@@ -525,6 +528,7 @@ def test_lanes_are_tagged_through_to_the_ledger(tmp_path, monkeypatch):
     """One book, one inventory - but the tape must still be able to say
     which WIDTH is the business."""
     b = _bot(tmp_path, monkeypatch)
+    monkeypatch.setattr(ph, "TIGHT_ON", True)   # lane retired 8/22
     b.quote([_mk(tk="W", yb=45, ya=55), _mk(tk="T", yb=49, ya=51)])
     assert b.quotes["W"]["lane"] == "wide"
     assert b.quotes["T"]["lane"] == "tight"
@@ -539,6 +543,7 @@ def test_lane_report_splits_wide_from_tight(tmp_path, monkeypatch):
     """The decision this build exists to inform: is the business the
     wide books nobody trades, or the penny books everybody does?"""
     b = _bot(tmp_path, monkeypatch)
+    monkeypatch.setattr(ph, "TIGHT_ON", True)   # lane retired 8/22
     mks = [_mk(tk="W", yb=45, ya=55), _mk(tk="T", yb=49, ya=51)]
     b.quote(mks)
     b.check_fills([_tr(tk="W", px=57, side="yes", cnt=10, tid="w1"),
@@ -810,6 +815,7 @@ def test_lane_budgets_guarantee_every_lane_gets_evidence(tmp_path,
     """The rotation slice did not fix sampling: wide got 8 quotes of
     400 because volume lives in penny books. Slots are reserved now."""
     b = _bot(tmp_path, monkeypatch)
+    monkeypatch.setattr(ph, "TIGHT_ON", True)   # lane retired 8/22
     monkeypatch.setattr(ph, "LANE_BUDGET", {"fav": 2, "wide": 2,
                                             "tight": 2})
     mkts = ([_mk(tk=f"T{i}", yb=49, ya=51, vol=9000) for i in range(20)]
@@ -982,3 +988,23 @@ def test_the_making_lanes_still_get_flattened(tmp_path, monkeypatch):
     fresh = b._skew("KXMLBGAME-T1")
     b.inv["KXMLBGAME-T1"]["age_ts"] = time.time() - ph.AGE_CLEAR_S * 2 - 1
     assert b._skew("KXMLBGAME-T1") > fresh
+
+
+def test_tight_lane_is_retired_on_the_evidence(tmp_path, monkeypatch):
+    """Two independent samples convicted it: phantom4 (2,062 pairs,
+    gross 0.55c against 0.95c of fees) and phantom5 (2,471 pairs,
+    -0.72c/pair). The fee curve explains it exactly - a 1-3c book
+    cannot pay for its own round trip at our tier."""
+    b = _bot(tmp_path, monkeypatch)
+    b.quote([_mk(tk="TIGHT", yb=49, ya=51), _mk(tk="WIDE", yb=45, ya=55),
+             _mk(tk="FAV", yb=88, ya=91)])
+    assert set(b.quotes) == {"WIDE", "FAV"}
+    assert b.stats.get("tight_retired", 0) == 1
+
+
+def test_tight_lane_can_be_revived(tmp_path, monkeypatch):
+    """Retired, not deleted - the nowcast may change the arithmetic."""
+    b = _bot(tmp_path, monkeypatch)
+    monkeypatch.setattr(ph, "TIGHT_ON", True)
+    b.quote([_mk(tk="TIGHT", yb=49, ya=51)])
+    assert b.quotes["TIGHT"]["lane"] == "tight"

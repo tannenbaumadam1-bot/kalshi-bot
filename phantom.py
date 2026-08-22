@@ -115,6 +115,14 @@ MAX_CLUSTER_POS = int(os.environ.get("PHANTOM_MAX_CLUSTER", "40"))
 # carries a LANE tag so the ledger can still answer which width pays.
 # wide = step inside a >=4c market; tight = JOIN the touch of a 1-3c
 # market and earn a penny on a hundred times the flow.
+# 8/22 THE TIGHT LANE IS RETIRED. Two independent samples convicted it:
+# phantom4 (2,062 pairs: gross 0.55c/pair against 0.95c of fees) and
+# phantom5 (2,471 pairs, -0.72c/pair, -$22.60 open). The fee curve
+# explains it exactly - 0.07*P*(1-P) peaks at 50c, so a 1-3c book can
+# never pay for its own round trip at our tier. This is not a tuning
+# problem, and every quote spent there is a quote not spent on a lane
+# that might work. TIGHT_ON=1 revives it.
+TIGHT_ON = os.environ.get("PHANTOM_TIGHT", "0") == "1"
 TIGHT_MIN_C = int(os.environ.get("PHANTOM_TIGHT_MIN", "1"))
 # INVENTORY SKEW - the real fix for a 42% match rate. We were quoting
 # symmetrically around the mid no matter what we held, so when retail
@@ -173,9 +181,10 @@ ASK_CAP_C = 99
 # sampling problem: wide got 8 quotes out of 400 because tight books
 # are sorted first by volume and volume lives in penny books. A lane
 # with no slots is a lane with no evidence.
-LANE_BUDGET = {"fav": int(os.environ.get("PHANTOM_BUDGET_FAV", "320")),
-               "wide": int(os.environ.get("PHANTOM_BUDGET_WIDE", "220")),
-               "tight": int(os.environ.get("PHANTOM_BUDGET_TIGHT", "160"))}
+# tight retired 8/22, so its slots go to the two lanes still on trial
+LANE_BUDGET = {"fav": int(os.environ.get("PHANTOM_BUDGET_FAV", "450")),
+               "wide": int(os.environ.get("PHANTOM_BUDGET_WIDE", "250")),
+               "tight": int(os.environ.get("PHANTOM_BUDGET_TIGHT", "60"))}
 # ---- 8/21 RUN IT LIKE A DESK (Adam: "high volume like a Jane St or a
 # SIG... performing like a hedge fund and recycling capital all the
 # time") -----------------------------------------------------------
@@ -528,8 +537,12 @@ class PhantomBook:
                 lane = "fav"
             elif spread >= MIN_SPREAD_C:
                 lane = "wide"
-            else:
+            elif TIGHT_ON:
                 lane = "tight"
+            else:
+                self.stats["tight_retired"] = (
+                    self.stats.get("tight_retired", 0) + 1)
+                continue
             quotable += 1
             if len(self.quotes) >= MAX_QUOTES:
                 continue
@@ -1113,6 +1126,7 @@ class PhantomBook:
             "cap_full": self.stats.get("cap_full", 0),
             "capital_max": round(BOOK_CAPITAL_C / 100, 2),
             "stale_skipped": self.stats.get("stale_skipped", 0),
+            "tight_retired": self.stats.get("tight_retired", 0),
             "pre_quote": self.stats.get("pre_quote", 0),
             "widened": self.stats.get("widened", 0),
             "tightened": self.stats.get("tightened", 0),
