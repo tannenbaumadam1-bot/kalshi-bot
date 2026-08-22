@@ -80,7 +80,7 @@ TRADE_PAGES = int(os.environ.get("PHANTOM_TRADE_PAGES", "4"))
 # existed and under a capital formula that double-counted paired
 # positions the exchange would have netted flat. A ledger built over a
 # broken constraint can't be repaired in place - it has to restart.
-ERA = "phantom5"
+ERA = "phantom6"
 
 # --- quoting policy (all in cents) ---
 # Only quote where the market is wide enough that stepping inside still
@@ -200,6 +200,8 @@ LANE_MIN_CT = int(os.environ.get("PHANTOM_LANE_MIN_CT", "200"))
 # book's decay ladder.
 AGE_CLEAR_S = int(os.environ.get("PHANTOM_AGE_CLEAR", "900"))
 AGE_SKEW_C = int(os.environ.get("PHANTOM_AGE_SKEW", "4"))
+# ...but NOT in the fav lane, whose trade is to hold for the drift.
+FLATTEN_FAV = os.environ.get("PHANTOM_FLATTEN_FAV", "0") == "1"
 # a mark older than this is not a price, it's a memory. The 8/17 live
 # book showed a $137 "all-time high" that was entirely stale marks; the
 # real NAV was $117. Never let that happen silently again.
@@ -694,6 +696,14 @@ class PhantomBook:
             return 0
         net = r["bn"] - r["sn"]
         if not net:
+            return 0
+        # 8/22 OWN GOAL, found in the autopsy. The fav lane's entire
+        # thesis is to BUY the favorite and HOLD until it drifts into a
+        # 96c ask. Skewing it toward flat drags that ask back down and
+        # forces the exit at a loss - the tape shows one market round
+        # tripped 304 buys against 307 sells, churning itself to death.
+        # A position you intend to hold must not be shoved out of.
+        if (r.get("lane") == "fav") and not FLATTEN_FAV:
             return 0
         sk = SKEW_MAX_C * max(-1.0, min(1.0, net / float(MAX_POS)))
         # capital that cannot turn is capital that is not working: an

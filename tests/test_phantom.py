@@ -773,7 +773,7 @@ def test_daily_pnl_series_records_the_shape(tmp_path, monkeypatch):
 def test_book_starts_at_one_hundred_dollars():
     """Adam, 8/20: 'reset the paper money to $100 and start flat'."""
     assert ph.BOOK_CAPITAL_C == 10000
-    assert ph.ERA == "phantom5"      # 8/21: the favorite lane
+    assert ph.ERA == "phantom6"      # 8/22: fav lane holds, no shove
 
 
 # ---------------- 8/21: the favorite lane ----------------
@@ -954,3 +954,31 @@ def test_allocator_can_actually_see_the_favorite_lane(tmp_path,
     assert mode == "earned"
     assert got["fav"] > got["tight"]
     assert got["tight"] == ph.LANE_FLOOR
+
+
+def test_fav_lane_is_never_shoved_out_of_its_own_trade(tmp_path,
+                                                       monkeypatch):
+    """8/22 autopsy: the flattening shove was dragging the fav lane's
+    96c ask back down and forcing exits at a loss. One market round
+    tripped 304 buys against 307 sells - churning itself to death. A
+    position you intend to HOLD must not be shoved out of."""
+    b = _bot(tmp_path, monkeypatch)
+    b.quote([_mk(yb=88, ya=91)])                  # fav lane
+    b.check_fills([_tr(px=87, side="no", cnt=10)])
+    r = b.inv["KXMLBGAME-T1"]
+    assert r["lane"] == "fav"
+    r["age_ts"] = time.time() - ph.AGE_CLEAR_S * 5
+    assert b._skew("KXMLBGAME-T1") == 0
+    b.quote([_mk(yb=88, ya=91)])
+    assert b.quotes["KXMLBGAME-T1"]["ask"] >= ph.FAV_ASK_MIN_C
+
+
+def test_the_making_lanes_still_get_flattened(tmp_path, monkeypatch):
+    """Recycling still applies where the trade IS the round trip."""
+    b = _bot(tmp_path, monkeypatch)
+    b.quote([_mk(yb=45, ya=55)])                  # wide lane
+    b.check_fills([_tr(px=44, side="no", cnt=10)])
+    assert b.inv["KXMLBGAME-T1"]["lane"] == "wide"
+    fresh = b._skew("KXMLBGAME-T1")
+    b.inv["KXMLBGAME-T1"]["age_ts"] = time.time() - ph.AGE_CLEAR_S * 2 - 1
+    assert b._skew("KXMLBGAME-T1") > fresh
