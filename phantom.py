@@ -135,6 +135,14 @@ SKEW_MAX_C = int(os.environ.get("PHANTOM_SKEW_MAX", "3"))
 # where we quoted, a real maker has already cancelled; anyone still
 # hitting us knows something. And after being hit, back off briefly.
 STALE_C = int(os.environ.get("PHANTOM_STALE", "8"))
+# ...but LANE-AWARE, the same lesson as the flatten shove. In a making
+# lane a market that jumped 8c away means our quote is stale and whoever
+# is still lifting it knows something. In the FAV lane that move is the
+# entire thesis: a favorite that dipped is the trade we want to buy, and
+# a favorite that drifted up into our 96c ask is the trade paying off.
+# The guard was refusing ~93% of candidate fills; a strategy that holds
+# for the drift must not be protected against drift.
+FAV_STALE_C = int(os.environ.get("PHANTOM_FAV_STALE", "25"))
 # 300s not 120s: phantom quotes refresh every ~3rd paper cycle, so a
 # 120s cooldown always expired before the next quote and the back-off
 # could never fire (widened read 0 on the first live pass).
@@ -667,7 +675,10 @@ class PhantomBook:
             if t.get("is_block_trade"):
                 self.flow["blocks"] = self.flow.get("blocks", 0) + 1
                 continue
-            if abs(px - q["mid"]) > STALE_C:
+            _st_lim = (FAV_STALE_C if q.get("lane") == "fav" else STALE_C)
+            if abs(px - q["mid"]) > _st_lim:
+                self.stats["stale_" + str(q.get("lane"))] = (
+                    self.stats.get("stale_" + str(q.get("lane")), 0) + 1)
                 # the market has jumped past where we quoted: a real
                 # maker cancelled long ago, and whoever is still lifting
                 # this price knows something we don't
@@ -1127,6 +1138,9 @@ class PhantomBook:
             "capital_max": round(BOOK_CAPITAL_C / 100, 2),
             "stale_skipped": self.stats.get("stale_skipped", 0),
             "tight_retired": self.stats.get("tight_retired", 0),
+            "stale_by_lane": {k[6:]: v for k, v in self.stats.items()
+                              if k.startswith("stale_")
+                              and k != "stale_skipped"},
             "pre_quote": self.stats.get("pre_quote", 0),
             "widened": self.stats.get("widened", 0),
             "tightened": self.stats.get("tightened", 0),

@@ -1008,3 +1008,36 @@ def test_tight_lane_can_be_revived(tmp_path, monkeypatch):
     monkeypatch.setattr(ph, "TIGHT_ON", True)
     b.quote([_mk(tk="TIGHT", yb=49, ya=51)])
     assert b.quotes["TIGHT"]["lane"] == "tight"
+
+
+def test_staleness_guard_is_lane_aware(tmp_path, monkeypatch):
+    """8/22: the guard was refusing ~93% of candidate fills. In a making
+    lane an 8c jump means our quote is stale. In the FAV lane that move
+    IS the thesis - a favorite that dipped is the trade we want, and one
+    that drifted into our 96c ask is the trade paying off. A strategy
+    that holds for the drift must not be protected against drift."""
+    b = _bot(tmp_path, monkeypatch)
+    b.quote([_mk(tk="FAV", yb=88, ya=91),          # fav lane
+             _mk(tk="MAKE", yb=45, ya=55)])        # wide lane
+    px_fav = 89 - (ph.STALE_C + 6)                 # a big dip
+    b.check_fills([{"trade_id": "f1", "ticker": "FAV",
+                    "yes_price": px_fav, "count_fp": "10",
+                    "taker_side": "no"}])
+    assert b.inv.get("FAV")                        # taken: that's the dip
+    b.check_fills([{"trade_id": "m1", "ticker": "MAKE",
+                    "yes_price": 50 - (ph.STALE_C + 6), "count_fp": "10",
+                    "taker_side": "no"}])
+    assert "MAKE" not in b.inv                     # refused: stale quote
+    assert b.stats.get("stale_wide", 0) == 1
+
+
+def test_fav_still_refuses_a_true_collapse(tmp_path, monkeypatch):
+    """Wider, not blind: a favorite falling off a cliff is still someone
+    who knows something."""
+    b = _bot(tmp_path, monkeypatch)
+    b.quote([_mk(tk="FAV", yb=88, ya=91)])
+    b.check_fills([{"trade_id": "x", "ticker": "FAV",
+                    "yes_price": 89 - (ph.FAV_STALE_C + 5),
+                    "count_fp": "10", "taker_side": "no"}])
+    assert "FAV" not in b.inv
+    assert b.stats.get("stale_fav", 0) == 1
