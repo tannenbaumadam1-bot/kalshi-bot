@@ -123,6 +123,13 @@ MAX_CLUSTER_POS = int(os.environ.get("PHANTOM_MAX_CLUSTER", "40"))
 # problem, and every quote spent there is a quote not spent on a lane
 # that might work. TIGHT_ON=1 revives it.
 TIGHT_ON = os.environ.get("PHANTOM_TIGHT", "0") == "1"
+# 8/22 THE WIDE LANE IS RETIRED TOO. Given a 250-quote budget and a full
+# scan of 2,230 markets it produced ZERO fills, ZERO pairs and ZERO
+# inventory. Not "losing" - absent. Sports books at >=4c wide are wide
+# precisely because nobody trades them, which is the same tension the
+# flow telemetry found on day one, now with a decisive answer. Every
+# quote it holds is a quote the fav lane cannot use. WIDE_ON=1 revives.
+WIDE_ON = os.environ.get("PHANTOM_WIDE", "0") == "1"
 TIGHT_MIN_C = int(os.environ.get("PHANTOM_TIGHT_MIN", "1"))
 # INVENTORY SKEW - the real fix for a 42% match rate. We were quoting
 # symmetrically around the mid no matter what we held, so when retail
@@ -189,9 +196,10 @@ ASK_CAP_C = 99
 # sampling problem: wide got 8 quotes out of 400 because tight books
 # are sorted first by volume and volume lives in penny books. A lane
 # with no slots is a lane with no evidence.
-# tight retired 8/22, so its slots go to the two lanes still on trial
-LANE_BUDGET = {"fav": int(os.environ.get("PHANTOM_BUDGET_FAV", "450")),
-               "wide": int(os.environ.get("PHANTOM_BUDGET_WIDE", "250")),
+# 8/22: tight and wide both retired on evidence, so the whole budget
+# goes to the only lane that has ever shown positive unit economics.
+LANE_BUDGET = {"fav": int(os.environ.get("PHANTOM_BUDGET_FAV", "700")),
+               "wide": int(os.environ.get("PHANTOM_BUDGET_WIDE", "60")),
                "tight": int(os.environ.get("PHANTOM_BUDGET_TIGHT", "60"))}
 # ---- 8/21 RUN IT LIKE A DESK (Adam: "high volume like a Jane St or a
 # SIG... performing like a hedge fund and recycling capital all the
@@ -543,13 +551,13 @@ class PhantomBook:
             fav_no = (FAV_LO_C <= (100.0 - mid0) <= FAV_HI_C)
             if FAV_LO_C <= mid0 <= FAV_HI_C or fav_no:
                 lane = "fav"
-            elif spread >= MIN_SPREAD_C:
+            elif spread >= MIN_SPREAD_C and WIDE_ON:
                 lane = "wide"
             elif TIGHT_ON:
                 lane = "tight"
             else:
-                self.stats["tight_retired"] = (
-                    self.stats.get("tight_retired", 0) + 1)
+                self.stats["lane_retired"] = (
+                    self.stats.get("lane_retired", 0) + 1)
                 continue
             quotable += 1
             if len(self.quotes) >= MAX_QUOTES:
@@ -1137,7 +1145,7 @@ class PhantomBook:
             "cap_full": self.stats.get("cap_full", 0),
             "capital_max": round(BOOK_CAPITAL_C / 100, 2),
             "stale_skipped": self.stats.get("stale_skipped", 0),
-            "tight_retired": self.stats.get("tight_retired", 0),
+            "lane_retired": self.stats.get("lane_retired", 0),
             "stale_by_lane": {k[6:]: v for k, v in self.stats.items()
                               if k.startswith("stale_")
                               and k != "stale_skipped"},

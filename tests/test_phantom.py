@@ -67,6 +67,7 @@ def test_fee_follows_kalshi_schedule():
 
 def test_quotes_inside_a_wide_market(tmp_path, monkeypatch):
     b = _bot(tmp_path, monkeypatch)
+    monkeypatch.setattr(ph, "WIDE_ON", True)    # lane retired 8/22
     b.quote([_mk(yb=45, ya=55)])
     q = b.quotes["KXMLBGAME-T1"]
     assert q["bid"] == 46 and q["ask"] == 54      # stepped inside by 1
@@ -94,6 +95,7 @@ def test_refuses_one_sided_and_extreme_books(tmp_path, monkeypatch):
 
 def test_quote_cap_prefers_volume(tmp_path, monkeypatch):
     b = _bot(tmp_path, monkeypatch)
+    monkeypatch.setattr(ph, "WIDE_ON", True)    # lane retired 8/22
     monkeypatch.setattr(ph, "MAX_QUOTES", 2)
     b.quote([_mk(tk=f"T{i}", vol=i) for i in range(6)])
     assert len(b.quotes) == 2
@@ -104,6 +106,7 @@ def test_quote_cap_prefers_volume(tmp_path, monkeypatch):
 
 def test_strict_fill_requires_trading_through_us(tmp_path, monkeypatch):
     b = _bot(tmp_path, monkeypatch)
+    monkeypatch.setattr(ph, "WIDE_ON", True)    # lane retired 8/22
     b.quote([_mk(yb=45, ya=55)])                  # our ask = 54
     b.check_fills([_tr(px=57, side="yes")])        # printed THROUGH 54
     assert b.stats["fills_strict"] == 1
@@ -114,6 +117,7 @@ def test_strict_fill_requires_trading_through_us(tmp_path, monkeypatch):
 def test_loose_fill_when_print_is_at_our_price(tmp_path, monkeypatch):
     """At our price = queue-dependent. Counted, but never as strict."""
     b = _bot(tmp_path, monkeypatch)
+    monkeypatch.setattr(ph, "WIDE_ON", True)    # lane retired 8/22
     b.quote([_mk(yb=45, ya=55)])
     b.check_fills([_tr(px=54, side="yes")])
     assert b.stats["fills_loose"] == 1 and b.stats["fills_strict"] == 0
@@ -121,6 +125,7 @@ def test_loose_fill_when_print_is_at_our_price(tmp_path, monkeypatch):
 
 def test_print_that_never_reaches_us_is_no_fill(tmp_path, monkeypatch):
     b = _bot(tmp_path, monkeypatch)
+    monkeypatch.setattr(ph, "WIDE_ON", True)    # lane retired 8/22
     b.quote([_mk(yb=45, ya=55)])                  # bid 46 / ask 54
     b.check_fills([_tr(px=50, side="yes"), _tr(px=50, side="no")])
     assert b.stats["fills_strict"] == b.stats["fills_loose"] == 0
@@ -130,6 +135,7 @@ def test_print_that_never_reaches_us_is_no_fill(tmp_path, monkeypatch):
 def test_taker_side_decides_which_of_our_orders_fills(tmp_path,
                                                       monkeypatch):
     b = _bot(tmp_path, monkeypatch)
+    monkeypatch.setattr(ph, "WIDE_ON", True)    # lane retired 8/22
     b.quote([_mk(yb=45, ya=55)])
     b.check_fills([_tr(px=44, side="no")])         # hit bids, through 46
     r = b.inv["KXMLBGAME-T1"]
@@ -139,6 +145,7 @@ def test_taker_side_decides_which_of_our_orders_fills(tmp_path,
 
 def test_fill_size_capped_by_print_and_by_our_size(tmp_path, monkeypatch):
     b = _bot(tmp_path, monkeypatch)
+    monkeypatch.setattr(ph, "WIDE_ON", True)    # lane retired 8/22
     b.quote([_mk(yb=45, ya=55)])
     b.check_fills([_tr(px=57, cnt=3, tid="a")])    # small print
     assert b.inv["KXMLBGAME-T1"]["sn"] == 3
@@ -148,6 +155,7 @@ def test_fill_size_capped_by_print_and_by_our_size(tmp_path, monkeypatch):
 
 def test_a_trade_is_only_scored_once(tmp_path, monkeypatch):
     b = _bot(tmp_path, monkeypatch)
+    monkeypatch.setattr(ph, "WIDE_ON", True)    # lane retired 8/22
     b.quote([_mk(yb=45, ya=55)])
     t = _tr(px=57, cnt=2, tid="dup")
     b.check_fills([t])
@@ -159,6 +167,7 @@ def test_a_trade_is_only_scored_once(tmp_path, monkeypatch):
 
 def test_matched_pair_locks_the_spread(tmp_path, monkeypatch):
     b = _bot(tmp_path, monkeypatch)
+    monkeypatch.setattr(ph, "WIDE_ON", True)    # lane retired 8/22
     b.quote([_mk(yb=45, ya=55)])                  # 46 / 54 -> 8c wide
     b.check_fills([_tr(px=44, side="no", cnt=10, tid="b1"),
                    _tr(px=57, side="yes", cnt=10, tid="a1")])
@@ -173,6 +182,7 @@ def test_one_sided_flow_leaves_directional_risk(tmp_path, monkeypatch):
     """Retail flow is one-sided by nature - this is the failure mode
     the whole experiment exists to measure."""
     b = _bot(tmp_path, monkeypatch)
+    monkeypatch.setattr(ph, "WIDE_ON", True)    # lane retired 8/22
     b.quote([_mk(yb=45, ya=55)])
     b.check_fills([_tr(px=57, side="yes", cnt=10)])   # only sells fill
     bk = b.book([_mk(yb=45, ya=55)])
@@ -195,6 +205,7 @@ def test_match_rate_is_published(tmp_path, monkeypatch):
 
 def test_unmatched_inventory_marks_against_us(tmp_path, monkeypatch):
     b = _bot(tmp_path, monkeypatch)
+    monkeypatch.setattr(ph, "WIDE_ON", True)    # lane retired 8/22
     b.quote([_mk(yb=45, ya=55)])
     b.check_fills([_tr(px=44, side="no", cnt=10)])   # we bought at 46
     bk = b.book([_mk(yb=20, ya=30)])                 # mid collapsed to 25
@@ -205,6 +216,7 @@ def test_unmatched_inventory_marks_against_us(tmp_path, monkeypatch):
 
 def test_adverse_scored_after_the_clock(tmp_path, monkeypatch):
     b = _bot(tmp_path, monkeypatch)
+    monkeypatch.setattr(ph, "WIDE_ON", True)    # lane retired 8/22
     b.quote([_mk(yb=45, ya=55)])
     b.check_fills([_tr(px=44, side="no", cnt=10)])   # bought, mid was 50
     b.score_adverse([_mk(yb=35, ya=45)])             # mid now 40
@@ -218,6 +230,7 @@ def test_adverse_scored_after_the_clock(tmp_path, monkeypatch):
 
 def test_adverse_sign_flips_for_sells(tmp_path, monkeypatch):
     b = _bot(tmp_path, monkeypatch)
+    monkeypatch.setattr(ph, "WIDE_ON", True)    # lane retired 8/22
     b.quote([_mk(yb=45, ya=55)])
     b.check_fills([_tr(px=57, side="yes", cnt=10)])  # we sold at 54
     b.fills[-1]["ts"] = time.time() - ph.ADV_FAST_S - 1
@@ -238,6 +251,7 @@ def test_it_cannot_trade():
 
 def test_state_round_trips(tmp_path, monkeypatch):
     b = _bot(tmp_path, monkeypatch)
+    monkeypatch.setattr(ph, "WIDE_ON", True)    # lane retired 8/22
     b.quote([_mk(yb=45, ya=55)])
     b.check_fills([_tr(px=57, side="yes", cnt=10)])
     b.save({"era": ph.ERA})
@@ -270,6 +284,7 @@ def test_count_fp_string_is_the_real_field(tmp_path, monkeypatch):
     """Kalshi sends count_fp as a string ('55.00'); reading 'count'
     would have meant zero fills forever - a silent empty experiment."""
     b = _bot(tmp_path, monkeypatch)
+    monkeypatch.setattr(ph, "WIDE_ON", True)    # lane retired 8/22
     b.quote([_mk(yb=45, ya=55)])
     b.check_fills([{"trade_id": "x", "ticker": "KXMLBGAME-T1",
                     "yes_price_dollars": "0.5700", "count_fp": "6.00",
@@ -281,6 +296,7 @@ def test_count_fp_string_is_the_real_field(tmp_path, monkeypatch):
 def test_block_trades_are_flow_not_fills(tmp_path, monkeypatch):
     """Negotiated off-book: it never touched our resting order."""
     b = _bot(tmp_path, monkeypatch)
+    monkeypatch.setattr(ph, "WIDE_ON", True)    # lane retired 8/22
     b.quote([_mk(yb=45, ya=55)])
     b.check_fills([{"trade_id": "b1", "ticker": "KXMLBGAME-T1",
                     "yes_price": 57, "count_fp": "500",
@@ -292,6 +308,7 @@ def test_block_trades_are_flow_not_fills(tmp_path, monkeypatch):
 def test_flow_bucketed_by_the_spread_it_printed_in(tmp_path, monkeypatch):
     """The decisive early question: do the WIDE books have customers?"""
     b = _bot(tmp_path, monkeypatch)
+    monkeypatch.setattr(ph, "WIDE_ON", True)    # lane retired 8/22
     monkeypatch.setattr(ph, "TIGHT_ON", True)   # lane retired 8/22
     tight = _mk(tk="TIGHT", yb=49, ya=51)
     wide = _mk(tk="WIDE", yb=45, ya=55)
@@ -309,6 +326,7 @@ def test_fill_counters_survive_a_restart(tmp_path, monkeypatch):
     """Caught live 8/20: inventory persisted but counters didn't, so
     match_rate read 0.0 with 40 contracts paired."""
     b = _bot(tmp_path, monkeypatch)
+    monkeypatch.setattr(ph, "WIDE_ON", True)    # lane retired 8/22
     b.quote([_mk(yb=45, ya=55)])
     b.check_fills([_tr(px=44, side="no", cnt=5, tid="b1"),
                    _tr(px=57, side="yes", cnt=5, tid="a1")])
@@ -323,6 +341,7 @@ def test_wide_books_get_a_competitive_quote_not_a_silly_one(
     """8/20 audit: a 25c book was producing a 23c-wide 'quote' that only
     informed flow would ever cross."""
     b = _bot(tmp_path, monkeypatch)
+    monkeypatch.setattr(ph, "WIDE_ON", True)    # lane retired 8/22
     b.quote([_mk(yb=27, ya=52)])                  # 25c wide
     q = b.quotes["KXMLBGAME-T1"]
     assert q["ask"] - q["bid"] <= ph.MAX_WIDTH_C
@@ -333,6 +352,7 @@ def test_wide_books_get_a_competitive_quote_not_a_silly_one(
 def test_match_rate_is_contract_weighted(tmp_path, monkeypatch):
     """One 2-lot fill + one 20-lot fill is not a 100% matched book."""
     b = _bot(tmp_path, monkeypatch)
+    monkeypatch.setattr(ph, "WIDE_ON", True)    # lane retired 8/22
     b.quote([_mk(yb=45, ya=55)])
     b.check_fills([_tr(px=44, side="no", cnt=2, tid="b1"),
                    _tr(px=57, side="yes", cnt=10, tid="a1")])
@@ -348,6 +368,7 @@ def test_match_rate_is_contract_weighted(tmp_path, monkeypatch):
 def test_net_reports_the_residual_against_the_spread(tmp_path, monkeypatch):
     """Locked spread alone flatters the book; net is the truth."""
     b = _bot(tmp_path, monkeypatch)
+    monkeypatch.setattr(ph, "WIDE_ON", True)    # lane retired 8/22
     b.quote([_mk(yb=45, ya=55)])
     b.check_fills([_tr(px=44, side="no", cnt=10, tid="b1")])
     monkeypatch.setattr(b, "fetch_markets",
@@ -370,6 +391,7 @@ def test_event_label_reads_like_a_game_not_a_ticker():
 def test_per_market_pnl_is_published(tmp_path, monkeypatch):
     """Adam 8/20: 'why doesn't it show p/l for each event'."""
     b = _bot(tmp_path, monkeypatch)
+    monkeypatch.setattr(ph, "WIDE_ON", True)    # lane retired 8/22
     b.quote([_mk(tk="KXMLBTOTAL-26AUG201410SEAMIL", yb=45, ya=55,
                  ev="KXMLBTOTAL-26AUG201410SEAMIL")])
     b.check_fills([_tr(tk="KXMLBTOTAL-26AUG201410SEAMIL", px=44,
@@ -385,6 +407,7 @@ def test_per_market_pnl_is_published(tmp_path, monkeypatch):
 def test_clusters_count_strikes_on_one_game(tmp_path, monkeypatch):
     """Six run-total strikes on one game is ONE bet in six costumes."""
     b = _bot(tmp_path, monkeypatch)
+    monkeypatch.setattr(ph, "WIDE_ON", True)    # lane retired 8/22
     ev = "KXMLBTOTAL-26AUG201410SEAMIL"
     mks = [_mk(tk=f"{ev}-{n}", yb=45, ya=55, ev=ev) for n in (7, 8, 9)]
     b.quote(mks)
@@ -400,6 +423,7 @@ def test_inventory_cap_stops_the_martingale(tmp_path, monkeypatch):
     """8/20 audit #2: quotes re-post every cycle, so one market piled up
     40 lots on one side. A maker caps inventory; a gambler doesn't."""
     b = _bot(tmp_path, monkeypatch)
+    monkeypatch.setattr(ph, "WIDE_ON", True)    # lane retired 8/22
     monkeypatch.setattr(ph, "MAX_POS", 20)
     monkeypatch.setattr(ph, "SKEW_MAX_C", 0)   # isolate the CAP
     for i in range(8):                       # 8 cycles of one-sided flow
@@ -414,6 +438,7 @@ def test_cap_never_blocks_a_fill_that_reduces_risk(tmp_path, monkeypatch):
     """At the cap we must still be able to trade OUT - refusing the
     other side would freeze us long exactly when we want to pair off."""
     b = _bot(tmp_path, monkeypatch)
+    monkeypatch.setattr(ph, "WIDE_ON", True)    # lane retired 8/22
     monkeypatch.setattr(ph, "MAX_POS", 20)
     for i in range(4):
         b.quote([_mk(yb=45, ya=55)])
@@ -429,6 +454,7 @@ def test_cap_never_blocks_a_fill_that_reduces_risk(tmp_path, monkeypatch):
 def test_cluster_cap_limits_one_game(tmp_path, monkeypatch):
     """Six strikes on one game is one bet - cap the GAME, not the row."""
     b = _bot(tmp_path, monkeypatch)
+    monkeypatch.setattr(ph, "WIDE_ON", True)    # lane retired 8/22
     monkeypatch.setattr(ph, "MAX_CLUSTER_POS", 30)
     ev = "KXMLBTOTAL-26AUG201410SEAMIL"
     mks = [_mk(tk=f"{ev}-{n}", yb=45, ya=55, ev=ev) for n in range(6)]
@@ -444,6 +470,7 @@ def test_cluster_cap_limits_one_game(tmp_path, monkeypatch):
 def test_pnl_splits_spread_from_directional_luck(tmp_path, monkeypatch):
     """A headline that mixes them reports a coin flip as a strategy."""
     b = _bot(tmp_path, monkeypatch)
+    monkeypatch.setattr(ph, "WIDE_ON", True)    # lane retired 8/22
     b.quote([_mk(yb=45, ya=55)])
     b.check_fills([_tr(px=44, side="no", cnt=10, tid="b1"),
                    _tr(px=57, side="yes", cnt=5, tid="a1")])
@@ -463,6 +490,7 @@ def test_inventory_skew_moves_the_line(tmp_path, monkeypatch):
     quotes down, so selling gets easier and adding gets harder. This is
     a book moving its line."""
     b = _bot(tmp_path, monkeypatch)
+    monkeypatch.setattr(ph, "WIDE_ON", True)    # lane retired 8/22
     monkeypatch.setattr(ph, "HIT_COOLDOWN_S", 0)  # isolate the skew
     b.quote([_mk(yb=45, ya=55)])
     flat = dict(b.quotes["KXMLBGAME-T1"])
@@ -476,6 +504,7 @@ def test_inventory_skew_moves_the_line(tmp_path, monkeypatch):
 
 def test_skew_reverses_when_we_are_short(tmp_path, monkeypatch):
     b = _bot(tmp_path, monkeypatch)
+    monkeypatch.setattr(ph, "WIDE_ON", True)    # lane retired 8/22
     monkeypatch.setattr(ph, "HIT_COOLDOWN_S", 0)  # isolate the skew
     b.quote([_mk(yb=45, ya=55)])
     flat = dict(b.quotes["KXMLBGAME-T1"])
@@ -490,6 +519,7 @@ def test_quotes_never_cross_or_go_marketable(tmp_path, monkeypatch):
     """Skew and widening must never post an order that trades instantly
     - that would make us a taker, paying 4x the fee."""
     b = _bot(tmp_path, monkeypatch)
+    monkeypatch.setattr(ph, "WIDE_ON", True)    # lane retired 8/22
     monkeypatch.setattr(ph, "TIGHT_ON", True)   # lane retired 8/22
     monkeypatch.setattr(ph, "SKEW_MAX_C", 20)
     b.quote([_mk(yb=49, ya=51)])
@@ -504,6 +534,7 @@ def test_stale_quote_is_not_filled(tmp_path, monkeypatch):
     """If the market has jumped past where we quoted, a real maker has
     already cancelled - only someone informed is still lifting us."""
     b = _bot(tmp_path, monkeypatch)
+    monkeypatch.setattr(ph, "WIDE_ON", True)    # lane retired 8/22
     b.quote([_mk(yb=45, ya=55)])                  # mid 50, ask 54
     b.check_fills([_tr(px=50 + ph.STALE_C + 5, side="yes", cnt=10)])
     assert not b.inv
@@ -514,6 +545,7 @@ def test_we_back_off_after_being_hit(tmp_path, monkeypatch):
     """A fill is information. Re-arming at the same price into the same
     flow is how a maker donates."""
     b = _bot(tmp_path, monkeypatch)
+    monkeypatch.setattr(ph, "WIDE_ON", True)    # lane retired 8/22
     monkeypatch.setattr(ph, "SKEW_MAX_C", 0)      # isolate the widening
     b.quote([_mk(yb=45, ya=55)])
     before = dict(b.quotes["KXMLBGAME-T1"])
@@ -528,6 +560,7 @@ def test_lanes_are_tagged_through_to_the_ledger(tmp_path, monkeypatch):
     """One book, one inventory - but the tape must still be able to say
     which WIDTH is the business."""
     b = _bot(tmp_path, monkeypatch)
+    monkeypatch.setattr(ph, "WIDE_ON", True)    # lane retired 8/22
     monkeypatch.setattr(ph, "TIGHT_ON", True)   # lane retired 8/22
     b.quote([_mk(tk="W", yb=45, ya=55), _mk(tk="T", yb=49, ya=51)])
     assert b.quotes["W"]["lane"] == "wide"
@@ -543,6 +576,7 @@ def test_lane_report_splits_wide_from_tight(tmp_path, monkeypatch):
     """The decision this build exists to inform: is the business the
     wide books nobody trades, or the penny books everybody does?"""
     b = _bot(tmp_path, monkeypatch)
+    monkeypatch.setattr(ph, "WIDE_ON", True)    # lane retired 8/22
     monkeypatch.setattr(ph, "TIGHT_ON", True)   # lane retired 8/22
     mks = [_mk(tk="W", yb=45, ya=55), _mk(tk="T", yb=49, ya=51)]
     b.quote(mks)
@@ -571,6 +605,7 @@ def test_settlement_banks_a_finished_market(tmp_path, monkeypatch):
     """Without this a running total is a lie: when a game ends the
     market leaves the scan and its P&L silently evaporates."""
     b = _bot(tmp_path, monkeypatch)
+    monkeypatch.setattr(ph, "WIDE_ON", True)    # lane retired 8/22
     b.quote([_mk(yb=45, ya=55)])
     b.check_fills([_tr(px=44, side="no", cnt=10)])     # long 10 @ 46
     monkeypatch.setattr(ph.requests, "get", lambda *a, **k: _Resp("yes"))
@@ -583,6 +618,7 @@ def test_settlement_banks_a_finished_market(tmp_path, monkeypatch):
 
 def test_settlement_takes_the_loss_too(tmp_path, monkeypatch):
     b = _bot(tmp_path, monkeypatch)
+    monkeypatch.setattr(ph, "WIDE_ON", True)    # lane retired 8/22
     b.quote([_mk(yb=45, ya=55)])
     b.check_fills([_tr(px=44, side="no", cnt=10)])
     monkeypatch.setattr(ph.requests, "get", lambda *a, **k: _Resp("no"))
@@ -594,6 +630,7 @@ def test_a_paired_market_settles_to_its_spread(tmp_path, monkeypatch):
     """Fully matched inventory is indifferent to the outcome - that IS
     the thesis, and settlement must prove it."""
     b = _bot(tmp_path, monkeypatch)
+    monkeypatch.setattr(ph, "WIDE_ON", True)    # lane retired 8/22
     b.quote([_mk(yb=45, ya=55)])                       # 46 / 54
     b.check_fills([_tr(px=44, side="no", cnt=10, tid="b1"),
                    _tr(px=57, side="yes", cnt=10, tid="a1")])
@@ -614,6 +651,7 @@ def test_a_paired_market_settles_to_its_spread(tmp_path, monkeypatch):
 
 def test_total_is_realized_plus_open(tmp_path, monkeypatch):
     b = _bot(tmp_path, monkeypatch)
+    monkeypatch.setattr(ph, "WIDE_ON", True)    # lane retired 8/22
     b.realized_c = 250.0
     b.quote([_mk(yb=45, ya=55)])
     b.check_fills([_tr(px=44, side="no", cnt=10)])
@@ -640,6 +678,7 @@ def test_a_print_cannot_hit_a_quote_posted_after_it(tmp_path, monkeypatch):
     """The look-ahead bug that inflated phantom1: quotes were posted
     now and filled against 15 minutes of PAST prints."""
     b = _bot(tmp_path, monkeypatch)
+    monkeypatch.setattr(ph, "WIDE_ON", True)    # lane retired 8/22
     b.quote([_mk(yb=45, ya=55)])
     old = {"trade_id": "old", "ticker": "KXMLBGAME-T1",
            "yes_price": 57, "count_fp": "10", "taker_side": "yes",
@@ -652,6 +691,7 @@ def test_a_print_cannot_hit_a_quote_posted_after_it(tmp_path, monkeypatch):
 def test_capital_is_reported_next_to_the_pnl(tmp_path, monkeypatch):
     """A P&L with no denominator is a boast, not a number."""
     b = _bot(tmp_path, monkeypatch)
+    monkeypatch.setattr(ph, "WIDE_ON", True)    # lane retired 8/22
     b.quote([_mk(yb=45, ya=55)])
     b.check_fills([_tr(px=44, side="no", cnt=10)])
     bk = b.book([_mk(yb=45, ya=55)])
@@ -691,6 +731,7 @@ def test_book_stops_adding_at_its_collateral_limit(tmp_path, monkeypatch):
     """A paper book carrying $507 of collateral is not simulating the
     $135 account we actually have."""
     b = _bot(tmp_path, monkeypatch)
+    monkeypatch.setattr(ph, "WIDE_ON", True)    # lane retired 8/22
     monkeypatch.setattr(ph, "BOOK_CAPITAL_C", 500)     # $5 book
     monkeypatch.setattr(ph, "SKEW_MAX_C", 0)
     for i in range(6):
@@ -703,6 +744,7 @@ def test_book_stops_adding_at_its_collateral_limit(tmp_path, monkeypatch):
 
 def test_capital_limit_never_blocks_getting_flat(tmp_path, monkeypatch):
     b = _bot(tmp_path, monkeypatch)
+    monkeypatch.setattr(ph, "WIDE_ON", True)    # lane retired 8/22
     monkeypatch.setattr(ph, "BOOK_CAPITAL_C", 1)       # instantly full
     b.inv["KXMLBGAME-T1"] = {"bn": 10, "bc": 460, "sn": 0, "sc": 0,
                              "fee": 4, "event": "E1", "title": "t",
@@ -716,6 +758,7 @@ def test_fast_path_still_samples_the_wide_lane(tmp_path, monkeypatch):
     """HOT is fed by prints and 97% of prints are tight books, so the
     fast path would otherwise stop measuring the wide lane entirely."""
     b = _bot(tmp_path, monkeypatch)
+    monkeypatch.setattr(ph, "WIDE_ON", True)    # lane retired 8/22
     b._series = [f"KXMLBEXTRA{i}" for i in range(60)]
     b._ser_ts = time.time()
     fast = b.targets(full=False)
@@ -728,6 +771,7 @@ def test_capital_counts_only_the_net_position(tmp_path, monkeypatch):
     money back. The first formula summed gross both ways and read $676
     on a book that was mostly flat."""
     b = _bot(tmp_path, monkeypatch)
+    monkeypatch.setattr(ph, "WIDE_ON", True)    # lane retired 8/22
     b.quote([_mk(yb=45, ya=55)])
     b.check_fills([_tr(px=44, side="no", cnt=10, tid="b1")])
     assert round(b._capital_c()) == 460               # long 10 @ 46c
@@ -740,6 +784,7 @@ def test_capital_counts_only_the_net_position(tmp_path, monkeypatch):
 
 def test_short_inventory_posts_the_other_side(tmp_path, monkeypatch):
     b = _bot(tmp_path, monkeypatch)
+    monkeypatch.setattr(ph, "WIDE_ON", True)    # lane retired 8/22
     b.quote([_mk(yb=45, ya=55)])
     b.check_fills([_tr(px=57, side="yes", cnt=10)])    # sold 10 @ 54c
     assert round(b._capital_c()) == 460                # 10 x (100-54)
@@ -749,6 +794,7 @@ def test_stale_marks_are_counted_not_hidden(tmp_path, monkeypatch):
     """8/17's lesson, ported: a $137 'all-time high' that was entirely
     stale marks. If a price is a memory, say so."""
     b = _bot(tmp_path, monkeypatch)
+    monkeypatch.setattr(ph, "WIDE_ON", True)    # lane retired 8/22
     b.quote([_mk(yb=45, ya=55)])
     b.check_fills([_tr(px=44, side="no", cnt=10)])
     bk = b.book([_mk(yb=45, ya=55)])          # fresh mark
@@ -815,6 +861,7 @@ def test_lane_budgets_guarantee_every_lane_gets_evidence(tmp_path,
     """The rotation slice did not fix sampling: wide got 8 quotes of
     400 because volume lives in penny books. Slots are reserved now."""
     b = _bot(tmp_path, monkeypatch)
+    monkeypatch.setattr(ph, "WIDE_ON", True)    # lane retired 8/22
     monkeypatch.setattr(ph, "TIGHT_ON", True)   # lane retired 8/22
     monkeypatch.setattr(ph, "LANE_BUDGET", {"fav": 2, "wide": 2,
                                             "tight": 2})
@@ -830,6 +877,7 @@ def test_lane_budgets_guarantee_every_lane_gets_evidence(tmp_path,
 
 def test_favorite_lane_never_quotes_a_crossed_book(tmp_path, monkeypatch):
     b = _bot(tmp_path, monkeypatch)
+    monkeypatch.setattr(ph, "WIDE_ON", True)    # lane retired 8/22
     b.quote([_mk(yb=94, ya=95)])               # mid 94.5, ask floor 96
     q = b.quotes.get("KXMLBGAME-T1")
     if q:
@@ -892,6 +940,7 @@ def test_thin_evidence_falls_back_to_base_budgets(tmp_path, monkeypatch):
 def test_old_inventory_gets_shoved_toward_flat(tmp_path, monkeypatch):
     """Collateral that cannot turn is collateral that is not working."""
     b = _bot(tmp_path, monkeypatch)
+    monkeypatch.setattr(ph, "WIDE_ON", True)    # lane retired 8/22
     monkeypatch.setattr(ph, "HIT_COOLDOWN_S", 0)
     b.quote([_mk(yb=45, ya=55)])
     b.check_fills([_tr(px=44, side="no", cnt=10)])     # long 10
@@ -905,6 +954,7 @@ def test_old_inventory_gets_shoved_toward_flat(tmp_path, monkeypatch):
 
 def test_going_flat_resets_the_age_clock(tmp_path, monkeypatch):
     b = _bot(tmp_path, monkeypatch)
+    monkeypatch.setattr(ph, "WIDE_ON", True)    # lane retired 8/22
     b.quote([_mk(yb=45, ya=55)])
     b.check_fills([_tr(px=44, side="no", cnt=10, tid="b1")])
     assert "age_ts" in b.inv["KXMLBGAME-T1"]
@@ -982,6 +1032,7 @@ def test_fav_lane_is_never_shoved_out_of_its_own_trade(tmp_path,
 def test_the_making_lanes_still_get_flattened(tmp_path, monkeypatch):
     """Recycling still applies where the trade IS the round trip."""
     b = _bot(tmp_path, monkeypatch)
+    monkeypatch.setattr(ph, "WIDE_ON", True)    # lane retired 8/22
     b.quote([_mk(yb=45, ya=55)])                  # wide lane
     b.check_fills([_tr(px=44, side="no", cnt=10)])
     assert b.inv["KXMLBGAME-T1"]["lane"] == "wide"
@@ -990,16 +1041,17 @@ def test_the_making_lanes_still_get_flattened(tmp_path, monkeypatch):
     assert b._skew("KXMLBGAME-T1") > fresh
 
 
-def test_tight_lane_is_retired_on_the_evidence(tmp_path, monkeypatch):
-    """Two independent samples convicted it: phantom4 (2,062 pairs,
-    gross 0.55c against 0.95c of fees) and phantom5 (2,471 pairs,
-    -0.72c/pair). The fee curve explains it exactly - a 1-3c book
-    cannot pay for its own round trip at our tier."""
+def test_only_the_working_lane_is_quoted(tmp_path, monkeypatch):
+    """8/22 (Adam: 'focus on what is working and drop what is not').
+    TIGHT convicted twice on unit economics (0.55c gross against 0.95c
+    of fees; then -0.72c/pair). WIDE convicted on absence: a 250-quote
+    budget across 2,230 markets produced zero fills, zero pairs, zero
+    inventory. Only fav has ever shown positive unit economics."""
     b = _bot(tmp_path, monkeypatch)
     b.quote([_mk(tk="TIGHT", yb=49, ya=51), _mk(tk="WIDE", yb=45, ya=55),
              _mk(tk="FAV", yb=88, ya=91)])
-    assert set(b.quotes) == {"WIDE", "FAV"}
-    assert b.stats.get("tight_retired", 0) == 1
+    assert set(b.quotes) == {"FAV"}
+    assert b.stats.get("lane_retired", 0) == 2
 
 
 def test_tight_lane_can_be_revived(tmp_path, monkeypatch):
@@ -1017,6 +1069,7 @@ def test_staleness_guard_is_lane_aware(tmp_path, monkeypatch):
     that drifted into our 96c ask is the trade paying off. A strategy
     that holds for the drift must not be protected against drift."""
     b = _bot(tmp_path, monkeypatch)
+    monkeypatch.setattr(ph, "WIDE_ON", True)    # lane retired 8/22
     b.quote([_mk(tk="FAV", yb=88, ya=91),          # fav lane
              _mk(tk="MAKE", yb=45, ya=55)])        # wide lane
     px_fav = 89 - (ph.STALE_C + 6)                 # a big dip
