@@ -2419,3 +2419,27 @@ def test_clamp_counts_a_refused_cancel(tmp_path, monkeypatch):
     b._clamp_offers()
     assert b.exec_stats["clamp_legs"] == 1
     assert b.exec_stats["clamp_fail"] == 1
+
+
+def test_failed_cancel_records_why(tmp_path, monkeypatch):
+    """8/24 pt4: 84/84 cancels refused with no reason captured."""
+    b = _bot(tmp_path, monkeypatch)
+
+    class _Boom:
+        def cancel_order(self, oid):
+            raise RuntimeError("order not found")
+
+    b.client = _Boom()
+    assert b._cancel_leg("L1", "T1") is False
+    cw = b.exec_stats["cancel_why"]
+    assert any("order not found" in k for k in cw)
+    assert sum(cw.values()) == 1
+    assert b.orphan_legs[-1]["why"].startswith("RuntimeError")
+    # the reason map stays bounded no matter how many distinct errors
+    for i in range(40):
+        class _B2:
+            def __init__(self, i): self.i = i
+            def cancel_order(self, oid): raise RuntimeError(f"e{self.i}")
+        b.client = _B2(i)
+        b._cancel_leg(f"L{i+2}", "T1")
+    assert len(b.exec_stats["cancel_why"]) <= 12

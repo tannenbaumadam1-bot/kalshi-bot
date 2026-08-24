@@ -1971,10 +1971,29 @@ class DriftLive:
         try:
             self.client.cancel_order(oid)
             return True
-        except Exception:
+        except Exception as exc:
+            # 8/24 pt4: WHY the exchange refuses matters and was never
+            # recorded. 84 of 84 clamp cancels failed on a book whose
+            # mirror still LISTED all 84 as resting - "already gone"
+            # (a stale mirror, so the over-offer is phantom) and
+            # "market closed" and "auth" are three completely different
+            # problems with three different fixes, and they were
+            # indistinguishable. Reason strings are bucketed, bounded,
+            # and published on exec.cancel_why.
+            why = type(exc).__name__
+            try:
+                txt = str(exc)[:120]
+                if txt:
+                    why = f"{why}: {txt}"
+            except Exception:
+                pass
+            cw = self.exec_stats.setdefault("cancel_why", {})
+            if isinstance(cw, dict):
+                if why in cw or len(cw) < 12:
+                    cw[why] = cw.get(why, 0) + 1
             if not any(o.get("oid") == oid for o in self.orphan_legs):
                 self.orphan_legs.append({"oid": oid, "tk": tk,
-                                         "ts": now()})
+                                         "ts": now(), "why": why})
                 self.exec_stats["orphan_legs"] = (
                     self.exec_stats.get("orphan_legs", 0) + 1)
             return False
