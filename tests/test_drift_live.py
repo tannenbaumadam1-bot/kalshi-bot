@@ -2443,3 +2443,57 @@ def test_failed_cancel_records_why(tmp_path, monkeypatch):
         b.client = _B2(i)
         b._cancel_leg(f"L{i+2}", "T1")
     assert len(b.exec_stats["cancel_why"]) <= 12
+
+
+# ---------------- 8/24: the V2 cancel migration ----------------
+
+def test_cancel_uses_v2_path_with_ticker(tmp_path, monkeypatch):
+    """create_order was migrated to V2; cancel_order was not, so on 8/24
+    every cancel in the book 410'd (210 attempts, 210 refusals) and
+    every cancel-then-replace mechanism was silently frozen."""
+    from kalshibot.client import KalshiClient
+    calls = []
+
+    class _C(KalshiClient):
+        def __init__(self):
+            self.base_url = "https://x/trade-api/v2"
+
+        def _request(self, method, path, params=None, body=None, retries=2):
+            calls.append((method, path, params))
+            return {"order_id": "o1", "reduced_by": "10.00"}
+
+    c = _C()
+    c.cancel_order("o1", ticker="KXHIGHNY-26AUG24-T78")
+    assert calls == [("DELETE", "/portfolio/events/orders/o1",
+                      {"market_ticker": "KXHIGHNY-26AUG24-T78"})]
+
+
+def test_cancel_falls_back_to_v1_only_after_v2_fails():
+    from kalshibot.client import KalshiClient, KalshiError
+    calls = []
+
+    class _C(KalshiClient):
+        def __init__(self):
+            self.base_url = "https://x/trade-api/v2"
+
+        def _request(self, method, path, params=None, body=None, retries=2):
+            calls.append(path)
+            if "events" in path:
+                raise KalshiError("410 deprecated")
+            return {"ok": True}
+
+    assert _C().cancel_order("o1") == {"ok": True}
+    assert calls == ["/portfolio/events/orders/o1", "/portfolio/orders/o1"]
+
+
+def test_cancel_api_tolerates_a_client_without_ticker_arg(tmp_path,
+                                                          monkeypatch):
+    b = _bot(tmp_path, monkeypatch)
+
+    class _Old:
+        def __init__(self): self.seen = []
+        def cancel_order(self, oid): self.seen.append(oid); return {}
+
+    b.client = _Old()
+    assert b._cancel_leg("L1", "T1") is True
+    assert b.client.seen == ["L1"]

@@ -1951,6 +1951,15 @@ class DriftLive:
                 t["days"].pop(old, None)
         self.turns = t
 
+    def _cancel_api(self, oid, tk=None):
+        """One cancel call. 8/24: passes the ticker so the V2 endpoint
+        can auto-route the exchange shard, and tolerates a client whose
+        cancel_order predates that argument."""
+        try:
+            return self.client.cancel_order(oid, ticker=tk)
+        except TypeError:
+            return self.client.cancel_order(oid)
+
     def _cancel_leg(self, oid, tk):
         """Cancel one resting leg. Returns True only if the exchange
         actually took the cancel.
@@ -1969,7 +1978,7 @@ class DriftLive:
         if self.client is None:
             return True
         try:
-            self.client.cancel_order(oid)
+            self._cancel_api(oid, tk)
             return True
         except Exception as exc:
             # 8/24 pt4: WHY the exchange refuses matters and was never
@@ -2013,7 +2022,7 @@ class DriftLive:
                     self.exec_stats.get("orphan_cleared", 0) + 1)
                 continue        # gone from the book: nothing to cancel
             try:
-                self.client.cancel_order(oid)
+                self._cancel_api(oid, o.get("tk"))
                 self.exec_stats["orphan_cleared"] = (
                     self.exec_stats.get("orphan_cleared", 0) + 1)
             except Exception:
@@ -2566,7 +2575,7 @@ class DriftLive:
             if off and self.client is not None:
                 for leg in (off.get("legs") or []):
                     try:
-                        self.client.cancel_order(leg.get("oid"))
+                        self._cancel_api(leg.get("oid"), tk)
                     except Exception:
                         pass
             self.offers.pop(tk, None)
@@ -2860,7 +2869,7 @@ class DriftLive:
         the authoritative fill count at the moment of death. Returns
         False when the cancel itself failed (caller must keep the row)."""
         try:
-            resp = self.client.cancel_order(oid)
+            resp = self._cancel_api(oid, (o or {}).get("ticker"))
         except Exception:
             return False
         ro = {}
@@ -3108,7 +3117,7 @@ class DriftLive:
                 if roid in known:
                     continue
                 try:
-                    self.client.cancel_order(roid)
+                    self._cancel_api(roid, tk0)
                 except Exception:
                     continue
                 self.exec_stats["stale_quotes_canceled"] = (
@@ -3169,7 +3178,7 @@ class DriftLive:
                     lo = leg.get("oid")
                     if lo in resting_ids:
                         try:
-                            self.client.cancel_order(lo)
+                            self._cancel_api(lo, tk)
                         except Exception:
                             pass
                 del self.offers[tk]         # settled first: quote is dead
@@ -3209,7 +3218,7 @@ class DriftLive:
                     lo = leg.get("oid")
                     if lo in resting_ids:
                         try:
-                            self.client.cancel_order(lo)
+                            self._cancel_api(lo, tk)
                         except Exception:
                             pass
                 self.offers.pop(tk, None)
@@ -3955,7 +3964,7 @@ class DriftLive:
                 continue                    # close enough: keep resting
             if self.client is not None:
                 try:
-                    self.client.cancel_order(d.get("oid"))
+                    self._cancel_api(d.get("oid"), tk)
                 except Exception:
                     continue
             del self.dips[tk]

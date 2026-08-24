@@ -214,5 +214,37 @@ class KalshiClient:
         )
         return self._request("POST", "/portfolio/events/orders", body=body)
 
-    def cancel_order(self, order_id: str) -> Dict[str, Any]:
-        return self._request("DELETE", f"/portfolio/orders/{order_id}")
+    def cancel_order(self, order_id: str,
+                     ticker: Optional[str] = None) -> Dict[str, Any]:
+        """Cancel one resting order.
+
+        8/24 THE BIG ONE. create_order was migrated to the V2 path
+        (/portfolio/events/orders) but cancel_order was left behind on
+        the legacy /portfolio/orders/{id}, and on 8/24 Kalshi began
+        answering it with:
+
+            410 deprecated_v1_order_endpoint
+            "Please switch to the V2 endpoints"
+
+        So the book could OPEN positions and could not CANCEL anything.
+        Measured live before the fix: 210 cancel attempts, 210 refusals,
+        zero successes. Every mechanism built on cancel-then-replace was
+        silently frozen - the offer ladder could not requote to lower
+        rungs (which is why 96c placements went to zero and the
+        lift:settle ratio inverted), stale quotes could not be pulled,
+        orphan legs could not be cleared, and the over-offer clamp could
+        not clamp. The failures were invisible because every call site
+        wrapped the exception and moved on.
+
+        market_ticker lets the exchange auto-route the shard; harmless
+        when omitted. The v1 path is kept as a fallback ONLY so a
+        partial rollout on Kalshi's side can't leave us unable to cancel
+        at all - it is tried second and its own failure is what
+        propagates.
+        """
+        path = f"/portfolio/events/orders/{order_id}"
+        params = {"market_ticker": ticker} if ticker else None
+        try:
+            return self._request("DELETE", path, params=params)
+        except KalshiError:
+            return self._request("DELETE", f"/portfolio/orders/{order_id}")
