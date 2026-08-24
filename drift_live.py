@@ -91,6 +91,9 @@ CHASE_MAX_E_PROVEN = int(os.environ.get("DRIFT_LIVE_CHASE_MAX_E_PROVEN", "99"))
 # reach either. Used ONLY to detect selling more than we hold.
 _OFFER_HI_C = int(os.environ.get("DRIFT_LIVE_OFFER_HI_C", "90"))
 _OFFER_LO_C = int(os.environ.get("DRIFT_LIVE_OFFER_LO_C", "10"))
+# 8/24 (Adam-approved): ACT on the over-offer detector instead of only
+# publishing it. See _clamp_offers. REVERT: export DRIFT_LIVE_CLAMP=0.
+OFFER_CLAMP_ON = os.environ.get("DRIFT_LIVE_CLAMP", "1") == "1"
 # Nickel trail-bleed fix (7/25: trail exits cost -$5+ on a lane that was 3-0
 # at settlement - wobble papercuts exceeded the gap risk they insure against).
 # Live nickels now HOLD TO SETTLEMENT like the original design; the <50c
@@ -197,10 +200,21 @@ BUCKET_STICKY = os.environ.get("DRIFT_LIVE_BUCKET_STICKY", "1") == "1"
 # live (bust ~-2.50, clusters capped). Adam explicitly ordered the
 # unblock AT 8% SIZING on 8/18 ("we need to be more aggressive here
 # to hit return targets") - recorded per the never-touch-the-ceiling
-# rule: his number, his call. REVERT: export DRIFT_LIVE_BUCKET_ALLOW=""
-# (empty), or edit the default here.
+# rule: his number, his call.
+#
+# 8/24 RETIRED, by Adam ("please make both those fixes right now").
+# The 8/18 override rested on the belief that the lane's negative
+# window was an artifact of a payoff shape that no longer existed.
+# The 8/24 bucket-ledger v2 rebuild removed the measurement bias that
+# argument depended on - and on honest FULL-POSITION math the lane is
+# still -$5.00 over 42 positions. The override was protecting a lane
+# from a distorted number; the number is no longer distorted, so the
+# protection is now just an exemption from evidence. The gate governs
+# it like everything else: if it earns its way back to positive, it
+# unblocks on its own.
+# RESTORE: export DRIFT_LIVE_BUCKET_ALLOW="level:85-89".
 BUCKET_ALLOW = {k.strip() for k in os.environ.get(
-    "DRIFT_LIVE_BUCKET_ALLOW", "level:85-89").split(",") if k.strip()}
+    "DRIFT_LIVE_BUCKET_ALLOW", "").split(",") if k.strip()}
 # Evidence-weighted Kelly (7/28, Adam: 'increase positions as we
 # accumulate gains'): a bucket that has PROVEN itself on the live ledger
 # (n >= KELLY_PROVEN_N settled, net > 0) earns half-Kelly sizing; every
@@ -2075,6 +2089,82 @@ class DriftLive:
             if offered > held + 0.009:
                 out[tk] = round(offered - held, 2)
         return out
+
+    def _clamp_offers(self):
+        """CANCEL every contract offered beyond what we hold.
+
+        8/24 (Adam-approved). _over_offer_c has DETECTED this since 8/14
+        and nothing acted on it: Austin sat with 90 contracts resting
+        against a 19-contract position. Selling more than we hold is not
+        an exit - past flat it opens a SHORT of the outcome we bet on,
+        un-sized by Kelly, uncapped by any slate rule, and invisible to
+        every risk gate because no bet row exists for it. The 8/14
+        _cancel_leg fix stopped orphans being CREATED silently; this
+        removes the ones already resting (and any future leak, whatever
+        its cause - failed cancel, partial fill, settlement lag).
+
+        Truth source is the exchange mirror, never our own books: a
+        stray leg is by definition one our books lost track of - which
+        is also why this CLEARS THE WHOLE LADDER on an offending ticker
+        rather than trimming leg-by-leg. Partial trimming has to decide
+        which legs are "ours", and the premise of the bug is that we do
+        not know; leg sizes rarely divide evenly into the excess either,
+        so trimming either leaves a short standing or over-cuts by
+        accident. Clearing and rebuilding is deterministic: the ticker
+        drops out of self.offers and the requote pass posts a correctly
+        sized ladder on the next cycle (~90s unquoted, against a short
+        that is otherwise open indefinitely).
+
+        Cancels run furthest-from-lifting first so that if only some
+        succeed, the ones left resting are the likeliest to sell real
+        inventory. That is MAX projected price on a yes position (our
+        sell rests at 97-99 unchanged) and MIN on a no position (our
+        sell of NO at 99 projects to a YES buy at 1 - the 8/12
+        YES-projection rule). A leg whose cancel fails goes to
+        orphan_legs for the retry pass rather than being dropped. Fails
+        silent: no cancel here can ever block the trading cycle."""
+        if self.client is None or not OFFER_CLAMP_ON:
+            return
+        over = self._over_offer_c()
+        if not over:
+            return
+        for tk in over:
+            b = (self.bets or {}).get(tk) or {}
+            side = b.get("side")
+            legs = []
+            for ro in (self.k_resting or []):
+                if ro.get("ticker") != tk or not ro.get("oid"):
+                    continue
+                try:
+                    px = int(round(float(ro.get("entry") or 0)))
+                    cnt = float(ro.get("count") or 0)
+                except (TypeError, ValueError):
+                    continue
+                exiting = (px >= _OFFER_HI_C if side == "yes"
+                           else px <= _OFFER_LO_C)
+                if exiting and cnt > 0:
+                    legs.append((px, cnt, ro.get("oid")))
+            # our sell of a NO position projects to a LOW yes price, so
+            # "furthest from lifting" is max px on yes, min px on no
+            legs.sort(key=lambda L: L[0], reverse=(side == "yes"))
+            for px, cnt, oid in legs:
+                if self._cancel_leg(oid, tk):
+                    self.exec_stats["over_offer_canceled"] = (
+                        self.exec_stats.get("over_offer_canceled", 0) + 1)
+                    self.exec_stats["over_offer_ct"] = round(
+                        self.exec_stats.get("over_offer_ct", 0) + cnt, 2)
+                    self._log([now(), "OVER-OFFER-CANCEL", self.mode,
+                               b.get("city", ""), b.get("strike", ""),
+                               b.get("hl", ""), side, "", px, cnt,
+                               "", "", f"{tk}:{oid}"])
+                    # drop it from our own book so the requote path
+                    # rebuilds a correctly-sized ladder next cycle
+                    off = (self.offers or {}).get(tk)
+                    if off:
+                        off["legs"] = [g for g in (off.get("legs") or [])
+                                       if g.get("oid") != oid]
+                        if not off["legs"]:
+                            self.offers.pop(tk, None)
 
     def _mark_nav(self, mkts):
         """8/17 BREAKER v3: mark the book to the exchange.
@@ -4125,6 +4215,10 @@ class DriftLive:
         self.place(mkts)
         self.flatten(mkts)
         self.cut_check(mkts)         # 8/17: band-broken downside exit
+        # 8/24: clear any offer resting beyond the position BEFORE the
+        # requote pass rebuilds ladders - an over-offer is a short we
+        # never chose, so it outranks placing new quotes
+        self._clamp_offers()
         self.quote_offers(mkts)      # 8/10: the offer side of the book
         try:
             bal = self.balance_c()

@@ -2289,3 +2289,96 @@ def test_bucket_v2_migration_purges_stale_convictions(tmp_path, monkeypatch):
     _json.dump(d, open(dl.STATE, "w"))
     b2 = dl.DriftLive(None, mode="DRY")
     assert b2.bucket_blocked_cum == {}
+
+
+# ------- 8/24: over-offer CLAMP + the level:85-89 override retirement -------
+
+def test_over_offer_is_canceled_down_to_the_position(tmp_path, monkeypatch):
+    """The Austin case: 90 contracts resting against 19 held. Detection
+    existed since 8/14; nothing acted on it. Past flat those legs open a
+    SHORT no risk gate can see."""
+    b = _bot(tmp_path, monkeypatch)
+    tk = "KXLOWTAUS-26AUG24-T72"
+    b.bets[tk] = dict(_stale_order(tk=tk, entry=88, count=19), fee=0)
+    b.offers[tk] = {"legs": [{"oid": "L1", "px": 98, "count": 19},
+                             {"oid": "L2", "px": 99, "count": 40},
+                             {"oid": "L3", "px": 97, "count": 31}],
+                    "count": 19, "rungs": [97, 98, 99], "ots": ""}
+    rows = [{"ticker": tk, "oid": "L1", "entry": 98, "count": 19},
+            {"ticker": tk, "oid": "L2", "entry": 99, "count": 40},
+            {"ticker": tk, "oid": "L3", "entry": 97, "count": 31}]
+    b.client = _FakeOrphanClient(rows)
+    b.k_resting = rows
+    assert b._over_offer_c()[tk] == 71.0        # 90 offered vs 19 held
+    b._clamp_offers()
+    # the WHOLE ladder clears, furthest-from-lifting first (99, 98, 97),
+    # and the requote pass rebuilds a correctly sized one next cycle
+    assert b.client.canceled == ["L2", "L1", "L3"]
+    assert b.exec_stats["over_offer_canceled"] == 3
+    assert b.exec_stats["over_offer_ct"] == 90.0
+    assert tk not in b.offers
+
+
+def test_clamp_leaves_a_correctly_sized_ladder_alone(tmp_path, monkeypatch):
+    b = _bot(tmp_path, monkeypatch)
+    tk = "KXHIGHNY-26AUG24-T78"
+    b.bets[tk] = dict(_stale_order(tk=tk, entry=88, count=20), fee=0)
+    rows = [{"ticker": tk, "oid": "L1", "entry": 98, "count": 10},
+            {"ticker": tk, "oid": "L2", "entry": 99, "count": 10}]
+    b.client = _FakeOrphanClient(rows)
+    b.k_resting = rows
+    assert b._over_offer_c() == {}
+    b._clamp_offers()
+    assert b.client.canceled == []
+
+
+def test_clamp_reads_a_no_position_from_the_low_side(tmp_path, monkeypatch):
+    """Our sell of a NO position projects to a LOW yes price (the 8/12
+    YES-projection rule), so 'furthest from lifting' is the MIN price."""
+    b = _bot(tmp_path, monkeypatch)
+    tk = "KXHIGHTDAL-26AUG24-T106"
+    b.bets[tk] = dict(_stale_order(tk=tk, entry=88, count=10),
+                      side="no", fee=0)
+    rows = [{"ticker": tk, "oid": "N1", "entry": 2, "count": 10},
+            {"ticker": tk, "oid": "N2", "entry": 1, "count": 15}]
+    b.client = _FakeOrphanClient(rows)
+    b.k_resting = rows
+    assert b._over_offer_c()[tk] == 15.0
+    b._clamp_offers()
+    # min projected px first on a no position (yes-1 == our NO sell at 99)
+    assert b.client.canceled == ["N2", "N1"]
+
+
+def test_clamp_keeps_a_failed_cancel_for_retry(tmp_path, monkeypatch):
+    b = _bot(tmp_path, monkeypatch)
+    tk = "KXHIGHCHI-26AUG24-B75.5"
+    b.bets[tk] = dict(_stale_order(tk=tk, entry=88, count=5), fee=0)
+    rows = [{"ticker": tk, "oid": "L1", "entry": 99, "count": 25}]
+
+    class _Flaky(_FakeOrphanClient):
+        def cancel_order(self, oid):
+            raise RuntimeError("exchange said no")
+
+    b.client = _Flaky(rows)
+    b.k_resting = rows
+    b._clamp_offers()
+    assert b.exec_stats.get("over_offer_canceled") is None
+    assert any(o.get("oid") == "L1" for o in b.orphan_legs)
+
+
+def test_level_85_89_override_retired_by_default():
+    """8/24 Adam: the override is gone; the gate governs the lane."""
+    assert dl.BUCKET_ALLOW == set()
+
+
+def test_retired_override_lets_the_gate_block_a_negative_lane(tmp_path,
+                                                              monkeypatch):
+    b = _bot(tmp_path, monkeypatch)
+    monkeypatch.setattr(dl, "BUCKET_ALLOW", set())
+    b.history = [{"trig": "level", "entry": 87, "tk": f"T{i}", "ots": str(i),
+                  "pnl": -0.20, "outcome": 0} for i in range(42)]
+    bs = b._bucket_stats()
+    assert bs["level:85-89"]["n"] == 42
+    assert b._bucket_blocked(bs, "level", 87) is True
+    assert b._bucket_is_proven("level", 87, bs) is False
+    assert b._kelly_frac(bs, "level", 87) == dl.KELLY_BASE
