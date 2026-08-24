@@ -80,7 +80,16 @@ TRADE_PAGES = int(os.environ.get("PHANTOM_TRADE_PAGES", "4"))
 # existed and under a capital formula that double-counted paired
 # positions the exchange would have netted flat. A ledger built over a
 # broken constraint can't be repaired in place - it has to restart.
-ERA = "phantom6"
+# 8/24 phantom7: the book capital changed $100 -> $1,000 and the
+# per-game dollar cap went from 10% of book to 1%. That is a different
+# position-sizing regime, and this project's rule (learned four times
+# over on 8/20) is that a ledger built under a different constraint
+# cannot be compared to one built after it - the old -$32.60 is
+# dominated by a single game that can no longer happen at that size.
+# Reset rather than carry. The 91 settles and the evidence clock reset
+# with it; that cost is real and it is smaller than the cost of a
+# blended number nobody can interpret.
+ERA = "phantom7"
 
 # --- quoting policy (all in cents) ---
 # Only quote where the market is wide enough that stepping inside still
@@ -177,7 +186,26 @@ SETTLE_BATCH = int(os.environ.get("PHANTOM_SETTLE_BATCH", "25"))
 # $135 account could never post, so its P&L is not a number we could
 # have earned. The book now stops ADDING at its collateral limit;
 # risk-reducing fills are always allowed.
-BOOK_CAPITAL_C = int(os.environ.get("PHANTOM_CAPITAL", "10000"))
+#
+# 8/24 RAISED $100 -> $1,000 (Adam-approved). The $100 cap was chosen
+# for REALISM against the live account, and for a market-making lane
+# that turns over 8x/hour it was fine. The `fav` lane is not a making
+# lane: its thesis is accumulate-and-HOLD until the favorite drifts
+# into the ask. So it filled $100 of collateral across 11 markets in a
+# few hours and then correctly refused everything else - forever.
+# Measured 8/24: capital $104.90 of $100, cap_full refusing 236,308
+# times, turns_h 0.01 against a design target of 7.5-8, and the
+# 100-settle evidence clock frozen at 91 with no path to 100. The book
+# was not disproving the thesis, it was not TESTING it.
+#
+# $1,000 is not a bigger bet, it is a bigger sample: with GAME_CAP_C at
+# $10 the book now holds ~100 independent games instead of ~6, so the
+# MIN/SD disaster (-$37.6, 37% of the old book) becomes a 1% event by
+# construction. It also stays inside the 8/20 capacity model, which put
+# the realistic ceiling for this tail strategy at $5-25k - so a result
+# earned here is still a result we could have earned for real.
+# REVERT: export PHANTOM_CAPITAL=10000.
+BOOK_CAPITAL_C = int(os.environ.get("PHANTOM_CAPITAL", "100000"))
 # the fast path must not become a tight-book-only sample: HOT is fed by
 # prints, and 97% of prints are in 1-3c books, so without a slice of
 # rotation the WIDE lane - the one that looked profitable - stops being
@@ -792,9 +820,23 @@ class PhantomBook:
         net = (r["bn"] - r["sn"]) if r else 0
         adding = -1 if taker_side == "yes" else 1
         reducing = (net * adding) < 0
-        if not reducing and self._capital_c() >= BOOK_CAPITAL_C:
-            self.stats["cap_full"] = self.stats.get("cap_full", 0) + 1
-            return False
+        if not reducing:
+            # 8/24: PROJECT the fill, don't just check the pre-trade
+            # balance. The old test refused only once capital was
+            # ALREADY at the cap, so the fill that crossed it was always
+            # allowed through - which is how a book with a hard $100
+            # limit sat at $104.90. Size the projection with the largest
+            # lot we could take (SIZE) at this quote's own price, so the
+            # cap binds before the breach rather than after it.
+            px_c = q.get("bid") if adding > 0 else q.get("ask")
+            try:
+                add_c = SIZE * (float(px_c) if adding > 0
+                                else (100 - float(px_c)))
+            except (TypeError, ValueError):
+                add_c = SIZE * 100          # unpriceable: assume worst
+            if self._capital_c() + add_c > BOOK_CAPITAL_C:
+                self.stats["cap_full"] = self.stats.get("cap_full", 0) + 1
+                return False
         if abs(net + adding) > MAX_POS and (net * adding) >= 0:
             return False
         ev = q.get("event")
@@ -1240,6 +1282,23 @@ class PhantomBook:
             for k in sorted(self.pnl_days)[:-60]:
                 self.pnl_days.pop(k, None)
         state["pnl_days"] = dict(sorted(self.pnl_days.items())[-10:])
+        # 8/24: pnl_days stores the CUMULATIVE total as of each date, but
+        # it was built on 8/20 "so we see the SHAPE not one cumulative
+        # number" - and it has been publishing exactly the cumulative
+        # number it was created to replace (8/22 +14.62, 8/23 -36.27,
+        # 8/24 -32.60, where the last entry IS the running total). The
+        # stored series stays as-is so nothing downstream breaks; this
+        # publishes the day-over-day CHANGE beside it, which is the
+        # shape the experiment is actually read on.
+        _days = sorted(self.pnl_days.items())
+        _delta, _prev = {}, 0.0
+        for _d, _v in _days[-11:]:
+            try:
+                _delta[_d] = round(float(_v) - _prev, 2)
+                _prev = float(_v)
+            except (TypeError, ValueError):
+                continue
+        state["pnl_delta"] = dict(list(_delta.items())[-10:])
         state["errs"] = self.errs
         self.last = state
         if self.rec is not None:

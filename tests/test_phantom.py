@@ -821,10 +821,17 @@ def test_daily_pnl_series_records_the_shape(tmp_path, monkeypatch):
     assert b2.pnl_days[today] == 5.0           # survives a restart
 
 
-def test_book_starts_at_one_hundred_dollars():
-    """Adam, 8/20: 'reset the paper money to $100 and start flat'."""
-    assert ph.BOOK_CAPITAL_C == 10000
-    assert ph.ERA == "phantom6"      # 8/22: fav lane holds, no shove
+def test_book_capital_is_a_thousand_and_era_is_phantom7():
+    """8/24 (Adam-approved): the $100 book was sized for a lane that
+    turns over 8x/hour. `fav` HOLDS, so it saturated in hours and the
+    evidence clock froze at 91/100 - the book stopped testing the
+    thesis. $1,000 buys ~100 independent games at the $10 game cap
+    instead of ~6, so no single game can be 37% of the book again.
+    The era bumps because the sizing regime changed."""
+    assert ph.BOOK_CAPITAL_C == 100000
+    assert ph.ERA == "phantom7"
+    # the game cap is now 1% of book, not 10%
+    assert ph.GAME_CAP_C * 100 == ph.BOOK_CAPITAL_C
 
 
 # ---------------- 8/21: the favorite lane ----------------
@@ -1126,3 +1133,41 @@ def test_evidence_clock_published(tmp_path, monkeypatch):
     assert c == {"n": 91, "goal": ph.CLOCK_GOAL, "verdict_due": False}
     b.stats["settled"] = ph.CLOCK_GOAL
     assert b._clock()["verdict_due"] is True
+
+
+def test_capital_cap_binds_before_the_breach(tmp_path, monkeypatch):
+    """8/24: the old check refused only once capital was ALREADY at the
+    cap, so the fill that crossed it always got through - which is how a
+    hard $100 book sat at $104.90."""
+    b = _bot(tmp_path, monkeypatch)
+    monkeypatch.setattr(ph, "BOOK_CAPITAL_C", 1000)     # $10 book
+    # $9 of collateral held: one more 10-lot at 85c would make it $17.50
+    b.inv["T1"] = {"bn": 10, "bc": 900, "sn": 0, "sc": 0, "event": "E1",
+                   "sport": "mlb", "title": "t", "lane": "fav"}
+    q = {"event": "E2", "sport": "mlb", "title": "t", "lane": "fav",
+         "bid": 85, "ask": 88}
+    assert b._room("T2", q, "no") is False       # projected, so refused
+    assert b.stats["cap_full"] >= 1
+    # a RISK-REDUCING fill is still always allowed at the cap
+    assert b._room("T1", q, "yes") is True
+
+
+def test_pnl_delta_publishes_daily_shape(tmp_path, monkeypatch):
+    """pnl_days stores the running total; the field was created to show
+    SHAPE and was publishing the cumulative number it replaced."""
+    b = _bot(tmp_path, monkeypatch)
+    b.pnl_days = {"2026-08-22": 14.62, "2026-08-23": -36.27,
+                  "2026-08-24": -32.60}
+    monkeypatch.setattr(b, "fetch_markets", lambda full=True: ([], 0))
+    monkeypatch.setattr(b, "fetch_trades", lambda s: [])
+    st = b.step()
+    d = st["pnl_delta"]
+    # step() stamps TODAY's cumulative itself, so grade the closed days:
+    # cumulative 14.62 -> -36.27 is a -50.89 DAY, which the old field
+    # reported as "-36.27" and made look like a third of the real loss
+    assert d["2026-08-22"] == 14.62      # first day: delta from flat
+    assert d["2026-08-23"] == -50.89
+    # and today's delta is measured off the last closed cumulative
+    import datetime as _d2
+    today = _d2.date.today().isoformat()
+    assert d[today] == round(st["pnl_days"][today] - (-36.27), 2)
