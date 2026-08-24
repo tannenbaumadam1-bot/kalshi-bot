@@ -2248,3 +2248,44 @@ def test_rebid_map_stays_bounded():
         for k in sorted(b.rebid, key=lambda x: b.rebid[x])[:50]:
             b.rebid.pop(k, None)
     assert len(b.rebid) == 200
+
+
+# ---------------- 8/24 bucket ledger v2: full positions ----------------
+
+def test_bucket_grades_full_position_not_first_exit(tmp_path, monkeypatch):
+    """A winner that lifts in tranches must count its WHOLE lifecycle.
+    v1 kept only the first exit row: tranche 1's sliver for winners,
+    the full settle for never-lifted losers - the bias that cascaded
+    sticky blocks over 8/22-8/24 and strangled the ladder."""
+    b = _bot(tmp_path, monkeypatch)
+    b.history = [
+        # position A: two lift tranches then a small settle residue
+        {"trig": "level", "entry": 87, "tk": "TA", "ots": "1",
+         "pnl": 0.50, "sold": True},
+        {"trig": "level", "entry": 87, "tk": "TA", "ots": "1",
+         "pnl": 0.50, "sold": True},
+        {"trig": "level", "entry": 87, "tk": "TA", "ots": "1",
+         "pnl": -0.10, "outcome": 0},
+        # position B: never lifted, settled as a loss
+        {"trig": "level", "entry": 88, "tk": "TB", "ots": "2",
+         "pnl": -0.60, "outcome": 0},
+    ]
+    bs = b._bucket_stats()
+    a = bs[b._bucket_key("level", 87)]
+    assert a["n"] == 2                       # two POSITIONS, not 4 rows
+    assert a["wins"] == 1                    # A is a net winner (+0.90)
+    assert abs(a["net"] - 0.30) < 1e-9       # +0.90 - 0.60, not -0.10 - 0.60
+
+
+def test_bucket_v2_migration_purges_stale_convictions(tmp_path, monkeypatch):
+    import json as _json
+    b = _bot(tmp_path, monkeypatch)
+    b.bucket_blocked_cum = {"level:85-89": {"n": 65, "net": -6.26, "ts": "x"}}
+    b.save()
+    d = _json.load(open(dl.STATE))
+    assert d.get("bucket_v2") is True        # flag persists post-migration
+    # a pre-v2 state file (flag absent) must purge on load
+    d.pop("bucket_v2", None)
+    _json.dump(d, open(dl.STATE, "w"))
+    b2 = dl.DriftLive(None, mode="DRY")
+    assert b2.bucket_blocked_cum == {}

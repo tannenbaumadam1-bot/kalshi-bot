@@ -498,6 +498,19 @@ WEEK_HALT_ON = os.environ.get("DRIFT_LIVE_WEEK_HALT", "1") == "1"
 MNAV_ON = os.environ.get("DRIFT_LIVE_MNAV", "1") == "1"
 MNAV_FRESH_S = int(os.environ.get("DRIFT_LIVE_MNAV_FRESH_S", "900"))
 MNAV_MIN_COV = float(os.environ.get("DRIFT_LIVE_MNAV_COV", "0.5"))
+# 8/24 (Adam-approved): a cached mark has a SHELF LIFE. mk_px was
+# carried forward forever, so a position whose market died kept
+# contributing its last (often peak) price to marked NAV - and that NAV
+# fed the breaker's rolling-peak ledger. The 8/22 ~$146.8 "peak" the
+# 8/24 halt measured from was built partly on such unexpirable marks
+# (same failure as 8/17's $137 stale-mark ATH, one layer deeper). A
+# mark older than MNAV_MARK_AGE_S no longer counts as coverage; the
+# position falls back to entry cost and, if too much of the book is in
+# that state, the pass refuses to publish and the breaker drops to its
+# cost-basis fallback (week.basis="cost") - stale marks can now make
+# the breaker BLIND-SAFE but never confidently wrong.
+# REVERT: export DRIFT_LIVE_MARK_AGE_S=1e12.
+MNAV_MARK_AGE_S = float(os.environ.get("DRIFT_LIVE_MARK_AGE_S", "2700"))
 # --- 8/17 DOWNSIDE EXIT (Adam-approved): the ladder only sells HIGH.
 # On 8/17 the losers rode 88c -> 5c with no exit rule at all (the old
 # 35c stop was retired 8/10). CUT sells a position into the bid once
@@ -786,6 +799,33 @@ class DriftLive:
                     # limit, it halts again next cycle on its own.
                     self.nav_days = {}
                     self.week_halted = False
+                if not d.get("nav_v4"):
+                    # 8/24 one-time BREAKER v4 MIGRATION (Adam-approved
+                    # "fix anchors first, re-judge the halt"): every
+                    # existing nav_days entry may embed UNEXPIRABLE
+                    # cached marks (the pre-v4 _mark_nav carried mk_px
+                    # forever), so the ~$146.8 rolling peak behind the
+                    # 8/24 halt cannot be attested against exchange
+                    # truth. Same recipe as v3: clear the ledger, reset
+                    # the latch; _mark_nav (now with the mark shelf
+                    # life) re-seeds honest peaks from the next cycle
+                    # and the gate re-evaluates every cycle - if the
+                    # drawdown is real from here, it halts again on its
+                    # own. The forgiven history is recorded in
+                    # AUTOPSY_2026-08-24.md, not silently dropped.
+                    self.nav_days = {}
+                    self.week_halted = False
+                if not d.get("bucket_v2"):
+                    # 8/24 one-time BUCKET LEDGER v2 (Adam-approved):
+                    # every sticky conviction in bucket_blocked_cum was
+                    # reached under first-exit-only grading (see
+                    # _bucket_stats) - winners counted one tranche,
+                    # never-lifted losers counted whole. Purge the
+                    # convictions; the corrected full-position ledger
+                    # re-blocks anything still negative at n >=
+                    # BUCKET_MIN_N within one cycle, from the same
+                    # retained history.
+                    self.bucket_blocked_cum = {}
             except Exception:
                 pass
         # 8/11 K-TRUTH v2 one-time rebuild: backfill sale proceeds from
@@ -871,21 +911,37 @@ class DriftLive:
         return f"{trig}:{band}"
 
     def _bucket_stats(self):
-        """Live evidence per trigger x entry-band (deduped, ALL realized
-        outcomes). A bucket with n >= BUCKET_MIN_N and negative net is
-        BLOCKED - capital only flows where the live edge isn't disproven."""
-        agg, seen = {}, set()
+        """Live evidence per trigger x entry-band, graded on FULL
+        POSITIONS. A bucket with n >= BUCKET_MIN_N and negative net is
+        BLOCKED - capital only flows where the live edge isn't disproven.
+
+        8/24 v2 (Adam-approved). v1 deduped by (tk, ots) keeping only
+        the FIRST exit row per position. Under the ladder that is a
+        structural bias: a winner lifts in tranches, so only tranche 1's
+        small P&L was counted, while a never-lifted loser settled once
+        and counted in full. The better the exit engine worked, the
+        worse every bucket looked - over 8/22-8/24 the stickies
+        convicted nearly every lane, blocked lanes lost "proven" status,
+        ladder floors rose 96->98, conversion collapsed (+11 lifts vs
+        +40 settles), and the settle tail bought the -$22.78 day that
+        tripped the breaker. The gate strangled the edge it protects.
+        v2 sums EVERY row of a position (tranche lifts + flatten +
+        settle residue) into one number first, then buckets positions.
+        The measurement unit now equals the strategy's unit."""
+        agg, pos = {}, {}
         for h in self.history:
-            k = (h.get("tk") or (h.get("city"), h.get("strike")), h.get("ots"))
-            if k in seen or h.get("trig") in (None, "adopt"):
+            if h.get("trig") in (None, "adopt"):
                 continue
-            seen.add(k)
-            bk = self._bucket_key(h.get("trig"), h.get("entry"))
-            a = agg.setdefault(bk, {"n": 0, "wins": 0, "net": 0.0})
+            k = (h.get("tk") or (h.get("city"), h.get("strike")), h.get("ots"))
+            d = pos.setdefault(k, {"bk": self._bucket_key(h.get("trig"),
+                                                          h.get("entry")),
+                                   "pnl": 0.0})
+            d["pnl"] += h.get("pnl") or 0
+        for d in pos.values():
+            a = agg.setdefault(d["bk"], {"n": 0, "wins": 0, "net": 0.0})
             a["n"] += 1
-            p = h.get("pnl") or 0
-            a["wins"] += 1 if p > 0 else 0
-            a["net"] = round(a["net"] + p, 2)
+            a["wins"] += 1 if d["pnl"] > 0 else 0
+            a["net"] = round(a["net"] + d["pnl"], 2)
         if not isinstance(getattr(self, "bucket_blocked_cum", None), dict):
             self.bucket_blocked_cum = {}
         for bk, a in agg.items():
@@ -1259,6 +1315,8 @@ class DriftLive:
              # risk case leans on this breaker being real.
              "nav_days": getattr(self, "nav_days", None) or {},
              "nav_v3": True,
+             "nav_v4": True,
+             "bucket_v2": True,
              "last_mnav_c": getattr(self, "last_mnav_c", 0.0),
              "mnav_ts": getattr(self, "mnav_ts", 0.0),
              "slate_days": getattr(self, "slate_days", None) or {},
@@ -1346,6 +1404,11 @@ class DriftLive:
                           # this cycle - "marked" is the honest one;
                           # "cost" means marks were too stale/thin.
                           "basis": getattr(self, "week_basis", "cost"),
+                          # 8/24: the rolling peak the drawdown is
+                          # measured from, so a halt is auditable
+                          "peak": (round(float(self.week_peak_c) / 100.0, 2)
+                                   if getattr(self, "week_peak_c", None)
+                                   else None),
                           "mnav": (round(float(self.last_mnav_c) / 100.0, 2)
                                    if getattr(self, "last_mnav_c", 0)
                                    else None)},
@@ -2059,8 +2122,13 @@ class DriftLive:
                     px = (100 - ya) if ya else None
             if px is not None and 0 < px < 100:
                 b["mk_px"], b["mk_ts"] = int(px), t_now
-            elif b.get("mk_px") is not None:
-                px = b["mk_px"]          # last honest mark, not entry
+            elif (b.get("mk_px") is not None
+                  and (t_now - float(b.get("mk_ts") or 0))
+                  <= MNAV_MARK_AGE_S):
+                px = b["mk_px"]          # last honest mark, still fresh
+            # else: mark expired - position carries at entry cost below
+            # and does NOT count as coverage; enough expiries and the
+            # whole pass refuses to publish (MNAV_MIN_COV)
             if px is not None and 0 < px < 100:
                 mark_c += int(px) * cnt
                 cov_c += cost
@@ -2120,6 +2188,10 @@ class DriftLive:
                    for i in range(7)]
             peaks = [float(self.nav_days.get(d) or 0) for d in win]
             peak_c = max(peaks + [nav_c])
+            # 8/24: publish the peak the drawdown is measured from -
+            # the 8/24 halt was un-auditable from the tracker because
+            # loss and limit were visible but the anchor was not.
+            self.week_peak_c = peak_c
             # negative = drawdown, to match the old sign convention
             wk_c = nav_c - peak_c
         except (TypeError, ValueError, OverflowError):

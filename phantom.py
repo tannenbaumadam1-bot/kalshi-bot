@@ -109,6 +109,21 @@ MAX_WIDTH_C = int(os.environ.get("PHANTOM_MAX_WIDTH", "8"))
 # measures gambling instead of making.
 MAX_POS = int(os.environ.get("PHANTOM_MAX_POS", "20"))
 MAX_CLUSTER_POS = int(os.environ.get("PHANTOM_MAX_CLUSTER", "40"))
+# 8/24 (Adam-approved, the MIN/SD lesson): the cluster cap above counts
+# CONTRACTS per game, but risk is DOLLARS. MIN vs SD (8/22) cost -$37.6
+# across five correlated props - winner, two spreads, F7, a home-run
+# prop - all one bet in five costumes, and the contract cap never saw
+# the dollars pile up. This caps the net COLLATERAL one game may hold
+# across ALL of its markets combined. Risk-reducing fills always pass.
+# REVERT: export PHANTOM_GAME_CAP_C=100000.
+GAME_CAP_C = int(os.environ.get("PHANTOM_GAME_CAP_C", "1000"))
+# 8/24 evidence clock: the fav lane's verdict is DUE at this many
+# settles. If the adverse-selection clocks (fast/slow) are still
+# negative when it rings, the lane retires by the third-retirement
+# rule - Adam's call, but the deadline is now stated up front instead
+# of discovered afterwards (the sports-book lesson: a gate slower than
+# the thesis is a filing cabinet).
+CLOCK_GOAL = int(os.environ.get("PHANTOM_CLOCK_N", "100"))
 # 8/20 build 3 (Adam: "why don't we include it in the actual book").
 # 97% of prints happen in 1-3c books we were refusing on principle. So
 # we quote them too - in the SAME book, one inventory - but every quote
@@ -788,6 +803,25 @@ class PhantomBook:
                      if v.get("event") == ev)
             if cl >= MAX_CLUSTER_POS and (net * adding) >= 0:
                 return False
+            # 8/24: DOLLAR cap per game (see GAME_CAP_C). Same
+            # per-market collateral formula as _capital_c, summed over
+            # every market of this event. Only risk-ADDING fills are
+            # refused: a fill that shrinks this market's net always
+            # shrinks the game's collateral too.
+            if not reducing:
+                cl_c = 0.0
+                for v in self.inv.values():
+                    if v.get("event") != ev:
+                        continue
+                    nv = v["bn"] - v["sn"]
+                    if nv > 0:
+                        cl_c += nv * (v["bc"] / v["bn"])
+                    elif nv < 0:
+                        cl_c += -nv * (100 - v["sc"] / v["sn"])
+                if cl_c >= GAME_CAP_C:
+                    self.stats["game_capped"] = (
+                        self.stats.get("game_capped", 0) + 1)
+                    return False
         return True
 
     def _book_fill(self, tk, q, side, px, n, strict):
@@ -1060,6 +1094,12 @@ class PhantomBook:
         return prof
 
     # ---------------- the cycle ----------------
+    def _clock(self):
+        """8/24 evidence clock: the fav lane's verdict is DUE at
+        CLOCK_GOAL settles (adverse-selection clocks decide it)."""
+        n = self.stats.get("settled", 0)
+        return {"n": n, "goal": CLOCK_GOAL, "verdict_due": n >= CLOCK_GOAL}
+
     def step(self, full=True):
         mkts, series_hit = self.fetch_markets(full)
         # ORDER MATTERS. A resting order can only be hit by a print that
@@ -1178,8 +1218,12 @@ class PhantomBook:
                       "max_quotes": MAX_QUOTES,
                       "max_width": MAX_WIDTH_C,
                       "max_pos": MAX_POS, "max_cluster": MAX_CLUSTER_POS,
+                      "game_cap_c": GAME_CAP_C,
                       "skew_max": SKEW_MAX_C, "stale": STALE_C,
                       "maker_rate": MAKER_RATE},
+            # 8/24 evidence clock: settles toward the stated verdict
+            # deadline; verdict_due flips true when it rings
+            "clock": self._clock(),
             "positions": bk["positions"],
             "examples": [
                 {"tk": tk, "title": q["title"], "sport": q["sport"],

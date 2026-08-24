@@ -1094,3 +1094,35 @@ def test_fav_still_refuses_a_true_collapse(tmp_path, monkeypatch):
                     "count_fp": "10", "taker_side": "no"}])
     assert "FAV" not in b.inv
     assert b.stats.get("stale_fav", 0) == 1
+
+
+# ---------------- 8/24: dollar cap per game + evidence clock ----------------
+
+def test_game_dollar_cap_refuses_correlated_pileup(tmp_path, monkeypatch):
+    """MIN/SD lesson: five props of one game held -$37.6 of correlated
+    risk while never breaching the CONTRACT cluster cap. Collateral
+    dollars across ALL of a game's markets now cap at GAME_CAP_C."""
+    b = _bot(tmp_path, monkeypatch)
+    # two markets of the same game holding ~$11.50 of net collateral
+    b.inv["T1"] = {"bn": 10, "bc": 900, "sn": 0, "sc": 0, "event": "E1",
+                   "sport": "mlb", "title": "t", "lane": "fav"}
+    b.inv["T2"] = {"bn": 5, "bc": 250, "sn": 0, "sc": 0, "event": "E1",
+                   "sport": "mlb", "title": "t", "lane": "fav"}
+    q = {"event": "E1", "sport": "mlb", "title": "t", "lane": "fav"}
+    # risk-ADDING fill on a third market of the same game: refused
+    assert b._room("T3", q, "no") is False
+    assert b.stats.get("game_capped", 0) == 1
+    # risk-REDUCING fill on a held market always passes the dollar cap
+    assert b._room("T1", q, "yes") is True
+    # same size on a DIFFERENT game: fine
+    q2 = {"event": "E2", "sport": "mlb", "title": "t", "lane": "fav"}
+    assert b._room("T4", q2, "no") is True
+
+
+def test_evidence_clock_published(tmp_path, monkeypatch):
+    b = _bot(tmp_path, monkeypatch)
+    b.stats["settled"] = 91
+    c = b._clock()
+    assert c == {"n": 91, "goal": ph.CLOCK_GOAL, "verdict_due": False}
+    b.stats["settled"] = ph.CLOCK_GOAL
+    assert b._clock()["verdict_due"] is True

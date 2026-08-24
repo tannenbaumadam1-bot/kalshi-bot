@@ -744,3 +744,32 @@ def test_flatten_still_defers_when_there_is_no_bid(tmp_path, monkeypatch):
                         lambda self, tks: {"NOBID": (0, 0)})
     assert b.flatten(mkts=[]) == 0
     assert "NOBID" in b.bets            # settlement decides, as before
+
+
+# ---------------- 8/24 v4: marks have a shelf life ----------------
+
+def test_expired_cached_mark_no_longer_fakes_coverage(tmp_path, monkeypatch):
+    """8/24: a cached mark older than MNAV_MARK_AGE_S must not keep
+    publishing marked NAV (the ~$146.8 phantom-peak mechanism)."""
+    import time as _t
+    b = _bot(tmp_path, monkeypatch)
+    b.bets["T1"] = _no_pos("T1", entry=88, count=5)
+    b.dry_balance_c = 5000
+    b._mark_nav([_mk("T1", bid=95, ask=98)])
+    ts1 = b.mnav_ts
+    assert ts1 > 0
+    # market vanishes; cached mark goes stale beyond the shelf life
+    b.bets["T1"]["mk_ts"] = _t.time() - (dl.MNAV_MARK_AGE_S + 60)
+    b._mark_nav([_mk("OTHER", bid=50, ask=52)])
+    # zero coverage -> pass refuses to publish (mnav_ts unchanged)
+    assert b.mnav_ts == ts1
+
+
+def test_fresh_cached_mark_still_carries(tmp_path, monkeypatch):
+    b = _bot(tmp_path, monkeypatch)
+    b.bets["T1"] = _no_pos("T1", entry=88, count=5)
+    b.dry_balance_c = 5000
+    b._mark_nav([_mk("T1", bid=95, ask=98)])
+    ts1 = b.mnav_ts
+    b._mark_nav([_mk("OTHER", bid=50, ask=52)])   # ticker missing, mark fresh
+    assert b.mnav_ts > 0 and b.mnav_ts >= ts1
