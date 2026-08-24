@@ -2126,14 +2126,30 @@ class DriftLive:
         if self.client is None or not OFFER_CLAMP_ON:
             return
         over = self._over_offer_c()
+        self.exec_stats["clamp_ran"] = (
+            self.exec_stats.get("clamp_ran", 0) + 1)
         if not over:
             return
+        # 8/24 pt3: the first ship of this clamp cancelled NOTHING on a
+        # book publishing 8 over-offered tickers, and had no counter to
+        # say which branch declined - the exact "no candidates and dead
+        # code look alike" failure this book fixed once already (8/20
+        # ovn_lo_blocked). Every step now counts.
+        self.exec_stats["clamp_tickers"] = (
+            self.exec_stats.get("clamp_tickers", 0) + len(over))
         for tk in over:
             b = (self.bets or {}).get(tk) or {}
             side = b.get("side")
             legs = []
             for ro in (self.k_resting or []):
-                if ro.get("ticker") != tk or not ro.get("oid"):
+                if ro.get("ticker") != tk:
+                    continue
+                if not ro.get("oid"):
+                    # a resting row the mirror could not give an order
+                    # id for cannot be cancelled by any path - count it
+                    # loudly rather than skipping in silence
+                    self.exec_stats["clamp_no_oid"] = (
+                        self.exec_stats.get("clamp_no_oid", 0) + 1)
                     continue
                 try:
                     px = int(round(float(ro.get("entry") or 0)))
@@ -2147,6 +2163,13 @@ class DriftLive:
             # our sell of a NO position projects to a LOW yes price, so
             # "furthest from lifting" is max px on yes, min px on no
             legs.sort(key=lambda L: L[0], reverse=(side == "yes"))
+            self.exec_stats["clamp_legs"] = (
+                self.exec_stats.get("clamp_legs", 0) + len(legs))
+            if not legs:
+                # detector said over-offered, mirror walk found nothing
+                # to cancel: the two disagree and that must be visible
+                self.exec_stats["clamp_no_legs"] = (
+                    self.exec_stats.get("clamp_no_legs", 0) + 1)
             for px, cnt, oid in legs:
                 if self._cancel_leg(oid, tk):
                     self.exec_stats["over_offer_canceled"] = (
@@ -2165,6 +2188,12 @@ class DriftLive:
                                        if g.get("oid") != oid]
                         if not off["legs"]:
                             self.offers.pop(tk, None)
+                else:
+                    # _cancel_leg already queued it to orphan_legs for
+                    # the retry pass; count the refusal so a book that
+                    # can never cancel is visible immediately
+                    self.exec_stats["clamp_fail"] = (
+                        self.exec_stats.get("clamp_fail", 0) + 1)
 
     def _mark_nav(self, mkts):
         """8/17 BREAKER v3: mark the book to the exchange.

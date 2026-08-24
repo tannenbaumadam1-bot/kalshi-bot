@@ -2382,3 +2382,40 @@ def test_retired_override_lets_the_gate_block_a_negative_lane(tmp_path,
     assert b._bucket_blocked(bs, "level", 87) is True
     assert b._bucket_is_proven("level", 87, bs) is False
     assert b._kelly_frac(bs, "level", 87) == dl.KELLY_BASE
+
+
+def test_clamp_counts_every_branch_it_declines(tmp_path, monkeypatch):
+    """8/24 pt3: the first ship cancelled nothing and had no counter to
+    say why. Detector-vs-mirror disagreement must be loud."""
+    b = _bot(tmp_path, monkeypatch)
+    tk = "KXHIGHNY-26AUG24-T78"
+    b.bets[tk] = dict(_stale_order(tk=tk, entry=88, count=5), fee=0)
+    # detector sees an over-offer, but the mirror row carries no oid
+    rows = [{"ticker": tk, "oid": None, "entry": 99, "count": 14}]
+    b.client = _FakeOrphanClient(rows)
+    b.k_resting = rows
+    assert b._over_offer_c()[tk] == 9.0
+    b._clamp_offers()
+    assert b.client.canceled == []
+    assert b.exec_stats["clamp_ran"] == 1
+    assert b.exec_stats["clamp_tickers"] == 1
+    assert b.exec_stats["clamp_no_oid"] == 1
+    assert b.exec_stats["clamp_no_legs"] == 1
+    assert b.exec_stats.get("over_offer_canceled") is None
+
+
+def test_clamp_counts_a_refused_cancel(tmp_path, monkeypatch):
+    b = _bot(tmp_path, monkeypatch)
+    tk = "KXHIGHMIA-26AUG24-B94.5"
+    b.bets[tk] = dict(_stale_order(tk=tk, entry=88, count=5), fee=0)
+    rows = [{"ticker": tk, "oid": "L1", "entry": 99, "count": 9}]
+
+    class _Flaky(_FakeOrphanClient):
+        def cancel_order(self, oid):
+            raise RuntimeError("no")
+
+    b.client = _Flaky(rows)
+    b.k_resting = rows
+    b._clamp_offers()
+    assert b.exec_stats["clamp_legs"] == 1
+    assert b.exec_stats["clamp_fail"] == 1
