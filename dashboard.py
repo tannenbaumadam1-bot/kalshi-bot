@@ -1130,7 +1130,10 @@ async function load(){
       tile('Evidence clock',(cl.n||0)+' / '+(cl.goal||200),(cl.verdict_due?'<span class=neg>VERDICT DUE</span>':'settled windows before this lane is judged')+' &middot; '+(T.wins||0)+'W / '+(T.losses||0)+'L'),
       tile('Paper fills',(T.fills_strict||0)+' strict &middot; '+(T.fills_loose||0)+' loose','strict = a real print traded THROUGH our resting bid &middot; '+(T.trades_seen||0)+' prints seen &middot; '+(T.cycles||0)+' cycles'),
       tile('Lanes',Object.keys(lanes).length?Object.keys(lanes).map(function(k){return k+' '+M(lanes[k].pnl)}).join(' &middot; '):'&ndash;','endgame = certainty the clock already delivered &middot; tail = the longshot-bias harvest'),
-      tile('Why we stood aside',(RF.no_edge||0)+' no edge &middot; '+(RF.band_skip||0)+' out of band','+'+(RF.no_vol||0)+' warming up &middot; '+(RF.no_proxy||0)+' stale feed &middot; '+(RF.capped||0)+' capped &mdash; a quiet book here means the market was efficient, which is itself the finding')
+      tile('Why we stood aside',(RF.no_edge||0)+' no edge &middot; '+(RF.band_skip||0)+' out of band','+'+(RF.no_vol||0)+' warming up &middot; '+(RF.proxy_dead||0)+' dead proxy &middot; '+(RF.capped||0)+' capped &mdash; a quiet book here means the market was efficient, which is itself the finding'),
+      tile('In and out',(T.exits||0)+' early exits','sold back to the book before settlement rather than riding a binary &middot; the live weather ledger says lifts +$88.82 vs settles &minus;$91.05'),
+      tile('Reference feeds',(T.dead&&T.dead.length?'<span class=neg>'+T.dead.length+' DEAD</span>':'<span class=pos>all live</span>'),'movement in basis points across the tape: '+Object.keys(T.live_bp||{}).map(function(k){return k.replace('KX','').replace('15M','')+' '+(T.live_bp[k]!=null?T.live_bp[k].toFixed(1):'&ndash;')}).join(' &middot; ')+' &middot; a frozen feed invents fake edge'),
+      tile('True arbitrage',(T.arb_seen||0)+' crossed books','yes ask + no ask &lt; 100 after BOTH fees &mdash; locked profit with no view. Counted, not assumed: on a liquid book this should be ~zero')
     ].join('');
     $('tkwin').innerHTML=(T.windows||[]).map(function(w){
       var edge=(w.model_p!=null&&w.yes_bid!=null)?(w.model_p*100-((w.yes_bid+w.yes_ask)/2)):null;
@@ -1142,7 +1145,7 @@ async function load(){
       +'<td class=num>'+(w.yes_bid!=null?w.yes_bid+'/'+w.yes_ask:'&ndash;')+'</td>'
       +'<td class=num>'+(w.model_p!=null?(w.model_p*100).toFixed(1)+'%':'<span class=mut>warming</span>')+'</td>'
       +'<td class=num>'+(edge!=null?(edge>0?'+':'')+edge.toFixed(1)+'&cent;':'&ndash;')+'</td>'
-      +'<td>'+(w.quoted?'<span class=pos>quoting</span>':'<span class=mut>&mdash;</span>')+'</td></tr>';}).join('')
+      +'<td>'+(w.dead?'<span class=neg>feed dead</span>':(w.quoted?'<span class=pos>quoting</span>':'<span class=mut>&mdash;</span>'))+'</td></tr>';}).join('')
       ||'<tr><td colspan=9 class=empty>No open window right now&hellip;</td></tr>';
     $('tkcal').innerHTML=(T.calibration||[]).map(function(c){
       var said=parseFloat(c.bucket)+5,dev=(c.hit!=null)?(c.hit-said):null;
@@ -1154,7 +1157,7 @@ async function load(){
       return '<tr><td class=mut>'+String(s.ts||'').replace('T',' ').slice(5,16)+'</td>'
       +'<td>'+(s.label||'')+'</td><td>'+(s.lane||'')+'</td>'
       +'<td>'+String(s.side||'').toUpperCase()+'</td>'
-      +'<td class=num>'+(s.px!=null?s.px+'&cent;':'&ndash;')+'</td>'
+      +'<td class=num>'+(s.px!=null?s.px+'&cent;':'&ndash;')+(s.exit_px!=null?' &rarr; '+s.exit_px+'&cent;':'')+'</td>'
       +'<td class=num>'+(s.model_p!=null?(s.model_p*100).toFixed(0)+'%':'&ndash;')+'</td>'
       +'<td>'+(s.won?'<span class=pos>WON</span>':'<span class=neg>LOST</span>')+'</td>'
       +'<td class=num><span class="'+C(s.pnl)+'">'+M(s.pnl)+'</span></td></tr>';}).join('')

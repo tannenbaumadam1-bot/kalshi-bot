@@ -79,7 +79,7 @@ def test_num_never_lets_a_string_reach_a_comparison():
 def _mkt(**kw):
     base = {"tk": "T1", "series": "KXGOLD15M", "label": "gold",
             "strike": 100.0, "close_ts": time.time() + 120,
-            "yes_bid": 90.0, "yes_ask": 94.0}
+            "yes_bid": 90.0, "yes_ask": 94.0, "depth": 100.0}
     base.update(kw)
     return base
 
@@ -279,3 +279,113 @@ def test_only_one_writer_paper_does_not_also_step_the_book():
     src = open(os.path.join(here, "paper.py")).read()
     assert "tick_paper.start_thread()" in src
     assert "tk_bot.step()" not in src
+
+
+# ---------- proxy liveness (the WTI bug, caught live 8/25) ----------
+def test_a_frozen_proxy_is_declared_dead():
+    """USOILSPOT printed 82.2930 -> 82.2933 over 40s while gold moved
+    two points. A distance computed off a frozen feed is noise, and it
+    manufactured a 43-cent 'edge' pointing the wrong way."""
+    b = T.TickBook()
+    b.ticks["KXWTI15M"] = [(1000 + i * 20, 82.2930 + (i % 2) * 0.0003)
+                           for i in range(30)]
+    assert b.proxy_dead("KXWTI15M") is True
+
+
+def test_a_moving_proxy_is_alive():
+    b = T.TickBook()
+    b.ticks["KXGOLD15M"] = [(1000 + i * 20, 4650.0 + i * 0.4)
+                            for i in range(30)]
+    assert b.proxy_dead("KXGOLD15M") is False
+
+
+def test_a_dead_proxy_series_is_never_quoted():
+    b = T.TickBook()
+    b.ticks["KXWTI15M"] = [(1000 + i * 20, 82.29) for i in range(30)]
+    m = {"tk": "W1", "series": "KXWTI15M", "label": "wti", "strike": 82.29,
+         "open_ts": time.time() - 600, "close_ts": time.time() + 120,
+         "title": "", "yes_bid": 90.0, "yes_ask": 94.0,
+         "no_bid": None, "no_ask": None}
+    b.fetch_book = lambda tk: (90.0, 94.0, 10.0, 10.0)
+    n = b.quote([m], {"KXWTI15M": (82.29, 1.0)})
+    assert n == 0
+    assert b.stats["proxy_dead"] >= 1
+
+
+# ---------- both sides priced independently (Adam 8/25) ----------
+def test_the_no_side_is_evaluated_on_its_own_book():
+    """A NO at 12 is only a YES at 88 if you cross the spread. The old
+    code could only ever pick the side the model favoured."""
+    b = T.TickBook()
+    # model favours YES (~98%) but YES is offered at 99 (no edge left),
+    # while the mirrored NO price still carries edge
+    out = b.decide(_mkt(yes_bid=30.0, yes_ask=34.0), 99.0, 0.02, 60)
+    assert out is not None
+    assert out[3] == "no"
+
+
+def test_the_better_edge_wins_not_the_favoured_side():
+    b = T.TickBook()
+    out = b.decide(_mkt(yes_bid=88.0, yes_ask=92.0), 100.5, 0.02, 60)
+    lane, _p, px, side, p_side = out
+    assert side == "yes"
+    assert p_side * 100 - px >= T.EDGE_C
+
+
+# ---------- true arb ----------
+def test_a_crossed_book_is_recorded_as_real_arbitrage():
+    b = T.TickBook()
+    # yes_ask 40 + no_ask (100-55=45) = 85 -> 15c locked before fees
+    got = b.check_arb({"tk": "T1", "label": "gold",
+                       "yes_bid": 55.0, "yes_ask": 40.0})
+    assert got is not None and got["net_c"] > 0
+
+
+def test_a_normal_book_is_not_arbitrage():
+    b = T.TickBook()
+    assert b.check_arb({"tk": "T1", "label": "gold",
+                        "yes_bid": 40.0, "yes_ask": 44.0}) is None
+
+
+# ---------- the exit lane (Adam 8/25) ----------
+def _pos(b, side="yes", px=88.0, n=5.0):
+    b.pos["T1"] = {"tk": "T1", "series": "KXGOLD15M", "label": "gold",
+                   "lane": "endgame", "side": side, "n": n,
+                   "cost_c": px * n, "fee_c": 0.0, "strike": 100.0,
+                   "close_ts": time.time() + 120, "model_p": 0.95,
+                   "p_side": 0.95, "spot_at_entry": 100.5, "t_left": 120,
+                   "opened": "2000-01-01T00:00:00"}
+    b.ticks["KXGOLD15M"] = [(1000 + i * 20, 100.0 + i * 0.05)
+                            for i in range(30)]
+
+
+def test_exit_takes_the_money_when_the_market_comes_to_the_model():
+    b = T.TickBook()
+    _pos(b)
+    m = _mkt(tk="T1", yes_bid=97.0, yes_ask=98.0,
+             close_ts=time.time() + 120)
+    b.check_exits([m], {"KXGOLD15M": (100.5, 1.0)})
+    assert "T1" not in b.pos                 # sold
+    assert b.stats["exits"] == 1
+    assert b.settled[-1]["lane"] == "exit"
+    assert b.settled[-1]["pnl"] > 0
+
+
+def test_exit_holds_while_the_trade_is_still_cheap():
+    b = T.TickBook()
+    _pos(b)
+    m = _mkt(tk="T1", yes_bid=89.0, yes_ask=90.0,
+             close_ts=time.time() + 120)
+    b.check_exits([m], {"KXGOLD15M": (100.9, 1.0)})
+    assert "T1" in b.pos                     # edge remains: keep it
+
+
+def test_exit_never_pays_to_leave_a_thesis_intact():
+    """Selling below our own cost while the model still likes the trade
+    is the flatten leak that costs the live book -0.097/contract-hour."""
+    b = T.TickBook()
+    _pos(b, px=88.0)
+    m = _mkt(tk="T1", yes_bid=70.0, yes_ask=72.0,
+             close_ts=time.time() + 120)
+    b.check_exits([m], {"KXGOLD15M": (100.5, 1.0)})
+    assert "T1" in b.pos

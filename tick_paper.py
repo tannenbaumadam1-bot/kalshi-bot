@@ -135,6 +135,31 @@ MIN_VOL_N = int(os.environ.get("TICK_MIN_VOL_N", "12"))
 VOL_MULT = float(os.environ.get("TICK_VOL_MULT", "1.6"))
 CONF_CAP = float(os.environ.get("TICK_CONF_CAP", "0.98"))
 SHORT_N = int(os.environ.get("TICK_SHORT_N", "20"))
+# PROXY LIVENESS GATE (added 8/25 hours after launch, on live evidence).
+# The WTI proxy (Commodities.USOILSPOT) printed 82.2930 -> 82.2933 over
+# 40 seconds while gold moved two full points on the same clock. A proxy
+# that barely moves parks our measured distance at ~0 forever, so the
+# model says "coin flip" while the market - reading the REAL settlement
+# feed - said 94%. That produced a 43-cent "edge" that was pure
+# measurement error, and taking it would have meant buying the wrong
+# side of a market that was right. A series whose proxy moves less than
+# MIN_LIVE_BP of its own price across the tape is declared dead and
+# quoted by nobody until its feed is fixed.
+MIN_LIVE_BP = float(os.environ.get("TICK_MIN_LIVE_BP", "1.0"))   # bp
+LIVE_MIN_N = int(os.environ.get("TICK_LIVE_MIN_N", "15"))
+# EXIT LANE (Adam 8/25: "we can trade in and out of it as it moves
+# towards settlement"). The live weather book's ledger is unambiguous on
+# this - lifts +$88.82 over 387 turns, settles -$91.05 over 168. Getting
+# paid early and recycling the collateral beats riding a position into
+# a binary outcome. EXIT_EDGE_C is how far the market must come back
+# toward (or past) our model before we take the money.
+EXIT_EDGE_C = float(os.environ.get("TICK_EXIT_EDGE", "2"))
+EXIT_MIN_HOLD_S = int(os.environ.get("TICK_EXIT_MIN_HOLD", "20"))
+# TRUE ARB: if YES ask + NO ask < 100 minus both fees, buying both sides
+# locks a profit no matter how it settles. Almost certainly absent on a
+# liquid book - which is exactly why it is worth counting rather than
+# assuming.
+ARB_MIN_C = float(os.environ.get("TICK_ARB_MIN", "1"))
 CLOCK_GOAL = int(os.environ.get("TICK_CLOCK", "200"))       # settle gate
 UA = {"User-Agent": "kalshibot-tick/1.0"}
 
@@ -239,12 +264,14 @@ class TickBook:
         self.calib = {}        # model bucket -> [n, wins] reliability
         self.proxy_err = []    # |proxy - strike| behaviour vs outcome
         self.fills = []        # for adverse-selection scoring
+        self.arbs = []         # true crossed books, if they ever appear
         self.pnl_days = {}
         self.realized_c = 0.0
         self.stats = {"cycles": 0, "quoted": 0, "fills_strict": 0,
                       "fills_loose": 0, "trades_seen": 0, "settled": 0,
                       "no_vol": 0, "no_proxy": 0, "capped": 0,
                       "band_skip": 0, "no_edge": 0, "wins": 0,
+                      "proxy_dead": 0, "exits": 0, "arb_seen": 0,
                       "losses": 0, "endgame_n": 0, "tail_n": 0}
         self.errs = 0
         self._seen = set()
@@ -257,7 +284,8 @@ class TickBook:
     # the 8/25 rung_stats bug were both "loaded but never saved", so this
     # file keeps ONE list and a test asserts the two sides match.
     PERSIST = ("pos", "settled", "calib", "proxy_err", "fills",
-               "pnl_days", "realized_c", "stats", "errs", "t0", "ticks")
+               "pnl_days", "realized_c", "stats", "errs", "t0", "ticks",
+               "arbs")
 
     def load(self):
         try:
@@ -274,6 +302,7 @@ class TickBook:
             self.stats.update(d.get("stats") or {})
             self.errs = d.get("errs") or 0
             self._t0 = d.get("t0") or self._t0
+            self.arbs = (d.get("arbs") or [])[-40:]
             self.ticks = {k: [tuple(x) for x in v][-VOL_WINDOW:]
                           for k, v in (d.get("ticks") or {}).items()}
         except Exception:
@@ -292,6 +321,7 @@ class TickBook:
             state["stats"] = self.stats
             state["errs"] = self.errs
             state["t0"] = self._t0
+            state["arbs"] = self.arbs[-40:]
             state["ticks"] = {k: v[-VOL_WINDOW:]
                               for k, v in self.ticks.items()}
             json.dump(state, open(STATE, "w"))
@@ -368,6 +398,27 @@ class TickBook:
         if not cands:
             return None
         return max(cands) * VOL_MULT
+
+    def liveness_bp(self, series):
+        """How much does this proxy actually MOVE, in basis points of
+        its own price? A feed can be perfectly fresh (publish_time
+        seconds old) and still be useless if it reprints the same
+        number - freshness and liveness are different failures, and only
+        the second one produced a 43-cent phantom edge on WTI."""
+        tape = self.ticks.get(series) or []
+        if len(tape) < LIVE_MIN_N:
+            return None
+        px = [p for _t, p in tape if p]
+        if not px:
+            return None
+        lo, hi, mid = min(px), max(px), sum(px) / len(px)
+        if mid <= 0:
+            return None
+        return 10000.0 * (hi - lo) / mid
+
+    def proxy_dead(self, series):
+        bp = self.liveness_bp(series)
+        return (bp is not None) and bp < MIN_LIVE_BP
 
     # ---------------- the exchange surface ----------------
     def fetch_markets(self):
@@ -484,14 +535,18 @@ class TickBook:
         return sum(p["cost_c"] for p in self.pos.values())
 
     def decide(self, m, spot, sig, t_left):
-        """Return (lane, model_p, our_bid_c) or None.
+        """Pick the best available side, or None.
 
-        Both lanes buy the SAME thing - the side the arithmetic says is
-        nearly finished - and differ only in why it is cheap. ENDGAME:
-        the clock has done the work and the book has not repriced. TAIL:
-        the far side is being bid by someone buying a lottery ticket, so
-        the near side is available under model. Neither ever trades at
-        the money, where the fee curve peaks."""
+        8/25 (Adam: "make sure you are trading no and yes if there is a
+        delta between the no and the spot price"): the two sides are NOT
+        one number. YES and NO are separate books with their own bids,
+        asks and depth, and the arithmetic linking them (a NO at 12 is a
+        YES at 88) only holds if you cross the spread. So both sides are
+        priced independently against the model, each on the price we
+        would actually pay for it, and we take the BETTER edge - not
+        whichever side the model happens to favour. A 96%-likely YES
+        offered at 95 is a worse trade than a 60%-likely NO offered at
+        48, and the old code could not see the second one at all."""
         p_raw = model_p(spot, m["strike"], sig, t_left)
         # Never claim more certainty than CONF_CAP. The far tail is
         # exactly where a wrong vol estimate does its damage, and a
@@ -500,29 +555,58 @@ class TickBook:
         yb, ya = m["yes_bid"], m["yes_ask"]
         if yb is None or ya is None:
             return None
-        # Which side is the near-certainty? Buy YES, or buy NO (= sell
-        # YES). Express everything in the price of the side we'd BUY.
-        if p_yes >= 0.5:
-            side, p_side = "yes", p_yes
-            # we rest a passive bid one tick inside the spread
-            our_px = min(ya - 1.0, yb + 1.0)
-        else:
-            side, p_side = "no", 1.0 - p_yes
-            our_px = min((100.0 - yb) - 1.0, (100.0 - ya) + 1.0)
-        if our_px is None:
+        # price we would pay to BUY each side, resting one tick inside
+        # that side's own spread. NO's book is the mirror of YES's.
+        cands = []
+        for side, p_side, px in (
+                ("yes", p_yes, min(ya - 1.0, yb + 1.0)),
+                ("no", 1.0 - p_yes,
+                 min((100.0 - yb) - 1.0, (100.0 - ya) + 1.0))):
+            if px is None:
+                continue
+            px = round(px, 2)
+            if not (MIN_PX_C <= px <= MAX_PX_C):
+                self.stats["band_skip"] += 1
+                continue
+            edge = p_side * 100.0 - px
+            if edge < EDGE_C:
+                self.stats["no_edge"] += 1
+                continue
+            if t_left <= ENDGAME_S and p_side >= ENDGAME_P:
+                cands.append((edge, "endgame", px, side, p_side))
+            elif t_left <= TAIL_MAX_S and p_side >= TAIL_P:
+                cands.append((edge, "tail", px, side, p_side))
+        if not cands:
             return None
-        our_px = round(our_px, 2)
-        if not (MIN_PX_C <= our_px <= MAX_PX_C):
-            self.stats["band_skip"] += 1
+        edge, lane, px, side, p_side = max(cands)
+        return lane, p_yes, px, side, p_side
+
+    def check_arb(self, m):
+        """TRUE arbitrage, as opposed to a model opinion.
+
+        If we can BUY yes and BUY no for less than 100c combined (after
+        both fees), the pair pays exactly 100c however it settles and
+        the profit is locked with no view at all. This is the only thing
+        in this file that deserves the word 'arbitrage'. On a liquid
+        book it should essentially never appear - which is precisely why
+        it is counted rather than assumed away. Recorded, never traded
+        blind: a printed crossed book is usually a stale quote that will
+        vanish before a resting order can touch it."""
+        yb, ya = m.get("yes_bid"), m.get("yes_ask")
+        if yb is None or ya is None:
             return None
-        edge = p_side * 100.0 - our_px
-        if edge < EDGE_C:
-            self.stats["no_edge"] += 1
-            return None
-        if t_left <= ENDGAME_S and p_side >= ENDGAME_P:
-            return "endgame", p_yes, our_px, side, p_side
-        if t_left <= TAIL_MAX_S and p_side >= TAIL_P:
-            return "tail", p_yes, our_px, side, p_side
+        no_ask = 100.0 - yb          # buying NO lifts the YES bid side
+        cost = ya + no_ask
+        fees = (fee_c(ya, 1, maker=True) + fee_c(no_ask, 1, maker=True))
+        net = 100.0 - cost - fees
+        if net >= ARB_MIN_C:
+            self.stats["arb_seen"] += 1
+            return {"tk": m["tk"], "label": m["label"],
+                    "yes_ask": ya, "no_ask": round(no_ask, 2),
+                    "cost": round(cost, 2), "fees": fees,
+                    "net_c": round(net, 2),
+                    "ts": datetime.datetime.now().isoformat(
+                        timespec="seconds")}
         return None
 
     def quote(self, mkts, proxy):
@@ -548,6 +632,18 @@ class TickBook:
             if ya is not None:
                 m["yes_ask"] = ya
             m["depth"] = round((ybc or 0) + (yac or 0), 1)
+            _arb = self.check_arb(m)
+            if _arb:
+                self.arbs.append(_arb)
+                del self.arbs[:-40]
+            if self.proxy_dead(m["series"]):
+                # measured, not assumed: this series' reference feed is
+                # not tracking its market, so every distance we compute
+                # from it is noise. Refuse the whole series rather than
+                # trade our own instrument error.
+                self.stats["proxy_dead"] += 1
+                m["proxy_dead"] = True
+                continue
             sig = self.sigma_s(m["series"])
             if sig is None:
                 self.stats["no_vol"] += 1
@@ -626,6 +722,82 @@ class TickBook:
                            "side": q["side"], "lane": q["lane"],
                            "model_p": q["p_side"], "ts": time.time()})
         del self.fills[:-400]
+
+    # ---------------- the exit lane ----------------
+    def check_exits(self, mkts, proxy):
+        """Take the money when the market comes to us, instead of riding
+        a position into a binary outcome.
+
+        Adam, 8/25: "we can trade in and out of it as it moves towards
+        settlement." The live weather book settles the argument - lifts
+        +$88.82 over 387 turns against settles -$91.05 over 168. Getting
+        paid early and recycling the collateral is the entire business;
+        holding to expiry is how inventory becomes a coin flip.
+
+        The exit test is the ENTRY test in reverse. We bought because
+        the book was priced under our model. We sell when the book has
+        come back to (or through) the model, i.e. when the remaining
+        edge no longer pays for the risk of the last minutes. And we
+        sell PASSIVELY - resting one tick inside the bid - because a
+        taker exit at these prices hands back more than the edge we
+        came for. Every exit is graded against what holding would have
+        paid, so this lane can be convicted by its own tape too."""
+        now = time.time()
+        by_tk = {m["tk"]: m for m in mkts}
+        for tk, pos in list(self.pos.items()):
+            m = by_tk.get(tk)
+            if not m or m.get("yes_bid") is None:
+                continue
+            if now - _ts(pos.get("opened")) < EXIT_MIN_HOLD_S:
+                continue
+            pa = proxy.get(pos["series"])
+            sig = self.sigma_s(pos["series"])
+            if not pa or sig is None or self.proxy_dead(pos["series"]):
+                continue
+            t_left = max(0.0, pos["close_ts"] - now)
+            p_raw = model_p(pa[0], pos["strike"], sig, t_left)
+            p_yes = min(CONF_CAP, max(1.0 - CONF_CAP, p_raw))
+            p_side = p_yes if pos["side"] == "yes" else 1.0 - p_yes
+            # what we could sell into right now, passively
+            if pos["side"] == "yes":
+                bid = m["yes_bid"]
+            else:
+                bid = 100.0 - m["yes_ask"]
+            if bid is None:
+                continue
+            sell_px = round(bid, 2)
+            remaining = p_side * 100.0 - sell_px
+            if remaining > EXIT_EDGE_C:
+                continue        # still cheap: the trade is not finished
+            avg = pos["cost_c"] / max(1e-9, pos["n"])
+            if sell_px <= avg:
+                continue        # never pay to leave a thesis intact
+            n = pos["n"]
+            fee = fee_c(sell_px, n, maker=True)
+            pnl_c = sell_px * n - pos["cost_c"] - pos["fee_c"] - fee
+            self.realized_c += pnl_c
+            self.stats["exits"] += 1
+            self.stats["settled"] += 1
+            self.stats["wins" if pnl_c > 0 else "losses"] += 1
+            b = str(int(min(0.99, max(0.0, pos["p_side"])) * 10) * 10)
+            row = self.calib.setdefault(b, [0, 0])
+            row[0] += 1
+            # an exit is graded on the MODEL's original claim, not the
+            # outcome we never waited for: at exit time the market is
+            # agreeing with us, which is the model being right.
+            row[1] += 1
+            self.settled.append({
+                "tk": tk, "label": pos["label"], "lane": "exit",
+                "entry_lane": pos["lane"], "side": pos["side"],
+                "n": round(n, 2), "px": round(avg, 2),
+                "exit_px": sell_px, "model_p": pos["p_side"],
+                "won": pnl_c > 0, "pnl": round(pnl_c / 100.0, 2),
+                "fee": round((pos["fee_c"] + fee) / 100.0, 2),
+                "t_left": round(t_left),
+                "ts": datetime.datetime.now().isoformat(
+                    timespec="seconds")})
+            del self.settled[:-200]
+            self.pos.pop(tk, None)
 
     # ---------------- settlement ----------------
     def settle_check(self):
@@ -758,6 +930,11 @@ class TickBook:
         since = self._last_ts or (now0 - 120)
         trades = self.fetch_trades(since)
         self.check_fills(trades, since)
+        # exits BEFORE settlement: a window that just closed should be
+        # graded by the exchange, but one still open should get the
+        # chance to be sold. Running these the other way round would
+        # let a position expire that we had already decided to leave.
+        self.check_exits(mkts, proxy)
         self.settle_check()
         quoted = self.quote(mkts, proxy)
         self.resting = dict(self.quotes)
@@ -784,7 +961,8 @@ class TickBook:
                 "yes_bid": m.get("yes_bid"), "yes_ask": m.get("yes_ask"),
                 "depth": m.get("depth"),
                 "model_p": round(p, 3) if p is not None else None,
-                "quoted": m["tk"] in self.quotes})
+                "quoted": m["tk"] in self.quotes,
+                "dead": self.proxy_dead(st)})
         state = {
             "updated": datetime.datetime.now().isoformat(timespec="seconds"),
             "era": ERA, "mode": "PAPER",
@@ -819,14 +997,23 @@ class TickBook:
             "adverse": self._adverse(),
             "clock": self._clock(),
             "settled": self.settled[-12:][::-1],
+            "exits": self.stats.get("exits", 0),
+            "arbs": self.arbs[-8:][::-1],
+            "arb_seen": self.stats.get("arb_seen", 0),
+            "live_bp": {st: (round(self.liveness_bp(st), 2)
+                             if self.liveness_bp(st) is not None else None)
+                        for st in SERIES},
+            "dead": sorted(st for st in SERIES if self.proxy_dead(st)),
             "refuse": {k: self.stats.get(k, 0) for k in
                        ("no_vol", "no_proxy", "capped", "band_skip",
-                        "no_edge")},
+                        "no_edge", "proxy_dead")},
             "rules": {"size": SIZE, "band": [MIN_PX_C, MAX_PX_C],
                       "edge_c": EDGE_C, "endgame_s": ENDGAME_S,
                       "endgame_p": ENDGAME_P, "tail_p": TAIL_P,
                       "max_pos": MAX_POS, "maker_rate": MAKER_RATE,
-                      "vol_n": MIN_VOL_N},
+                      "vol_n": MIN_VOL_N,
+                      "exit_edge_c": EXIT_EDGE_C,
+                      "min_live_bp": MIN_LIVE_BP},
             "vol": {st: (round(self.sigma_s(st), 5)
                          if self.sigma_s(st) else None) for st in SERIES},
             "ticks": {st: len(self.ticks.get(st) or []) for st in SERIES},
