@@ -179,7 +179,7 @@ ARB_MIN_C = float(os.environ.get("TICK_ARB_MIN", "1"))
 # the WTI row happened.
 BASIS_N = int(os.environ.get("TICK_BASIS_N", "8"))
 MIN_BASIS_N = int(os.environ.get("TICK_MIN_BASIS_N", "3"))
-BASIS_WINDOW_S = int(os.environ.get("TICK_BASIS_WINDOW", "45"))
+BASIS_WINDOW_S = int(os.environ.get("TICK_BASIS_WINDOW", "30"))
 CLOCK_GOAL = int(os.environ.get("TICK_CLOCK", "200"))       # settle gate
 UA = {"User-Agent": "kalshibot-tick/1.0"}
 
@@ -308,7 +308,7 @@ class TickBook:
     # file keeps ONE list and a test asserts the two sides match.
     PERSIST = ("pos", "settled", "calib", "proxy_err", "fills",
                "pnl_days", "realized_c", "stats", "errs", "t0", "ticks",
-               "arbs", "basis")
+               "arbs", "basis_obs", "basis_seen")
 
     def load(self):
         try:
@@ -326,8 +326,11 @@ class TickBook:
             self.errs = d.get("errs") or 0
             self._t0 = d.get("t0") or self._t0
             self.arbs = (d.get("arbs") or [])[-40:]
-            self.basis = {k: list(v)[-BASIS_N:]
-                          for k, v in (d.get("basis") or {}).items()}
+            self.basis = {k: list(v)[-BASIS_N:] for k, v in
+                          (d.get("basis_obs") or {}).items()}
+            # a window already measured must not be measured twice after
+            # a restart - that would double-weight one boundary print
+            self._basis_seen = set(d.get("basis_seen") or [])
             self.ticks = {k: [tuple(x) for x in v][-VOL_WINDOW:]
                           for k, v in (d.get("ticks") or {}).items()}
         except Exception:
@@ -347,8 +350,14 @@ class TickBook:
             state["errs"] = self.errs
             state["t0"] = self._t0
             state["arbs"] = self.arbs[-40:]
-            state["basis"] = {k: v[-BASIS_N:]
-                              for k, v in self.basis.items()}
+            # NB: persist under a DIFFERENT key than the published
+            # median - step() publishes state["basis"] as the corrected
+            # offset the model actually uses, and writing the raw
+            # observation list into the same key silently replaced it
+            # on the tracker (caught live on the first deploy).
+            state["basis_obs"] = {k: v[-BASIS_N:]
+                                  for k, v in self.basis.items()}
+            state["basis_seen"] = sorted(self._basis_seen)[-200:]
             state["ticks"] = {k: v[-VOL_WINDOW:]
                               for k, v in self.ticks.items()}
             json.dump(state, open(STATE, "w"))

@@ -174,6 +174,31 @@ def test_fill_charges_the_maker_fee():
 
 
 # ---------------- persistence (the 8/15 + 8/25 bug class) ----------------
+def test_the_published_basis_is_the_median_not_the_raw_list():
+    """save() and step() both wrote a key called "basis"; the raw
+    observation list silently replaced the median on the tracker."""
+    b = T.TickBook()
+    b.basis["KXGOLD15M"] = [2.4, 2.5, 2.6]
+    st = {}
+    b.save(st)
+    assert "basis_obs" in st and "basis" not in st
+
+
+def test_a_measured_window_is_not_remeasured_after_a_restart():
+    path = os.path.join(tempfile.mkdtemp(), "s.json")
+    T.STATE = path
+    b = T.TickBook()
+    b.ticks["KXWTI15M"] = [(10_000, 82.2146)]
+    b.measure_basis([{"tk": "W1", "series": "KXWTI15M", "label": "wti",
+                      "strike": 82.29, "open_ts": 10_000}])
+    b.save({"era": T.ERA})
+    b2 = T.TickBook()
+    b2.ticks["KXWTI15M"] = [(10_000, 82.2146)]
+    b2.measure_basis([{"tk": "W1", "series": "KXWTI15M", "label": "wti",
+                       "strike": 82.29, "open_ts": 10_000}])
+    assert len(b2.basis["KXWTI15M"]) == 1
+
+
 def test_every_loaded_key_is_also_saved():
     """nav_days (8/15) and rung_stats (8/25) were both in the load path
     and missing from save(), so a deploy silently wiped them. Here the
