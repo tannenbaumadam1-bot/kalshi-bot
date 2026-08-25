@@ -856,6 +856,37 @@ class TickBook:
         return state
 
 
+def start_thread():
+    """Run the book on its OWN clock, in a daemon thread.
+
+    WHY THIS EXISTS: paper.py's main loop cycles every 90 seconds. A
+    15-minute window would get ~10 observations and the endgame lane -
+    whose entire thesis lives in the final five minutes - would get
+    three. Measuring a seconds-clock edge on a 90-second sampler is how
+    you conclude "no edge" when what you actually had was no resolution.
+
+    A thread, not a systemd unit, deliberately: it ships with the
+    existing deploy, needs nobody at the DigitalOcean console, and dies
+    with its parent. This thread is the ONLY writer of the state file -
+    paper.py must not also call step(), or two writers race over one
+    json.dump."""
+    import threading
+
+    def _loop():
+        b = TickBook()
+        sleep_s = int(os.environ.get("TICK_SLEEP", "20"))
+        while True:
+            try:
+                b.step()
+            except Exception:
+                b.errs += 1
+            time.sleep(sleep_s)
+
+    t = threading.Thread(target=_loop, name="tick", daemon=True)
+    t.start()
+    return t
+
+
 def main():                                          # pragma: no cover
     b = TickBook()
     while True:

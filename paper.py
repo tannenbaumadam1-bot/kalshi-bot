@@ -643,7 +643,9 @@ def main():
     if os.environ.get("PAPER_TICK", "1") == "1":
         try:
             import tick_paper
-            tk_bot = tick_paper.TickBook()
+            # its own 20s clock in a daemon thread - see start_thread().
+            # The main loop below only READS its published state.
+            tk_bot = tick_paper.start_thread()
         except Exception as e:
             print(f"tick book unavailable: {e}")
             tk_bot = None
@@ -841,18 +843,21 @@ def main():
                           f" | locked ${ps['locked']:+.2f}")
                 except Exception as e:
                     print(f"  phantom step skipped: {e}")
-            if tk_bot is not None:
-                # EVERY cycle: a 15-minute window is over before a
-                # 10-cycle rotation would look at it twice, and the
-                # endgame lane lives in the last five minutes.
+            if tk_bot is not None and n % 5 == 2:
+                # READ-ONLY heartbeat. The tick book steps on its own
+                # 20-second thread; stepping it from here too would put
+                # two writers on one state file.
                 try:
-                    ts2 = tk_bot.step()
-                    print(f"  TICK(15m): {len(ts2['windows'])} windows | "
-                          f"{ts2['quoted']} quoted | open {ts2['open_n']} "
-                          f"| settled {ts2['settled_n']} | "
-                          f"total ${ts2['total']:+.2f}")
+                    _tp = os.path.join("logs", "tick_state.json")
+                    _ts2 = json.load(open(_tp))
+                    print(f"  TICK(15m): {len(_ts2.get('windows', []))} "
+                          f"windows | {_ts2.get('quoted', 0)} quoted | "
+                          f"open {_ts2.get('open_n', 0)} | settled "
+                          f"{_ts2.get('settled_n', 0)} | total "
+                          f"${_ts2.get('total', 0):+.2f} | alive "
+                          f"{'yes' if tk_bot.is_alive() else 'NO'}")
                 except Exception as e:
-                    print(f"  tick step skipped: {e}")
+                    print(f"  tick heartbeat skipped: {e}")
             if cu_bot is not None and n % 10 == 4:
                 try:
                     cs2 = cu_bot.step()

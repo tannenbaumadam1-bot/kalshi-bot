@@ -262,3 +262,20 @@ def test_model_confidence_is_capped_before_any_decision():
     assert out is not None
     _lane, _p_yes, _px, _side, p_side = out
     assert p_side <= T.CONF_CAP
+
+
+def test_start_thread_runs_the_book_on_its_own_clock():
+    """paper.py cycles at 90s; a 15-minute window needs finer sampling
+    than that or the endgame lane is unmeasurable."""
+    os.environ["TICK_SLEEP"] = "600"          # don't actually loop here
+    t = T.start_thread()
+    assert t.daemon is True
+    assert t.name == "tick"
+
+
+def test_only_one_writer_paper_does_not_also_step_the_book():
+    """Two writers on one json.dump is a corrupted ledger."""
+    here = os.path.dirname(T.__file__)
+    src = open(os.path.join(here, "paper.py")).read()
+    assert "tick_paper.start_thread()" in src
+    assert "tk_bot.step()" not in src
