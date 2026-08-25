@@ -301,6 +301,7 @@ def test_a_moving_proxy_is_alive():
 
 def test_a_dead_proxy_series_is_never_quoted():
     b = T.TickBook()
+    b.basis["KXWTI15M"] = [0.0, 0.0, 0.0]        # offset known
     b.ticks["KXWTI15M"] = [(1000 + i * 20, 82.29) for i in range(30)]
     m = {"tk": "W1", "series": "KXWTI15M", "label": "wti", "strike": 82.29,
          "open_ts": time.time() - 600, "close_ts": time.time() + 120,
@@ -357,6 +358,7 @@ def _pos(b, side="yes", px=88.0, n=5.0):
                    "opened": "2000-01-01T00:00:00"}
     b.ticks["KXGOLD15M"] = [(1000 + i * 20, 100.0 + i * 0.05)
                             for i in range(30)]
+    b.basis["KXGOLD15M"] = [0.0, 0.0, 0.0]
 
 
 def test_exit_takes_the_money_when_the_market_comes_to_the_model():
@@ -389,3 +391,57 @@ def test_exit_never_pays_to_leave_a_thesis_intact():
              close_ts=time.time() + 120)
     b.check_exits([m], {"KXGOLD15M": (100.5, 1.0)})
     assert "T1" in b.pos
+
+
+# ---------- basis correction (measured live 8/25) ----------
+def test_basis_is_measured_from_the_window_open():
+    """At the instant a window opens, Kalshi's settlement feed EQUALS
+    the new strike - so our proxy's reading at that moment is a free
+    measurement of our own zero error."""
+    b = T.TickBook()
+    open_ts = 10_000
+    b.ticks["KXWTI15M"] = [(open_ts - 10, 82.2146), (open_ts + 300, 82.3)]
+    b.measure_basis([{"tk": "W1", "series": "KXWTI15M", "label": "wti",
+                      "strike": 82.29, "open_ts": open_ts}])
+    assert b.basis["KXWTI15M"] == [round(82.2146 - 82.29, 6)]
+
+
+def test_a_window_is_only_measured_once():
+    b = T.TickBook()
+    m = [{"tk": "W1", "series": "KXWTI15M", "label": "wti",
+          "strike": 82.29, "open_ts": 10_000}]
+    b.ticks["KXWTI15M"] = [(10_000, 82.2146)]
+    b.measure_basis(m)
+    b.measure_basis(m)
+    assert len(b.basis["KXWTI15M"]) == 1
+
+
+def test_basis_uses_the_median_not_the_mean():
+    """One bad print at a boundary must not drag the correction."""
+    b = T.TickBook()
+    b.basis["KXGOLD15M"] = [2.4, 2.5, 2.6, 99.0]     # 99 is garbage
+    assert 2.4 <= b.basis_of("KXGOLD15M") <= 2.7
+
+
+def test_no_quoting_until_the_offset_is_known():
+    """Trading before you know your instrument's zero error is exactly
+    how the WTI row happened."""
+    b = T.TickBook()
+    b.ticks["KXGOLD15M"] = [(1000 + i * 20, 4650.0 + i * 0.4)
+                            for i in range(30)]
+    b.fetch_book = lambda tk: (90.0, 94.0, 10.0, 10.0)
+    m = {"tk": "G1", "series": "KXGOLD15M", "label": "gold",
+         "strike": 4650.0, "open_ts": time.time() - 600,
+         "close_ts": time.time() + 120, "title": "",
+         "yes_bid": 90.0, "yes_ask": 94.0}
+    assert b.quote([m], {"KXGOLD15M": (4660.0, 1.0)}) == 0
+    assert b.stats["no_basis"] >= 1
+
+
+def test_the_correction_removes_the_offset_from_the_distance():
+    """WTI read -0.0754 low against a window that only travels ~0.05 -
+    the measurement error was larger than the signal."""
+    b = T.TickBook()
+    b.basis["KXWTI15M"] = [-0.0754, -0.0750, -0.0758]
+    adj = b.adj_spot("KXWTI15M", 82.2146)
+    assert abs(adj - 82.29) < 0.002        # lands back on the strike

@@ -160,6 +160,26 @@ EXIT_MIN_HOLD_S = int(os.environ.get("TICK_EXIT_MIN_HOLD", "20"))
 # liquid book - which is exactly why it is worth counting rather than
 # assuming.
 ARB_MIN_C = float(os.environ.get("TICK_ARB_MIN", "1"))
+# BASIS CORRECTION - the fix that turns a proxy into an instrument.
+# The strike is set from KALSHI'S settlement feed at the window's open;
+# our distance is measured against OUR proxy feed. Any constant offset
+# between the two lands entirely in the distance. Measured live 8/25:
+#   gold   +2.4520 (+5.3bp)  - tolerable, a window moves ~5-7
+#   silver -0.0105 (-1.5bp)  - tolerable
+#   WTI    -0.0754 (-9.2bp)  - FATAL: a whole WTI window moves ~0.05,
+#                              so the measurement error exceeded the
+#                              signal and the model read coin-flip
+#                              while the market correctly read 27%.
+# Self-calibrating fix: every new window hands us one free observation,
+# because at the moment a window opens the settlement feed EQUALS the
+# new strike. So basis = (our proxy at that instant) - strike. We keep a
+# rolling median and subtract it before computing any distance. No lane
+# may quote a series until it has measured its own offset MIN_BASIS_N
+# times - trading before you know your instrument's zero error is how
+# the WTI row happened.
+BASIS_N = int(os.environ.get("TICK_BASIS_N", "8"))
+MIN_BASIS_N = int(os.environ.get("TICK_MIN_BASIS_N", "3"))
+BASIS_WINDOW_S = int(os.environ.get("TICK_BASIS_WINDOW", "45"))
 CLOCK_GOAL = int(os.environ.get("TICK_CLOCK", "200"))       # settle gate
 UA = {"User-Agent": "kalshibot-tick/1.0"}
 
@@ -265,6 +285,8 @@ class TickBook:
         self.proxy_err = []    # |proxy - strike| behaviour vs outcome
         self.fills = []        # for adverse-selection scoring
         self.arbs = []         # true crossed books, if they ever appear
+        self.basis = {}        # series -> [proxy - strike observations]
+        self._basis_seen = set()   # windows already measured
         self.pnl_days = {}
         self.realized_c = 0.0
         self.stats = {"cycles": 0, "quoted": 0, "fills_strict": 0,
@@ -272,6 +294,7 @@ class TickBook:
                       "no_vol": 0, "no_proxy": 0, "capped": 0,
                       "band_skip": 0, "no_edge": 0, "wins": 0,
                       "proxy_dead": 0, "exits": 0, "arb_seen": 0,
+                      "no_basis": 0,
                       "losses": 0, "endgame_n": 0, "tail_n": 0}
         self.errs = 0
         self._seen = set()
@@ -285,7 +308,7 @@ class TickBook:
     # file keeps ONE list and a test asserts the two sides match.
     PERSIST = ("pos", "settled", "calib", "proxy_err", "fills",
                "pnl_days", "realized_c", "stats", "errs", "t0", "ticks",
-               "arbs")
+               "arbs", "basis")
 
     def load(self):
         try:
@@ -303,6 +326,8 @@ class TickBook:
             self.errs = d.get("errs") or 0
             self._t0 = d.get("t0") or self._t0
             self.arbs = (d.get("arbs") or [])[-40:]
+            self.basis = {k: list(v)[-BASIS_N:]
+                          for k, v in (d.get("basis") or {}).items()}
             self.ticks = {k: [tuple(x) for x in v][-VOL_WINDOW:]
                           for k, v in (d.get("ticks") or {}).items()}
         except Exception:
@@ -322,6 +347,8 @@ class TickBook:
             state["errs"] = self.errs
             state["t0"] = self._t0
             state["arbs"] = self.arbs[-40:]
+            state["basis"] = {k: v[-BASIS_N:]
+                              for k, v in self.basis.items()}
             state["ticks"] = {k: v[-VOL_WINDOW:]
                               for k, v in self.ticks.items()}
             json.dump(state, open(STATE, "w"))
@@ -398,6 +425,43 @@ class TickBook:
         if not cands:
             return None
         return max(cands) * VOL_MULT
+
+    def measure_basis(self, mkts):
+        """One free observation per window: at the instant a window
+        opens, Kalshi's settlement feed EQUALS the new strike, so the
+        gap between our proxy and that strike at that moment IS our
+        instrument's zero error."""
+        for m in mkts:
+            tk, st, ot = m["tk"], m["series"], m.get("open_ts") or 0
+            if not ot or tk in self._basis_seen:
+                continue
+            tape = self.ticks.get(st) or []
+            near = [(abs(t - ot), p) for t, p in tape
+                    if abs(t - ot) <= BASIS_WINDOW_S]
+            if not near:
+                continue
+            _dt, px = min(near)
+            self.basis.setdefault(st, []).append(
+                round(px - m["strike"], 6))
+            del self.basis[st][:-BASIS_N]
+            self._basis_seen.add(tk)
+        if len(self._basis_seen) > 400:
+            self._basis_seen = set(list(self._basis_seen)[-200:])
+
+    def basis_of(self, series):
+        """Rolling MEDIAN offset - median, not mean, so one bad print at
+        a window boundary cannot drag the correction."""
+        rows = sorted(self.basis.get(series) or [])
+        if len(rows) < MIN_BASIS_N:
+            return None
+        n = len(rows)
+        return (rows[n // 2] if n % 2
+                else (rows[n // 2 - 1] + rows[n // 2]) / 2.0)
+
+    def adj_spot(self, series, spot):
+        """Our proxy price expressed in the settlement feed's units."""
+        b = self.basis_of(series)
+        return None if b is None else spot - b
 
     def liveness_bp(self, series):
         """How much does this proxy actually MOVE, in basis points of
@@ -613,6 +677,7 @@ class TickBook:
         """Post paper bids. Nothing here can reach an order endpoint."""
         self.quotes = {}
         now = time.time()
+        self.measure_basis(mkts)
         for m in mkts:
             px_age = proxy.get(m["series"])
             if not px_age:
@@ -636,6 +701,12 @@ class TickBook:
             if _arb:
                 self.arbs.append(_arb)
                 del self.arbs[:-40]
+            spot = self.adj_spot(m["series"], spot)
+            if spot is None:
+                # we do not yet know this feed's offset against the
+                # settlement feed, so every distance would be guesswork
+                self.stats["no_basis"] += 1
+                continue
             if self.proxy_dead(m["series"]):
                 # measured, not assumed: this series' reference feed is
                 # not tracking its market, so every distance we compute
@@ -755,7 +826,10 @@ class TickBook:
             if not pa or sig is None or self.proxy_dead(pos["series"]):
                 continue
             t_left = max(0.0, pos["close_ts"] - now)
-            p_raw = model_p(pa[0], pos["strike"], sig, t_left)
+            _sp = self.adj_spot(pos["series"], pa[0])
+            if _sp is None:
+                continue
+            p_raw = model_p(_sp, pos["strike"], sig, t_left)
             p_yes = min(CONF_CAP, max(1.0 - CONF_CAP, p_raw))
             p_side = p_yes if pos["side"] == "yes" else 1.0 - p_yes
             # what we could sell into right now, passively
@@ -950,13 +1024,16 @@ class TickBook:
             st = m["series"]
             pa = proxy.get(st)
             sig = self.sigma_s(st)
-            p = (model_p(pa[0], m["strike"], sig, m["close_ts"] - now0)
-                 if (pa and sig) else None)
+            _adj = self.adj_spot(st, pa[0]) if pa else None
+            p = (model_p(_adj, m["strike"], sig, m["close_ts"] - now0)
+                 if (_adj is not None and sig) else None)
             rows.append({
                 "tk": m["tk"], "label": m["label"],
                 "strike": m["strike"],
-                "spot": round(pa[0], 4) if pa else None,
-                "d": round(pa[0] - m["strike"], 4) if pa else None,
+                "spot": round(_adj, 4) if _adj is not None else None,
+                "raw_spot": round(pa[0], 4) if pa else None,
+                "d": (round(_adj - m["strike"], 4)
+                      if _adj is not None else None),
                 "t_left": round(m["close_ts"] - now0),
                 "yes_bid": m.get("yes_bid"), "yes_ask": m.get("yes_ask"),
                 "depth": m.get("depth"),
@@ -1004,9 +1081,15 @@ class TickBook:
                              if self.liveness_bp(st) is not None else None)
                         for st in SERIES},
             "dead": sorted(st for st in SERIES if self.proxy_dead(st)),
+            # our instrument's measured zero error, per series, in the
+            # settlement feed's own units and in basis points
+            "basis": {st: (round(self.basis_of(st), 5)
+                           if self.basis_of(st) is not None else None)
+                      for st in SERIES},
+            "basis_n": {st: len(self.basis.get(st) or []) for st in SERIES},
             "refuse": {k: self.stats.get(k, 0) for k in
                        ("no_vol", "no_proxy", "capped", "band_skip",
-                        "no_edge", "proxy_dead")},
+                        "no_edge", "proxy_dead", "no_basis")},
             "rules": {"size": SIZE, "band": [MIN_PX_C, MAX_PX_C],
                       "edge_c": EDGE_C, "endgame_s": ENDGAME_S,
                       "endgame_p": ENDGAME_P, "tail_p": TAIL_P,
