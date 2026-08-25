@@ -422,17 +422,13 @@ def build_data():
             out["culture"] = json.load(open(_cu))
     except Exception:
         pass
-    # PHANTOM BOOK (8/20): paper market-making telemetry. The inv/fills
-    # detail stays on the server - the tracker gets the verdict only.
-    try:
-        _ph = os.path.join("logs", "phantom_state.json")
-        if os.path.exists(_ph):
-            _pd = json.load(open(_ph))
-            _pd.pop("inv", None)
-            _pd.pop("fills", None)
-            out["phantom"] = _pd
-    except Exception:
-        pass
+    # PHANTOM BOOK (8/20) RETIRED 8/25 - payload block removed so a dead
+    # book cannot masquerade as a live one on the tracker (the same rule
+    # applied to the sports book on 8/20). Final tape: match rate 9%,
+    # spread -2.45c/pair after fees, adverse -5.1c, -$44.09 over 483
+    # settles. State file preserved on the server; verdict in
+    # PHANTOM_AUTOPSY.md. To revive: restore this block, un-hide
+    # #phwrap, and set PAPER_PHANTOM=1.
     # TICK BOOK (8/25): 15-minute commodity windows, paper. The raw
     # proxy tape (thousands of price ticks) stays on the server; the
     # tracker gets the model, the calibration table and the verdict.
@@ -781,33 +777,14 @@ td.num,th.num{text-align:right}
      maker side. Revive: restore this panel + the payload block +
      PAPER_SPORTS=1. Lessons: SPORTS_AUTOPSY.md -->
 <!-- Book 4 (mid-band) panel retired 8/19 - see payload note -->
-<div id=phwrap style="display:none;border:1.5px solid rgba(139,124,246,.45);border-radius:12px;padding:14px 18px;margin:14px 0 4px;background:linear-gradient(180deg,rgba(139,124,246,.05),transparent)">
-<h2 style="margin:0 0 10px">Book 4 &middot; Phantom <span id=phmode style="text-transform:none;letter-spacing:0"></span></h2>
-<div class=grid id=phtiles></div>
-<div style="margin-top:12px"><div class=t style="margin-bottom:6px">Live phantom quotes</div>
-<table><thead><tr><th>Game</th><th>Market</th><th>Sport</th><th class=num>Their spread</th>
-<th class=num>Our bid</th><th class=num>Our ask</th><th class=num>Our edge</th>
-<th class=num>Pos</th><th class=num>P&amp;L</th></tr></thead>
-<tbody id=phq></tbody></table></div>
-<div style="margin-top:12px"><div class=t style="margin-bottom:6px">Settled &mdash; banked, never re-marked</div>
-<table><thead><tr><th>Closed</th><th>Game</th><th>Market</th><th>Lane</th>
-<th class=num>Bought</th><th class=num>Sold</th><th class=num>Net</th>
-<th>Result</th><th class=num>P&amp;L</th></tr></thead>
-<tbody id=phset></tbody></table></div>
-<div style="margin-top:12px"><div class=t style="margin-bottom:6px">Lane ledger &mdash; which width is the business?</div>
-<table><thead><tr><th>Lane</th><th class=num>Quoted</th><th class=num>Paired</th>
-<th class=num>Unpaired</th><th class=num>Match</th><th class=num>Spread P&amp;L</th>
-<th class=num>&cent;/pair</th><th class=num>Adverse 5m</th><th class=num>Directional</th></tr></thead>
-<tbody id=phlane></tbody></table>
-<div class=mut style="font-size:11px;margin-top:6px">Quote budget is ALLOCATED by measured &cent;/pair once a lane has enough pairs to judge &mdash; earners grow, bleeders shrink to the floor. <span id=phbudget></span></div></div>
-<div style="margin-top:12px"><div class=t style="margin-bottom:6px">Positions &amp; P&amp;L (per market)</div>
-<table><thead><tr><th>Game</th><th>Market</th><th class=num>Bought</th><th class=num>Sold</th>
-<th class=num>Net</th><th class=num>Our px</th><th class=num>Mkt mid</th><th class=num>P&amp;L</th></tr></thead>
-<tbody id=phpos></tbody></table></div>
-<div style="margin-top:12px"><div class=t style="margin-bottom:6px">Correlated clusters &mdash; one game is one bet, however many strikes we quote</div>
-<table><thead><tr><th>Game</th><th class=num>Strikes held</th><th class=num>Net contracts</th><th class=num>P&amp;L</th></tr></thead>
-<tbody id=phcl></tbody></table></div>
-</div>
+<!-- Book 4 (phantom) panel RETIRED 8/25 (Adam: "please totally get
+     rid of this book from the bot and the tracker"). Died on its own
+     three KPIs: match rate 9% by contract (1,608 of 1,772 filled
+     contracts never paired), spread -2.45c/pair AFTER fees (gross
+     3.24c vs 5.68c of fee - the thesis inverted), adverse -5.1c.
+     -$44.09 over 483 settles. Ledger preserved on the server;
+     verdict in PHANTOM_AUTOPSY.md. Revive: restore this panel + the
+     payload block + PAPER_PHANTOM=1. -->
 <div id=tkwrap style="display:none;border:1.5px solid rgba(56,189,248,.45);border-radius:12px;padding:14px 18px;margin:14px 0 4px;background:linear-gradient(180deg,rgba(56,189,248,.05),transparent)">
 <h2 style="margin:0 0 10px">Book 5 &middot; Tick <span id=tkmode style="text-transform:none;letter-spacing:0"></span></h2>
 <div class=grid id=tktiles></div>
@@ -1182,166 +1159,7 @@ async function load(){
       +'<td>'+(s.won?'<span class=pos>WON</span>':'<span class=neg>LOST</span>')+'</td>'
       +'<td class=num><span class="'+C(s.pnl)+'">'+M(s.pnl)+'</span></td></tr>';}).join('')
       ||'<tr><td colspan=8 class=empty>Nothing settled yet&hellip;</td></tr>';}
-  if(d.phantom){const P=d.phantom,R=P.rules||{},A=P.adverse||{};
-    $('phwrap').style.display='block';
-    const mr=(P.match_rate!=null)?(P.match_rate*100).toFixed(0)+'%':'&ndash;';
-    const af=(A.fast&&A.fast.avg!=null)?(A.fast.avg>0?'+':'')+A.fast.avg.toFixed(1)+'&cent;':'&ndash;';
-    $('phmode').innerHTML='<span class=chip style="background:rgba(139,124,246,.16);color:#a99bff">PAPER &middot; NO MONEY</span>'
-      +' <span class=mut style="font-size:11px">era '+(P.era||'phantom1')+' &middot; two-sided quoting on MLB + tennis props &middot; fills only when a REAL print trades through us &middot; being the book for retail</span>';
-    $('phtiles').innerHTML=[
-      tile('TOTAL P&L','<span class="'+C(P.total)+'">'+M(P.total||0)+'</span>','banked '+M(P.realized||0)+' from '+(P.settled_n||0)+' settled &middot; open '+M(P.open_pnl||0)+' &middot; using '+M(P.capital||0)+' of '+M(P.capital_max||100)+' collateral'+((P.marks_stale)?' &middot; <span class=neg>'+P.marks_stale+' stale marks ('+M(P.stale_pnl||0)+')</span>':'')),
-      tile('Match rate',mr,'the KPI &middot; paired CONTRACTS / all contracts &middot; '+(P.contracts||0)+' filled &middot; by fill-event '+((P.match_events!=null)?(P.match_events*100).toFixed(0)+'%':'&ndash;')),
-      tile('Phantom fills',(P.fills_strict||0)+' strict &middot; '+(P.fills_loose||0)+' loose','strict = traded THROUGH us &middot; '+(P.fills_per_h||0)+'/hr &middot; '+(P.trades_seen||0)+' prints seen'),
-      tile('Spread earned','<span class="'+C(P.spread_pnl)+'">'+M(P.spread_pnl||0)+'</span>','THE thesis &middot; '+(P.pairs||0)+' paired contracts &middot; '+((P.per_pair_c!=null)?P.per_pair_c.toFixed(2)+'&cent;/pair after fees':'no pairs yet')),
-      tile('Directional luck','<span class="'+C(P.risk_pnl)+'">'+M(P.risk_pnl||0)+'</span>','mark on '+(P.unmatched||0)+' UNPAIRED contracts &middot; not a strategy, a coin flip &middot; net '+M(P.net||0)),
-      tile('Spread vs fees',((P.per_pair_c!=null)?P.per_pair_c.toFixed(2)+'&cent;':'&ndash;')+' <span class=mut style="font-size:12px">net/pair</span>','gross '+(((P.spread_pnl!=null&&P.fees!=null&&P.pairs)?((P.spread_pnl+P.fees)/P.pairs*100):0).toFixed(2))+'&cent; &minus; fees '+(((P.fees&&P.pairs)?(P.fees/P.pairs*100):0).toFixed(2))+'&cent; &middot; Kalshi&rsquo;s fee peaks at 50&cent;'),
-      tile('Fees paid','<span class=neg>'+M(-(P.fees||0))+'</span>','maker rate '+((R.maker_rate||0.0175)*100).toFixed(2)+'% &middot; '+(P.contracts||0)+' contracts &middot; refused: '+(P.pos_capped||0)+' at cap, '+(P.stale_skipped||0)+' stale &middot; '+(P.widened||0)+' backed off after a hit'),
-      tile('Adverse (5m)',af,'price drift after our fills &middot; negative = we get picked off &middot; n='+((A.fast&&A.fast.n)||0)),
-      tile('Capital turnover',((P.velocity&&P.velocity.turns_h!=null)?P.velocity.turns_h.toFixed(2)+'x':'&ndash;')+' <span class=mut style="font-size:12px">/hr</span>','the desk number &middot; '+((P.velocity&&P.velocity.contracts_h)||0)+' contracts/hr &middot; '+((P.velocity&&P.velocity.pairs_h)||0)+' pairs/hr &middot; budget '+((P.velocity&&P.velocity.budget_mode)||'base')),
-      tile('Surface',(P.quoted||0)+' quoted','of '+(P.quotable||0)+' quotable / '+(P.scanned||0)+' scanned &middot; mlb '+((P.by_sport||{}).mlb||0)+' &middot; tennis '+((P.by_sport||{}).tennis||0)),
-      tile('Unmatched mark','<span class="'+C(P.unreal)+'">'+M(P.unreal||0)+'</span>','across '+(P.cluster_n||0)+' clusters &middot; caps '+(R.max_pos||20)+'/mkt, '+(R.max_cluster||40)+'/game &middot; quoting '+(R.min_spread||4)+'-'+(R.max_width||8)+'&cent; wide')
-    ].join('');
-    $('phq').innerHTML=((P.examples)||[]).map(q=>'<tr><td class=mut>'+(q.event||'&ndash;')+'</td>'
-      +'<td>'+(q.title||q.tk)+'</td>'
-      +'<td><span class=chip style="background:rgba(125,144,173,.15);color:var(--mut)">'+(q.sport||'')+'</span></td>'
-      +'<td class=num>'+(q.mspread!=null?q.mspread+'&cent;':'&ndash;')+'</td>'
-      +'<td class=num>'+q.bid+'&cent;</td><td class=num>'+q.ask+'&cent;</td>'
-      +'<td class=num>'+(q.ask-q.bid)+'&cent;</td>'
-      +'<td class=num>'+(q.net?((q.net>0?'+':'')+q.net):'&ndash;')+'</td>'
-      +'<td class=num>'+(q.net?'<span class="'+C(q.pnl)+'">'+M(q.pnl||0)+'</span>':'&ndash;')+'</td></tr>').join('')
-      ||'<tr><td colspan=9 class=empty>Scanning MLB and tennis books for quotable spreads&hellip;</td></tr>';
-    $('phset').innerHTML=((P.settled)||[]).map(r=>'<tr><td class=mut>'+String(r.ts||'').slice(5,16).replace('T',' ')+'</td>'
-      +'<td class=mut>'+(r.event||'')+'</td><td>'+(r.title||r.tk)+'</td>'
-      +'<td>'+(r.lane==='tight'?'<span class=chip style="background:rgba(47,208,140,.13);color:var(--grn)">TIGHT</span>':'<span class=chip style="background:rgba(139,124,246,.16);color:#a99bff">WIDE</span>')+'</td>'
-      +'<td class=num>'+(r.bn||0)+'</td><td class=num>'+(r.sn||0)+'</td>'
-      +'<td class=num>'+((r.net>0?'+':'')+r.net)+'</td>'
-      +'<td>'+(String(r.result).toUpperCase()==='YES'?'<span class=pos>YES</span>':'<span class=neg>NO</span>')+'</td>'
-      +'<td class=num><span class="'+C(r.pnl)+'">'+M(r.pnl||0)+'</span></td></tr>').join('')
-      ||'<tr><td colspan=9 class=empty>Nothing settled yet &mdash; positions bank when their game finishes&hellip;</td></tr>';
-    $('phlane').innerHTML=Object.keys(P.by_lane||{}).sort().map(k=>{const L=P.by_lane[k];
-      const chip=(k==='fav')?'<span class=chip style="background:rgba(240,163,60,.16);color:#f0a33c">FAV 80-95&cent;</span>':(k==='wide'?'<span class=chip style="background:rgba(139,124,246,.16);color:#a99bff">WIDE &ge;4&cent;</span>':'<span class=chip style="background:rgba(47,208,140,.13);color:var(--grn)">TIGHT 1-3&cent;</span>');
-      return '<tr><td>'+chip+'</td>'
-      +'<td class=num>'+(L.quoted||0)+'</td><td class=num>'+(L.pairs||0)+'</td>'
-      +'<td class=num>'+(L.unmatched||0)+'</td>'
-      +'<td class=num>'+((L.match!=null)?(L.match*100).toFixed(0)+'%':'&ndash;')+'</td>'
-      +'<td class=num><span class="'+C(L.spread)+'">'+M(L.spread||0)+'</span></td>'
-      +'<td class=num>'+((L.per_pair_c!=null)?L.per_pair_c.toFixed(2)+'&cent;':'&ndash;')+'</td>'
-      +'<td class=num>'+((L.adverse!=null)?'<span class="'+C(L.adverse)+'">'+L.adverse.toFixed(1)+'&cent;</span> <span class=mut style="font-size:10px">n='+(L.adv_n||0)+'</span>':'&ndash;')+'</td>'
-      +'<td class=num><span class="'+C(L.risk)+'">'+M(L.risk||0)+'</span></td></tr>';}).join('')
-      ||'<tr><td colspan=9 class=empty>No lane data yet&hellip;</td></tr>';
-    {const bg=(P.velocity&&P.velocity.budgets)||{};
-     $('phbudget').innerHTML=Object.keys(bg).sort().map(k=>k+' '+bg[k]).join(' &middot; ');}
-    $('phpos').innerHTML=((P.positions)||[]).map(r=>'<tr><td class=mut>'+(r.event||'')+'</td>'
-      +'<td>'+(r.title||r.tk)+'</td>'
-      +'<td class=num>'+(r.bn||0)+'</td><td class=num>'+(r.sn||0)+'</td>'
-      +'<td class=num>'+((r.net>0?'+':'')+r.net)+'</td>'
-      +'<td class=num>'+(r.px!=null?r.px+'&cent;':'&ndash;')+'</td>'
-      +'<td class=num>'+(r.mid!=null?r.mid+'&cent;':'&ndash;')+'</td>'
-      +'<td class=num><span class="'+C(r.pnl)+'">'+M(r.pnl||0)+'</span></td></tr>').join('')
-      ||'<tr><td colspan=8 class=empty>No phantom inventory yet &mdash; waiting for a print to trade through a quote&hellip;</td></tr>';
-    $('phcl').innerHTML=((P.clusters)||[]).map(c=>'<tr><td>'+c.event+'</td>'
-      +'<td class=num>'+(c.strikes||1)+'</td>'
-      +'<td class=num>'+c.net+'</td>'
-      +'<td class=num><span class="'+C(c.pnl)+'">'+M(c.pnl||0)+'</span></td></tr>').join('')
-      ||'<tr><td colspan=4 class=empty>No unmatched inventory &mdash; a perfectly balanced book&hellip;</td></tr>';
-  }
-  {const strip=[];
-   const fmtL=(tag,LV)=>{const L=LV.summary;const w=(L.k_wins!=null?L.k_wins:L.wins),l=(L.k_wins!=null?L.k_losses:L.losses);return tag+' '+(L.mode||'LIVE')+' '+M(L.net||0)+' ('+(w||0)+'W/'+(l||0)+'L)'
-      +(L.resting!=null?' \u00b7 '+L.resting+' resting':'')
-      +(L.day_pnl!=null?' \u00b7 day '+M(L.day_pnl):'')
-      +(L.halted?' \u00b7 HALTED':'')
-      +(LV.balance_c!=null?' \u00b7 bal $'+(LV.balance_c/100).toFixed(2):'');};
-   if(d.live&&d.live.summary)strip.push(fmtL('WX',d.live));
-   // DRIFT strip: KALSHI TRUTH ONLY (Adam 7/30: the internal diary's
-   // net/wins/losses leaked into the header and contradicted the
-   // scoreboard - e.g. '+$8.32 (102W/1L)' vs Kalshi's '+$3.17 82W/34L')
-   if(d.dlive&&d.dlive.summary){const LV=d.dlive,L=LV.summary;
-     const day=(LV.marked_nav!=null&&L.day_nav0!=null)?(LV.marked_nav-L.day_nav0):null;
-     const bpct=(LV.pnl_true!=null&&Number(LV.baseline)>0)?P(LV.pnl_true/Number(LV.baseline)*100):null;
-     strip.push('NAV '+(LV.marked_nav!=null?F(LV.marked_nav):'–')+(bpct?' '+bpct:'')
-      +' ('+(L.k_wins!=null?L.k_wins:'–')+'W/'+(L.k_losses!=null?L.k_losses:'–')+'L)'
-      +(L.k_resting_n!=null?' · '+L.k_resting_n+' resting':'')
-      +(day!=null?' · day '+M(day):'')
-      +(L.halted?' · HALTED':'')
-      +(LV.balance_c!=null?' · bal $'+(LV.balance_c/100).toFixed(2):''));}
-   $('live').textContent=strip.join('  \u2503  ');}
-  const start=Number(s.start||0),banked=Number(s.total||0);
-  const unrl=(s.unrealized==null)?null:Number(s.unrealized);
-  const nav=k.nav!=null?k.nav:start+banked;
-  $('nav').textContent=F(nav);
-  const chg=nav-start;
-  $('navd').innerHTML='<span class="'+C(chg)+'">'+M(chg)+' ('+(start?((100*chg/start).toFixed(1)):'0')+'%)</span> <span class=mut>vs $'+start.toFixed(0)+' inception</span>';
-  $('banked').innerHTML='<span class="'+C(banked)+'">'+M(banked)+'</span>';
-  $('today').innerHTML=(k.today_pnl==null)?NA:'<span class="'+C(k.today_pnl)+'">'+M(k.today_pnl)+'</span>';
-  $('unrl').innerHTML=unrl==null?NA:'<span class="'+C(unrl)+'">'+M(unrl)+'</span>';
-  $('cash').textContent=F(s.cash);
-  $('stake').textContent=F(s.open_exposure);
-  const wr=(s.settled||0)>0?s.win_rate+'%':null;
-  $('perf').innerHTML=[
-    tile('Return (banked)',k.return_pct!=null?'<span class="'+C(k.return_pct)+'">'+k.return_pct+'%</span>':NA,'marked '+(k.marked_return_pct!=null?k.marked_return_pct+'%':'&ndash;')),
-    tile('Win rate',wr||NA,(s.wins||0)+'W / '+(s.losses||0)+'L all-time'),
-    tile('Profit factor',k.profit_factor!=null?k.profit_factor:NA,'gross win / gross loss'),
-    tile('Expectancy',k.expectancy!=null?'<span class="'+C(k.expectancy)+'">'+M(k.expectancy)+'</span>':NA,'per settled bet'),
-    tile('Avg win',k.avg_win!=null?'<span class=pos>'+M(k.avg_win)+'</span>':NA,''),
-    tile('Avg loss',k.avg_loss!=null?'<span class=neg>'+M(k.avg_loss)+'</span>':NA,''),
-    tile('Best / worst',(k.best!=null?M(k.best):'&ndash;')+' <span class=mut>/</span> '+(k.worst!=null?M(k.worst):'&ndash;'),'single bet'),
-    tile('Max drawdown',k.max_dd!=null?'<span class=neg>-$'+Number(k.max_dd).toFixed(2)+'</span>':NA,'banked curve'),
-  ].join('');
-  $('risk').innerHTML=[
-    tile('Exposure',F(k.exposure),k.exposure_pct!=null?k.exposure_pct+'% of NAV':''),
-    tile('Open positions',(s.open_bets||0),''),
-    tile('Largest position',k.largest_pos!=null?F(k.largest_pos):NA,k.largest_pos_name||''),
-    tile('Total placed',(s.placed||0),'since inception'),
-    tile('Fees paid',F(k.fees),k.fee_drag_pct!=null?k.fee_drag_pct+'% of inception NAV':''),
-    tile('Fee / bet placed',k.fee_per_bet!=null?F(k.fee_per_bet):NA,''),
-    (d.depth?tile('Depth at our entries','$'+Number(d.depth.fill_total||0).toFixed(0),
-      (d.depth.edges||0)+' edges \u00b7 med $'+Number(d.depth.fill_med||0).toFixed(0)+'/strike at touch'):''),
-    (d.depth?tile('Touch liquidity scanned','$'+Number(d.depth.touch_total||0).toFixed(0),
-      (d.depth.n_mkts||0)+' strikes incl. bands \u00b7 measured, not modeled'):''),
-  ].join('');
-  $('curven').textContent='(last '+(k.window_n||0)+' settled)';
-  drawCurve($('eq'),d.curve);
-  drawDaily($('daily'),k.daily);
-  $('eracur').innerHTML=eraRows(k.era_current||{});
-  $('eraleg').innerHTML=eraRows(k.era_legacy||{});
-  $('mktcal').innerHTML=((d.shadow&&d.shadow.mkt_buckets)||[]).map(c=>{
-    const bias=(c.actual!=null&&c.mkt!=null)?Math.round((c.actual-c.mkt)*10)/10:null;
-    return '<tr><td>'+c.bucket+'\u00a2</td><td class=num>'+c.n+'</td>'
-      +'<td class=num>'+c.mkt+'%</td><td class=num>'+c.actual+'%</td>'
-      +'<td class=num>'+(bias==null?'&ndash;':'<span class="'+(bias>=0?'pos':'neg')+'">'+(bias>0?'+':'')+bias+' pts</span>')+'</td></tr>';
-  }).join('')||'<tr><td colspan=5 class=empty>Accumulating shadow outcomes&hellip;</td></tr>';
-  $('calib').innerHTML=(k.calibration||[]).map(c=>{
-    const ok=c.delta==null?null:Math.abs(c.delta)<=10;
-    return '<tr><td>'+c.bucket+'</td><td class=num>'+c.n+'</td>'
-      +'<td class=num>'+(c.pred!=null?c.pred+'%':'&ndash;')+'</td>'
-      +'<td class=num>'+(c.act!=null?c.act+'%':'&ndash;')+'</td>'
-      +'<td class=num>'+(c.delta==null?'&ndash;':'<span class="'+(ok?'pos':'neg')+'">'+(c.delta>0?'+':'')+c.delta+' pts</span>')+'</td></tr>';
-  }).join('');
-  $('open').innerHTML=(d.open||[]).map(b=>{
-    const h=(b.now!=null);
-    return '<tr>'+mkt(b)+side(b.side)+era(b)+prob(b.pside)
-    +'<td class=num>'+b.entry+'&cent;</td>'
-    +'<td class=num>'+(h?b.now+'&cent;':'&ndash;')+'</td>'
-    +'<td class=num>'+b.count+(b.adds?' <span class=mut>(+'+b.adds+')</span>':'')+'</td>'
-    +'<td class=num>'+F(b.entry*b.count/100)+'</td>'
-    +'<td class=num>'+feeC(b.fee)+'</td>'
-    +'<td class=num>'+(h?F(b.value):'&ndash;')+'</td>'
-    +'<td class=num>'+(h?'<span class="'+C(b.upnl)+'">'+M(b.upnl)+'</span>':'&ndash;')+'</td></tr>';
-  }).join('')||'<tr><td colspan=11 class=empty>No open positions &mdash; waiting for a disciplined edge.</td></tr>';
-  {
-    const all=d.settled||[];
-    const cur=all.filter(b=>b.era==='v9-core');
-    const nleg=all.length-cur.length;
-    $('legnote').textContent=nleg>0?'('+nleg+' older legacy-model bets hidden \u2014 still counted in totals)':'';
-    $('settled').innerHTML=cur.slice(0,15).map(b=>{
-      const won=Number(b.pnl)>0;    // 8/12: money decides, not outcome
-      return '<tr>'+mkt(b)+side(b.side)+era(b)+prob(b.pside)
-      +'<td class=num>'+b.entry+'&cent;</td><td class=num>'+b.count+'</td>'
-      +'<td class=num>'+feeC(b.fee)+'</td>'
-      +'<td>'+(b.exited?('<span class=chip style="background:rgba(232,180,76,.13);color:var(--amb)">'+(b.salvaged?'SALV':'EXIT')+'</span>'):'<span class="'+(won?'won':'lost')+'">'+(won?'WON':'LOST')+'</span>')+'</td>'
-      +'<td class=num><span class="'+C(b.pnl)+'">'+M(b.pnl)+'</span></td></tr>';
-    }).join('')||'<tr><td colspan=9 class=empty>No current-model bets settled yet \u2014 the open v6-ens positions settle daily.</td></tr>';
-  }
+  // Book 4 (phantom) renderer retired 8/25 - see the panel note above.
   if(d.driftw){const D=d.driftw,dsm=D.summary||{};
     const wmkt=b=>'<td><span class=mkt>'+((b.name||b.ticker||'')+'').replace(/&/g,'&amp;').replace(/</g,'&lt;')+'</span></td>';
     $('driftw').innerHTML=[

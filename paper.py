@@ -620,13 +620,26 @@ def main():
         except Exception as e:
             print(f"culture scanner unavailable: {e}")
             cu_bot = None
-    # PHANTOM BOOK (8/20, Adam: "I want to be the book for retail...
-    # please build this paper trading model"): two-sided paper quoting
-    # across MLB + tennis props. Measures the three numbers that decide
-    # whether we can be the house - flow, holdable spread, and adverse
-    # selection - with ZERO dollars at risk. PAPER_PHANTOM=0 kills it.
+    # PHANTOM BOOK (8/20) RETIRED 2026-08-25 (Adam: "please totally get
+    # rid of this book from the bot and the tracker"). It died on the
+    # three numbers it was built to measure, which is the best kind of
+    # death an experiment can have:
+    #   MATCH RATE 9% by contract - 1,608 of 1,772 filled contracts
+    #     never paired. It was not being the book; it was taking naked
+    #     directional risk in a market-maker costume.
+    #   SPREAD -2.45c PER PAIR after fees (gross 3.24c, fees 5.68c).
+    #     THE thesis, measured, is NEGATIVE: at the widths retail will
+    #     actually trade against us, Kalshi's fee is larger than the
+    #     spread. No amount of tuning fixes an inverted sign.
+    #   ADVERSE -5.1c (n=293) - filled mainly when we were wrong.
+    # 483 settles, -$44.09 on a $1,000 paper book. The evidence clock
+    # rang at 434/100 on 8/24 and this is the verdict it was owed.
+    # Module + tests + ledger preserved (PHANTOM_AUTOPSY.md); set
+    # PAPER_PHANTOM=1 to revive. Lesson banked: unhedged two-sided
+    # quoting is a losing trade for us, and it is the same finding that
+    # rules out delta-hedged MM on perps at our size.
     ph_bot = None
-    if os.environ.get("PAPER_PHANTOM", "1") == "1":
+    if os.environ.get("PAPER_PHANTOM", "0") == "1":
         try:
             import phantom
             ph_bot = phantom.PhantomBook()

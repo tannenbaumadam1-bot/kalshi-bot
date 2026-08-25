@@ -1167,7 +1167,13 @@ def test_pnl_delta_publishes_daily_shape(tmp_path, monkeypatch):
     # reported as "-36.27" and made look like a third of the real loss
     assert d["2026-08-22"] == 14.62      # first day: delta from flat
     assert d["2026-08-23"] == -50.89
-    # and today's delta is measured off the last closed cumulative
+    # and today's delta is measured off the last closed cumulative.
+    # NB: derive "the previous day" instead of hardcoding it - this
+    # assertion named 2026-08-23 outright and started failing the moment
+    # the calendar rolled past the seeded dates (a test that only passes
+    # on one date is a time bomb, not a test).
     import datetime as _d2
     today = _d2.date.today().isoformat()
-    assert d[today] == round(st["pnl_days"][today] - (-36.27), 2)
+    prev = [v for k, v in sorted(st["pnl_days"].items()) if k < today]
+    assert d[today] == round(st["pnl_days"][today] - (prev[-1] if prev
+                                                     else 0.0), 2)
