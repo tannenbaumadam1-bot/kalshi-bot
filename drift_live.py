@@ -1331,6 +1331,17 @@ class DriftLive:
              "nav_v3": True,
              "nav_v4": True,
              "bucket_v2": True,
+             # 8/25 BUG (same class as the 8/15 nav_days bug above, found
+             # while diagnosing the rung_stats collapse flagged 8/24):
+             # these three were in the LOAD whitelist but never written
+             # here, so every deploy/restart silently wiped them.
+             # rung_stats lost ~366 lifetime rung placements on 8/24 -
+             # the ladder was re-earning its evidence from zero after
+             # every push. week_halt_base_c meant the weekly-halt loss
+             # basis reset on restart; last_nav_c likewise.
+             "rung_stats": getattr(self, "rung_stats", None) or {},
+             "week_halt_base_c": getattr(self, "week_halt_base_c", 0.0),
+             "last_nav_c": getattr(self, "last_nav_c", 0.0),
              "last_mnav_c": getattr(self, "last_mnav_c", 0.0),
              "mnav_ts": getattr(self, "mnav_ts", 0.0),
              "slate_days": getattr(self, "slate_days", None) or {},
