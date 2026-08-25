@@ -633,6 +633,20 @@ def main():
         except Exception as e:
             print(f"phantom book unavailable: {e}")
             ph_bot = None
+    # TICK BOOK (8/25, Adam: "build a paper bot for this strategy that I
+    # can look at on the tracker"): the 15-minute commodity windows.
+    # Buys near-certainty cheap as the window drains - the weather trade
+    # on a 900-second clock - and above all RECORDS whether its own
+    # probability model is honest. Zero dollars at risk; PAPER_TICK=0
+    # kills it.
+    tk_bot = None
+    if os.environ.get("PAPER_TICK", "1") == "1":
+        try:
+            import tick_paper
+            tk_bot = tick_paper.TickBook()
+        except Exception as e:
+            print(f"tick book unavailable: {e}")
+            tk_bot = None
     mb_bot = None
     if os.environ.get("PAPER_MIDBAND", "0") == "1":
         try:
@@ -827,6 +841,18 @@ def main():
                           f" | locked ${ps['locked']:+.2f}")
                 except Exception as e:
                     print(f"  phantom step skipped: {e}")
+            if tk_bot is not None:
+                # EVERY cycle: a 15-minute window is over before a
+                # 10-cycle rotation would look at it twice, and the
+                # endgame lane lives in the last five minutes.
+                try:
+                    ts2 = tk_bot.step()
+                    print(f"  TICK(15m): {len(ts2['windows'])} windows | "
+                          f"{ts2['quoted']} quoted | open {ts2['open_n']} "
+                          f"| settled {ts2['settled_n']} | "
+                          f"total ${ts2['total']:+.2f}")
+                except Exception as e:
+                    print(f"  tick step skipped: {e}")
             if cu_bot is not None and n % 10 == 4:
                 try:
                     cs2 = cu_bot.step()

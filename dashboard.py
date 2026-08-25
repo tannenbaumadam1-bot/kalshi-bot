@@ -433,6 +433,20 @@ def build_data():
             out["phantom"] = _pd
     except Exception:
         pass
+    # TICK BOOK (8/25): 15-minute commodity windows, paper. The raw
+    # proxy tape (thousands of price ticks) stays on the server; the
+    # tracker gets the model, the calibration table and the verdict.
+    try:
+        _tk = os.path.join("logs", "tick_state.json")
+        if os.path.exists(_tk):
+            _td = json.load(open(_tk))
+            _td.pop("ticks", None)
+            _td.pop("fills", None)
+            _td.pop("pos", None)
+            _td.pop("proxy_err", None)
+            out["tick"] = _td
+    except Exception:
+        pass
     for key, fname in (("clive", "crypto_live_state.json"),):
         fpath = os.path.join("logs", fname)
         if os.path.exists(fpath):
@@ -794,6 +808,23 @@ td.num,th.num{text-align:right}
 <table><thead><tr><th>Game</th><th class=num>Strikes held</th><th class=num>Net contracts</th><th class=num>P&amp;L</th></tr></thead>
 <tbody id=phcl></tbody></table></div>
 </div>
+<div id=tkwrap style="display:none;border:1.5px solid rgba(56,189,248,.45);border-radius:12px;padding:14px 18px;margin:14px 0 4px;background:linear-gradient(180deg,rgba(56,189,248,.05),transparent)">
+<h2 style="margin:0 0 10px">Book 5 &middot; Tick <span id=tkmode style="text-transform:none;letter-spacing:0"></span></h2>
+<div class=grid id=tktiles></div>
+<div style="margin-top:12px"><div class=t style="margin-bottom:6px">Live 15-minute windows &mdash; the model vs the book</div>
+<table><thead><tr><th>Market</th><th class=num>Strike</th><th class=num>Spot (Pyth)</th>
+<th class=num>Distance</th><th class=num>Time left</th><th class=num>Book</th>
+<th class=num>Model</th><th class=num>Edge</th><th>Quoting</th></tr></thead>
+<tbody id=tkwin></tbody></table></div>
+<div style="margin-top:12px"><div class=t style="margin-bottom:6px">Calibration &mdash; THE deliverable. When the model says 90%, do 90% of them win?</div>
+<table><thead><tr><th>Model said</th><th class=num>Windows</th><th class=num>Actually won</th><th>Verdict</th></tr></thead>
+<tbody id=tkcal></tbody></table>
+<div class=mut style="font-size:11px;margin-top:6px">A model that is right about its own confidence is a business; one that is overconfident is a slow way to lose. Nothing here trades real money &mdash; this table decides whether anything ever does.</div></div>
+<div style="margin-top:12px"><div class=t style="margin-bottom:6px">Settled windows</div>
+<table><thead><tr><th>Closed</th><th>Market</th><th>Lane</th><th>Side</th>
+<th class=num>Paid</th><th class=num>Model said</th><th>Result</th><th class=num>P&amp;L</th></tr></thead>
+<tbody id=tkset></tbody></table></div>
+</div>
 <!-- PAPER SECTIONS RETIRED 7/30 (Adam: 'get rid of the other two paper
      strategies for now') - hidden, not deleted; ledgers archived on the
      server as *_retired.json. Set display:block + revive the books in
@@ -1112,6 +1143,45 @@ async function load(){
         +'<td class=num>'+h.count+'</td>'
         +'<td>'+(h.outcome===1?'<span class=pos>WON</span>':(h.outcome===0?'<span class=neg>LOST</span>':'STOP'))+'</td>'
         +'<td class=num><span class="'+C(h.pnl)+'">'+M(h.pnl)+'</span></td></tr>').join('');}}
+  if(d.tick){const T=d.tick,TR=T.rules||{};
+    $('tkwrap').style.display='block';
+    $('tkmode').innerHTML='<span class=chip style="background:rgba(56,189,248,.16);color:#7dd3fc">PAPER &middot; NO MONEY</span>'
+      +' <span class=mut style="font-size:11px">era '+(T.era||'tick1')+' &middot; 15-minute gold/silver/WTI windows &middot; distance-vs-clock model on a Pyth proxy &middot; fills only when a REAL print trades through us</span>';
+    const cl=T.clock||{},lanes=T.by_lane||{},RF=T.refuse||{};
+    $('tktiles').innerHTML=[
+      tile('TOTAL P&L','<span class="'+C(T.total)+'">'+M(T.total||0)+'</span>','banked '+M(T.realized||0)+' from '+(T.settled_n||0)+' settled &middot; open '+M(T.open_pnl||0)+' &middot; using '+M(T.capital||0)+' of '+M(T.capital_max||100)),
+      tile('Evidence clock',(cl.n||0)+' / '+(cl.goal||200),(cl.verdict_due?'<span class=neg>VERDICT DUE</span>':'settled windows before this lane is judged')+' &middot; '+(T.wins||0)+'W / '+(T.losses||0)+'L'),
+      tile('Paper fills',(T.fills_strict||0)+' strict &middot; '+(T.fills_loose||0)+' loose','strict = a real print traded THROUGH our resting bid &middot; '+(T.trades_seen||0)+' prints seen &middot; '+(T.cycles||0)+' cycles'),
+      tile('Lanes',Object.keys(lanes).length?Object.keys(lanes).map(function(k){return k+' '+M(lanes[k].pnl)}).join(' &middot; '):'&ndash;','endgame = certainty the clock already delivered &middot; tail = the longshot-bias harvest'),
+      tile('Why we stood aside',(RF.no_edge||0)+' no edge &middot; '+(RF.band_skip||0)+' out of band','+'+(RF.no_vol||0)+' warming up &middot; '+(RF.no_proxy||0)+' stale feed &middot; '+(RF.capped||0)+' capped &mdash; a quiet book here means the market was efficient, which is itself the finding')
+    ].join('');
+    $('tkwin').innerHTML=(T.windows||[]).map(function(w){
+      var edge=(w.model_p!=null&&w.yes_bid!=null)?(w.model_p*100-((w.yes_bid+w.yes_ask)/2)):null;
+      return '<tr><td>'+(w.label||'')+'</td>'
+      +'<td class=num>'+(w.strike!=null?w.strike:'&ndash;')+'</td>'
+      +'<td class=num>'+(w.spot!=null?w.spot:'&ndash;')+'</td>'
+      +'<td class=num><span class="'+C(w.d)+'">'+(w.d!=null?(w.d>0?'+':'')+w.d:'&ndash;')+'</span></td>'
+      +'<td class=num>'+(w.t_left!=null?w.t_left+'s':'&ndash;')+'</td>'
+      +'<td class=num>'+(w.yes_bid!=null?w.yes_bid+'/'+w.yes_ask:'&ndash;')+'</td>'
+      +'<td class=num>'+(w.model_p!=null?(w.model_p*100).toFixed(1)+'%':'<span class=mut>warming</span>')+'</td>'
+      +'<td class=num>'+(edge!=null?(edge>0?'+':'')+edge.toFixed(1)+'&cent;':'&ndash;')+'</td>'
+      +'<td>'+(w.quoted?'<span class=pos>quoting</span>':'<span class=mut>&mdash;</span>')+'</td></tr>';}).join('')
+      ||'<tr><td colspan=9 class=empty>No open window right now&hellip;</td></tr>';
+    $('tkcal').innerHTML=(T.calibration||[]).map(function(c){
+      var said=parseFloat(c.bucket)+5,dev=(c.hit!=null)?(c.hit-said):null;
+      return '<tr><td>'+c.bucket+'</td><td class=num>'+c.n+'</td>'
+      +'<td class=num>'+(c.hit!=null?c.hit.toFixed(0)+'%':'&ndash;')+'</td>'
+      +'<td>'+((dev==null||c.n<10)?'<span class=mut>too few</span>':(Math.abs(dev)<=8?'<span class=pos>honest</span>':'<span class=neg>'+(dev<0?'OVERconfident':'UNDERconfident')+'</span>'))+'</td></tr>';}).join('')
+      ||'<tr><td colspan=4 class=empty>No settled windows yet &mdash; the table fills as the clock runs&hellip;</td></tr>';
+    $('tkset').innerHTML=(T.settled||[]).map(function(s){
+      return '<tr><td class=mut>'+String(s.ts||'').replace('T',' ').slice(5,16)+'</td>'
+      +'<td>'+(s.label||'')+'</td><td>'+(s.lane||'')+'</td>'
+      +'<td>'+String(s.side||'').toUpperCase()+'</td>'
+      +'<td class=num>'+(s.px!=null?s.px+'&cent;':'&ndash;')+'</td>'
+      +'<td class=num>'+(s.model_p!=null?(s.model_p*100).toFixed(0)+'%':'&ndash;')+'</td>'
+      +'<td>'+(s.won?'<span class=pos>WON</span>':'<span class=neg>LOST</span>')+'</td>'
+      +'<td class=num><span class="'+C(s.pnl)+'">'+M(s.pnl)+'</span></td></tr>';}).join('')
+      ||'<tr><td colspan=8 class=empty>Nothing settled yet&hellip;</td></tr>';}
   if(d.phantom){const P=d.phantom,R=P.rules||{},A=P.adverse||{};
     $('phwrap').style.display='block';
     const mr=(P.match_rate!=null)?(P.match_rate*100).toFixed(0)+'%':'&ndash;';

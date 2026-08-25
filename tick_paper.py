@@ -1,0 +1,873 @@
+"""TICK BOOK (8/25) - paper trading the 15-minute commodity windows.
+
+Adam's thesis, in his words: "most of the money in those markets is made
+on the structural side, not by predicting gold's direction over 15
+minutes." Right. And the structural edge he named is the one this shop
+already lives on: BUY NEAR-CERTAINTY CHEAP, let the clock deliver it.
+Weather works because by afternoon the day's high is mostly realized
+while the book still quotes doubt. A 15-minute gold window is the same
+trade on a 900-second clock: as the window drains, the distance between
+spot and strike stops being a coin flip and starts being arithmetic.
+
+PHASE 0: ZERO DOLLARS AT RISK. There is no API key here, no client, no
+code path to any order endpoint. This file can only read.
+
+WHAT THE VERIFICATION FOUND (8/25, before a line of this was written -
+both findings changed the design):
+
+ 1. THE COMMODITY WINDOWS DO NOT SETTLE ON A 60-SECOND AVERAGE.
+    KXGOLD15M / KXWTI15M / KXSILVER15M settle on the CLOSE OF THE
+    1-MINUTE PYTH CANDLESTICK at the boundary - a point in time, not an
+    average. The 60-second-average structure (where the outcome
+    progressively locks in as the averaging window fills, and the last
+    seconds are pure arithmetic) is real, but it lives in the CRYPTO
+    15-minute series (KXBTC15M et al, CF Benchmarks BRTI). So the
+    "partial average" edge is NOT available on gold, and any bot that
+    assumed it would have been modelling a settlement rule that does not
+    exist. Different series, different feed, different math - exactly
+    the thing Adam said to check first.
+
+ 2. THE EDGE THAT IS ACTUALLY THERE ON COMMODITIES is distance-vs-clock.
+    The strike is frozen at the window's open (the 2:15 candle close);
+    the question is only whether spot is >= that number at 2:30. So the
+    honest probability is P(a random walk of known volatility, currently
+    d dollars from the line, with t seconds left, ends on the right
+    side). That is computable every cycle. Retail reads a price ticker
+    and a green/red arrow. THAT is the mispricing to measure.
+
+REFERENCE FEED. Kalshi settles gold on Pyth's Metal.Index.GOLD/USD,
+which is not enumerable on the public Hermes feed list. We therefore
+track the closest PUBLIC Pyth feed as a PROXY (Metal.XAU/USD, live and
+within ~0.03% of Kalshi's posted strike at build time) and - this is the
+part that matters - we RECORD THE PROXY'S ERROR against Kalshi's own
+settled result on every window. If the proxy cannot predict settlement,
+the calibration table says so out loud and the lane dies on its own
+evidence instead of on a hunch.
+
+FILL REALISM, inherited from the phantom book because it is the only
+honest way we know: we post no orders, so a paper fill requires a REAL
+print to trade THROUGH our resting price (STRICT). Prints AT our price
+are counted separately (LOOSE) and never believed - queue position is
+not ours to assume.
+
+FEES follow the published schedule and the shape drives everything:
+ceil(rate x C x P x (1-P)) peaks at the money and vanishes at the
+extremes. A round trip at 50c costs ~3.5% of notional; at 95c it costs
+~0.35%. This is why both lanes here only ever buy the CHEAP-CERTAIN
+side, and why nothing in this file trades at the money.
+
+TWO LANES, GRADED SEPARATELY (one thesis each, so the tape can convict
+one without the other):
+  ENDGAME - late in the window, model says >= ENDGAME_P but the book
+            still offers it below the model by >= EDGE_C. Buy certainty
+            at a discount. This is the weather trade, 900-second clock.
+  TAIL    - the longshot-bias harvest. Retail overpays for the
+            far-from-strike side; we take the other end when the model
+            says the far side is nearly dead. Short gamma by nature, so
+            it is sized small and watched for the headline that runs it
+            over.
+
+KILL SWITCH: PAPER_TICK=0.
+"""
+
+from __future__ import annotations
+
+import datetime
+import json
+import math
+import os
+import time
+import urllib.request
+
+try:
+    from recorder import Recorder
+except Exception:                                    # pragma: no cover
+    Recorder = None
+
+KALSHI = os.environ.get("TICK_KALSHI",
+                        "https://api.elections.kalshi.com/trade-api/v2")
+HERMES = os.environ.get("TICK_HERMES", "https://hermes.pyth.network")
+STATE = os.environ.get("TICK_STATE", os.path.join("logs", "tick_state.json"))
+ERA = os.environ.get("TICK_ERA", "tick1")
+
+# --- the surface -------------------------------------------------------
+# series -> (public Pyth proxy feed id, human label). Only series whose
+# settlement feed we can actually approximate are listed; adding one
+# without a live proxy would produce a model with nothing behind it.
+SERIES = {
+    "KXGOLD15M": ("765d2ba906dbc32ca17cc11f5310a89e9ee1f6420508c63861f"
+                  "2f8ba4ee34bb2", "gold"),
+    "KXSILVER15M": ("f2fb02c32b055c805e7238d628e5e9dadef274376114eb1f01"
+                    "2337cabe93871e", "silver"),
+    "KXWTI15M": ("925ca92ff005ae943c158e3563f59698ce7e75c5a8c8dd43303a0"
+                 "a154887b3e6", "wti"),
+}
+SERIES = {k: v for k, v in SERIES.items()
+          if k in os.environ.get("TICK_SERIES", ",".join(SERIES))}
+
+TAKER_RATE = 0.07
+MAKER_RATE = float(os.environ.get("TICK_MAKER_RATE", "0.0175"))
+
+BOOK_CAPITAL_C = int(os.environ.get("TICK_CAPITAL", "10000"))   # $100 paper
+SIZE = int(os.environ.get("TICK_SIZE", "5"))          # contracts per entry
+MAX_POS = int(os.environ.get("TICK_MAX_POS", "20"))   # per market
+# Only ever buy the cheap-certain side. Above MAX_PX_C there is no room
+# left to pay for the fee; below MIN_PX_C we are buying a lottery ticket,
+# which is the side we intend to SELL to.
+MIN_PX_C = int(os.environ.get("TICK_MIN_PX", "55"))
+MAX_PX_C = int(os.environ.get("TICK_MAX_PX", "97"))
+EDGE_C = float(os.environ.get("TICK_EDGE", "4"))      # model - price, cents
+ENDGAME_S = int(os.environ.get("TICK_ENDGAME_S", "300"))   # last 5 min
+ENDGAME_P = float(os.environ.get("TICK_ENDGAME_P", "0.90"))
+TAIL_P = float(os.environ.get("TICK_TAIL_P", "0.97"))      # tail lane bar
+TAIL_MAX_S = int(os.environ.get("TICK_TAIL_MAX_S", "600"))
+VOL_WINDOW = int(os.environ.get("TICK_VOL_WINDOW", "180"))  # ticks kept
+MIN_VOL_N = int(os.environ.get("TICK_MIN_VOL_N", "12"))
+# SMALL-SAMPLE / JUMP HAIRCUT. Measured on the first live tape (8/25):
+# gold moved 3.28 in 258s against a naive 1-sigma of 1.09 - a 3-sigma
+# move inside four minutes, on the very first window we watched. A
+# short-window realized-vol estimate systematically understates a market
+# that trends and jumps, and an overconfident model is far more
+# dangerous here than a shy one: it manufactures fake "certainty at a
+# discount" and then buys it. So sigma is the MAX of a short and a long
+# lookback, inflated by VOL_MULT, and the resulting probability is
+# capped - we never claim more certainty than the tape has earned.
+VOL_MULT = float(os.environ.get("TICK_VOL_MULT", "1.6"))
+CONF_CAP = float(os.environ.get("TICK_CONF_CAP", "0.98"))
+SHORT_N = int(os.environ.get("TICK_SHORT_N", "20"))
+CLOCK_GOAL = int(os.environ.get("TICK_CLOCK", "200"))       # settle gate
+UA = {"User-Agent": "kalshibot-tick/1.0"}
+
+
+def _get(url, timeout=15):
+    req = urllib.request.Request(url, headers=UA)
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        return json.load(r)
+
+
+def _num(v, dflt=0.0):
+    """Kalshi hands back ints, strings, or nothing at all for the same
+    field depending on the endpoint. Fourth time this shop has been bitten
+    by it; never let a str reach a comparison."""
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return dflt
+
+
+def _px_c(row, base):
+    """Fractional-schema aware price read, in CENTS.
+
+    The 15-minute books quote in the newer fractional schema:
+    `yes_price_dollars: '0.4500'` and `count_fp: '2.09'`, with the legacy
+    integer fields present but NULL. Reading the legacy field alone
+    returns None on every row - which is how a scanner ends up believing
+    a market with 8,000 contracts of depth is empty."""
+    v = row.get(base + "_dollars")
+    if v not in (None, ""):
+        try:
+            return round(float(v) * 100.0, 2)
+        except (TypeError, ValueError):
+            pass
+    v = row.get(base)
+    try:
+        return float(v) if v not in (None, "") else None
+    except (TypeError, ValueError):
+        return None
+
+
+def fee_c(px_c, n, maker=True):
+    """Kalshi fee in CENTS: ceil(rate x C x P x (1-P)), to the penny.
+
+    The whole strategy is downstream of this curve: it peaks at 50c and
+    collapses at the extremes, so at-the-money churn is unaffordable and
+    near-certainty is nearly free."""
+    p = max(0.0, min(1.0, px_c / 100.0))
+    rate = MAKER_RATE if maker else TAKER_RATE
+    # round before ceil: 0.07*100*0.25*100 is 175.00000000000003 in float
+    # and a naive ceil silently overcharges every single trade
+    return math.ceil(round(rate * n * p * (1.0 - p) * 100.0, 6))
+
+
+def _norm_cdf(x):
+    return 0.5 * (1.0 + math.erf(x / math.sqrt(2.0)))
+
+
+def model_p(spot, strike, sigma_s, t_left_s):
+    """P(spot_at_close >= strike) for a driftless random walk.
+
+    sigma_s = per-second volatility in PRICE units (not %), measured from
+    the proxy's own recent ticks. Drift is deliberately omitted: over 900
+    seconds the drift term is noise next to the diffusion term, and
+    pretending to know direction is the trade we already decided not to
+    make.
+
+    Degenerate cases matter more than the formula. At t=0 the answer is
+    not "50%" - it is the arithmetic fact of where the price already is.
+    A model that hedges at the buzzer would refuse the exact trade this
+    lane exists to take."""
+    if t_left_s <= 0:
+        return 1.0 if spot >= strike else 0.0
+    s = sigma_s * math.sqrt(max(0.0, t_left_s))
+    if s <= 0:
+        return 1.0 if spot >= strike else 0.0
+    return _norm_cdf((spot - strike) / s)
+
+
+def _ts(s):
+    if not s:
+        return 0.0
+    if isinstance(s, (int, float)):
+        return float(s)
+    try:
+        return datetime.datetime.fromisoformat(
+            str(s).replace("Z", "+00:00")).timestamp()
+    except Exception:
+        return 0.0
+
+
+class TickBook:
+    """15-minute window paper book. Holds no money and cannot trade."""
+
+    def __init__(self):
+        self.rec = Recorder() if Recorder else None
+        self.ticks = {}        # series -> [(ts, price), ...] proxy tape
+        self.quotes = {}       # tk -> our resting paper bid this window
+        self.resting = {}      # what was resting during the LAST window
+        self.pos = {}          # tk -> position dict
+        self.settled = []      # graded windows
+        self.calib = {}        # model bucket -> [n, wins] reliability
+        self.proxy_err = []    # |proxy - strike| behaviour vs outcome
+        self.fills = []        # for adverse-selection scoring
+        self.pnl_days = {}
+        self.realized_c = 0.0
+        self.stats = {"cycles": 0, "quoted": 0, "fills_strict": 0,
+                      "fills_loose": 0, "trades_seen": 0, "settled": 0,
+                      "no_vol": 0, "no_proxy": 0, "capped": 0,
+                      "band_skip": 0, "no_edge": 0, "wins": 0,
+                      "losses": 0, "endgame_n": 0, "tail_n": 0}
+        self.errs = 0
+        self._seen = set()
+        self._last_ts = 0.0
+        self._t0 = time.time()
+        self.load()
+
+    # ---------------- persistence ----------------
+    # Every key read here is written in save(). The 8/15 nav_days bug and
+    # the 8/25 rung_stats bug were both "loaded but never saved", so this
+    # file keeps ONE list and a test asserts the two sides match.
+    PERSIST = ("pos", "settled", "calib", "proxy_err", "fills",
+               "pnl_days", "realized_c", "stats", "errs", "t0", "ticks")
+
+    def load(self):
+        try:
+            d = json.load(open(STATE))
+            if d.get("era") != ERA:
+                return          # a ledger from another regime is not ours
+            self.pos = d.get("pos") or {}
+            self.settled = (d.get("settled") or [])[-200:]
+            self.calib = d.get("calib") or {}
+            self.proxy_err = (d.get("proxy_err") or [])[-200:]
+            self.fills = (d.get("fills") or [])[-400:]
+            self.pnl_days = d.get("pnl_days") or {}
+            self.realized_c = d.get("realized_c") or 0.0
+            self.stats.update(d.get("stats") or {})
+            self.errs = d.get("errs") or 0
+            self._t0 = d.get("t0") or self._t0
+            self.ticks = {k: [tuple(x) for x in v][-VOL_WINDOW:]
+                          for k, v in (d.get("ticks") or {}).items()}
+        except Exception:
+            pass
+
+    def save(self, state):
+        try:
+            os.makedirs(os.path.dirname(STATE) or ".", exist_ok=True)
+            state["pos"] = self.pos
+            state["settled"] = self.settled[-200:]
+            state["calib"] = self.calib
+            state["proxy_err"] = self.proxy_err[-200:]
+            state["fills"] = self.fills[-400:]
+            state["pnl_days"] = self.pnl_days
+            state["realized_c"] = self.realized_c
+            state["stats"] = self.stats
+            state["errs"] = self.errs
+            state["t0"] = self._t0
+            state["ticks"] = {k: v[-VOL_WINDOW:]
+                              for k, v in self.ticks.items()}
+            json.dump(state, open(STATE, "w"))
+        except Exception:
+            self.errs += 1
+
+    # ---------------- the reference feed ----------------
+    def fetch_proxy(self):
+        """One Hermes call for every feed we track. Returns
+        series -> (price, age_s). A stale feed is reported, never
+        silently used: modelling a 900-second window off a 5-minute-old
+        price is worse than not modelling it at all."""
+        ids = sorted({v[0] for v in SERIES.values()})
+        if not ids:
+            return {}
+        url = (HERMES + "/v2/updates/price/latest?"
+               + "&".join("ids[]=" + i for i in ids)
+               + "&parsed=true&encoding=hex")
+        out = {}
+        try:
+            d = _get(url)
+        except Exception:
+            self.errs += 1
+            return {}
+        now = time.time()
+        by_id = {}
+        for p in d.get("parsed", []):
+            try:
+                px = p["price"]
+                val = int(px["price"]) * (10 ** int(px["expo"]))
+                by_id[p["id"]] = (val, now - float(px["publish_time"]))
+            except Exception:
+                continue
+        for st, (fid, _lab) in SERIES.items():
+            if fid in by_id:
+                out[st] = by_id[fid]
+                price, age = by_id[fid]
+                tape = self.ticks.setdefault(st, [])
+                if not tape or tape[-1][0] != round(now):
+                    tape.append((round(now), price))
+                del tape[:-VOL_WINDOW]
+        return out
+
+    def sigma_s(self, series):
+        """Per-second price volatility from the proxy's own tape.
+
+        Deliberately simple and deliberately EMPIRICAL: no implied vol,
+        no GARCH, just the realized standard deviation of log returns
+        scaled by the observed spacing between ticks. If there aren't
+        enough ticks yet, return None and let the caller refuse to quote
+        rather than invent a number."""
+        tape = self.ticks.get(series) or []
+        if len(tape) < MIN_VOL_N:
+            return None
+
+        def _sd(rows):
+            rets = []
+            for (t0, p0), (t1, p1) in zip(rows, rows[1:]):
+                dt = max(1.0, t1 - t0)
+                if p0 > 0 and p1 > 0:
+                    rets.append((p1 - p0) / math.sqrt(dt))
+            if len(rets) < MIN_VOL_N // 2:
+                return None
+            mean = sum(rets) / len(rets)
+            var = sum((r - mean) ** 2 for r in rets) / max(1, len(rets) - 1)
+            return math.sqrt(max(0.0, var))
+
+        # long lookback catches the regime, short catches today's burst.
+        # Taking the MAX means a calm hour cannot lull the model into
+        # certainty right before a jump - the exact failure we measured.
+        cands = [x for x in (_sd(tape),
+                             _sd(tape[-SHORT_N:])
+                             if len(tape) > SHORT_N else None) if x]
+        if not cands:
+            return None
+        return max(cands) * VOL_MULT
+
+    # ---------------- the exchange surface ----------------
+    def fetch_markets(self):
+        """The open window for each series, with its book. One market per
+        series is live at a time - these are single-strike up/down
+        windows, not ladders."""
+        out = []
+        for st in SERIES:
+            try:
+                d = _get(f"{KALSHI}/markets?series_ticker={st}"
+                         f"&status=open&limit=5")
+            except Exception:
+                self.errs += 1
+                continue
+            for m in d.get("markets", []):
+                close = _ts(m.get("close_time"))
+                if not close or close <= time.time():
+                    continue
+                strike = _num(m.get("floor_strike"), None)
+                if strike in (None, 0.0):
+                    continue
+                out.append({
+                    "tk": m.get("ticker"), "series": st,
+                    "label": SERIES[st][1],
+                    "strike": strike,
+                    "open_ts": _ts(m.get("open_time")),
+                    "close_ts": close,
+                    "title": m.get("title") or "",
+                    "yes_bid": _px_c(m, "yes_bid"),
+                    "yes_ask": _px_c(m, "yes_ask"),
+                    "no_bid": _px_c(m, "no_bid"),
+                    "no_ask": _px_c(m, "no_ask"),
+                })
+        return out
+
+    def fetch_book(self, tk):
+        """Top of book from the orderbook endpoint.
+
+        The /markets rows on these series carry NULL yes_bid/yes_ask even
+        while the book holds thousands of contracts (verified 8/25:
+        8,000-deep on both sides, every legacy price field null). So the
+        orderbook is the only trustworthy quote source here, and the NO
+        ladder has to be inverted into YES terms by hand: a NO bid at 44c
+        is a YES offer at 56c."""
+        try:
+            d = _get(f"{KALSHI}/markets/{tk}/orderbook?depth=8")
+        except Exception:
+            self.errs += 1
+            return None, None, 0.0, 0.0
+        ob = d.get("orderbook_fp") or d.get("orderbook") or {}
+        fp = "no_dollars" in ob or "yes_dollars" in ob
+
+        def _side(key_fp, key):
+            rows = ob.get(key_fp if fp else key) or []
+            out = []
+            for r in rows:
+                try:
+                    px = float(r[0]) * (100.0 if fp else 1.0)
+                    ct = float(r[1])
+                    out.append((round(px, 2), ct))
+                except (TypeError, ValueError, IndexError):
+                    continue
+            return out
+
+        yes = _side("yes_dollars", "yes")
+        no = _side("no_dollars", "no")
+        # best YES bid = highest price someone will pay for YES
+        yb = max((p for p, _c in yes), default=None)
+        ybc = sum(c for p, c in yes if p == yb) if yb is not None else 0.0
+        # best YES ask = 100 - highest NO bid
+        nb = max((p for p, _c in no), default=None)
+        ya = (100.0 - nb) if nb is not None else None
+        yac = sum(c for p, c in no if p == nb) if nb is not None else 0.0
+        return yb, ya, ybc, yac
+
+    def fetch_trades(self, since_s):
+        """Real prints since the last cycle - the only thing allowed to
+        fill a paper order."""
+        out = []
+        for st in SERIES:
+            for m in list(self.quotes.values()):
+                if m["series"] != st:
+                    continue
+                try:
+                    d = _get(f"{KALSHI}/markets/trades?ticker={m['tk']}"
+                             f"&limit=200")
+                except Exception:
+                    self.errs += 1
+                    continue
+                for t in d.get("trades", []):
+                    ts = _ts(t.get("created_time"))
+                    if ts < since_s:
+                        continue
+                    tid = t.get("trade_id")
+                    if not tid or tid in self._seen:
+                        continue
+                    self._seen.add(tid)
+                    yp = _px_c(t, "yes_price")
+                    ct = _num(t.get("count_fp"), None)
+                    if ct is None:
+                        ct = _num(t.get("count"), 0.0)
+                    if yp is None or ct <= 0:
+                        continue
+                    out.append({"tk": t.get("ticker"), "px": yp,
+                                "ct": ct, "ts": ts,
+                                "taker": t.get("taker_side")})
+        if len(self._seen) > 20000:
+            self._seen = set(list(self._seen)[-8000:])
+        self.stats["trades_seen"] += len(out)
+        return out
+
+    # ---------------- the two lanes ----------------
+    def _capital_c(self):
+        return sum(p["cost_c"] for p in self.pos.values())
+
+    def decide(self, m, spot, sig, t_left):
+        """Return (lane, model_p, our_bid_c) or None.
+
+        Both lanes buy the SAME thing - the side the arithmetic says is
+        nearly finished - and differ only in why it is cheap. ENDGAME:
+        the clock has done the work and the book has not repriced. TAIL:
+        the far side is being bid by someone buying a lottery ticket, so
+        the near side is available under model. Neither ever trades at
+        the money, where the fee curve peaks."""
+        p_raw = model_p(spot, m["strike"], sig, t_left)
+        # Never claim more certainty than CONF_CAP. The far tail is
+        # exactly where a wrong vol estimate does its damage, and a
+        # "99%" that is really 90% is a losing trade dressed as a gift.
+        p_yes = min(CONF_CAP, max(1.0 - CONF_CAP, p_raw))
+        yb, ya = m["yes_bid"], m["yes_ask"]
+        if yb is None or ya is None:
+            return None
+        # Which side is the near-certainty? Buy YES, or buy NO (= sell
+        # YES). Express everything in the price of the side we'd BUY.
+        if p_yes >= 0.5:
+            side, p_side = "yes", p_yes
+            # we rest a passive bid one tick inside the spread
+            our_px = min(ya - 1.0, yb + 1.0)
+        else:
+            side, p_side = "no", 1.0 - p_yes
+            our_px = min((100.0 - yb) - 1.0, (100.0 - ya) + 1.0)
+        if our_px is None:
+            return None
+        our_px = round(our_px, 2)
+        if not (MIN_PX_C <= our_px <= MAX_PX_C):
+            self.stats["band_skip"] += 1
+            return None
+        edge = p_side * 100.0 - our_px
+        if edge < EDGE_C:
+            self.stats["no_edge"] += 1
+            return None
+        if t_left <= ENDGAME_S and p_side >= ENDGAME_P:
+            return "endgame", p_yes, our_px, side, p_side
+        if t_left <= TAIL_MAX_S and p_side >= TAIL_P:
+            return "tail", p_yes, our_px, side, p_side
+        return None
+
+    def quote(self, mkts, proxy):
+        """Post paper bids. Nothing here can reach an order endpoint."""
+        self.quotes = {}
+        now = time.time()
+        for m in mkts:
+            px_age = proxy.get(m["series"])
+            if not px_age:
+                self.stats["no_proxy"] += 1
+                continue
+            spot, age = px_age
+            if age > 90:
+                self.stats["no_proxy"] += 1
+                continue
+            # book first, THEN the vol gate: during warmup we still want
+            # the tape to record what the market looked like, otherwise
+            # the first hour of telemetry is blank exactly when we are
+            # trying to learn whether these books are ever loose
+            yb, ya, ybc, yac = self.fetch_book(m["tk"])
+            if yb is not None:
+                m["yes_bid"] = yb
+            if ya is not None:
+                m["yes_ask"] = ya
+            m["depth"] = round((ybc or 0) + (yac or 0), 1)
+            sig = self.sigma_s(m["series"])
+            if sig is None:
+                self.stats["no_vol"] += 1
+                continue
+            t_left = m["close_ts"] - now
+            d = self.decide(m, spot, sig, t_left)
+            if not d:
+                continue
+            lane, p_yes, our_px, side, p_side = d
+            held = self.pos.get(m["tk"], {}).get("n", 0.0)
+            if held >= MAX_POS:
+                self.stats["capped"] += 1
+                continue
+            add_c = our_px * SIZE
+            if self._capital_c() + add_c > BOOK_CAPITAL_C:
+                self.stats["capped"] += 1
+                continue
+            self.quotes[m["tk"]] = dict(
+                m, lane=lane, our_px=our_px, side=side,
+                model_p=round(p_yes, 4), p_side=round(p_side, 4),
+                spot=spot, sigma=sig, t_left=round(t_left),
+                edge=round(p_side * 100.0 - our_px, 2), ts=now)
+            self.stats["quoted"] += 1
+        return len(self.quotes)
+
+    # ---------------- fills ----------------
+    def check_fills(self, trades, since):
+        """A paper bid fills only when a REAL print trades THROUGH it.
+
+        Our resting price is expressed in the currency of the side we
+        bid. A YES bid at 92 is filled by a print at <= 91 (someone sold
+        YES through us). A NO bid at 92 means YES changed hands at >= 9,
+        i.e. a print at yes_px >= 100 - 91. Prints exactly AT our price
+        are counted LOOSE and never believed - we have no claim on queue
+        position."""
+        by_tk = {}
+        for t in trades:
+            by_tk.setdefault(t["tk"], []).append(t)
+        for tk, q in self.resting.items():
+            prints = by_tk.get(tk) or []
+            if not prints:
+                continue
+            our, side = q["our_px"], q["side"]
+            for t in prints:
+                if t["ts"] < q["ts"]:
+                    continue            # posted after the print: no fill
+                yes_px = t["px"]
+                if side == "yes":
+                    through, at = yes_px < our, abs(yes_px - our) < 0.01
+                else:
+                    no_px = 100.0 - yes_px
+                    through, at = no_px < our, abs(no_px - our) < 0.01
+                if at:
+                    self.stats["fills_loose"] += 1
+                    continue
+                if not through:
+                    continue
+                n = min(float(t["ct"]), float(SIZE))
+                if n <= 0:
+                    continue
+                self._fill(q, n, our)
+                self.stats["fills_strict"] += 1
+
+    def _fill(self, q, n, px):
+        p = self.pos.setdefault(q["tk"], {
+            "tk": q["tk"], "series": q["series"], "label": q["label"],
+            "lane": q["lane"], "side": q["side"], "n": 0.0, "cost_c": 0.0,
+            "fee_c": 0.0, "strike": q["strike"], "close_ts": q["close_ts"],
+            "model_p": q["model_p"], "p_side": q["p_side"],
+            "spot_at_entry": q["spot"], "t_left": q["t_left"],
+            "opened": datetime.datetime.now().isoformat(timespec="seconds")})
+        p["n"] += n
+        p["cost_c"] += px * n
+        p["fee_c"] += fee_c(px, n, maker=True)
+        self.fills.append({"tk": q["tk"], "px": px, "n": n,
+                           "side": q["side"], "lane": q["lane"],
+                           "model_p": q["p_side"], "ts": time.time()})
+        del self.fills[:-400]
+
+    # ---------------- settlement ----------------
+    def settle_check(self):
+        """Grade finished windows against KALSHI'S OWN RESULT.
+
+        The proxy feed is never allowed to decide a P&L - it is only ever
+        the thing being TESTED. Every settled window also writes one
+        calibration row (did the model's stated probability come true?)
+        and one proxy row (did our reference price agree with the
+        exchange's line?). Those two tables, not the P&L, are the actual
+        output of phase 0."""
+        now = time.time()
+        for tk, p in list(self.pos.items()):
+            if p["close_ts"] > now - 60:
+                continue                     # give settlement a minute
+            try:
+                m = _get(f"{KALSHI}/markets/{tk}")["market"]
+            except Exception:
+                self.errs += 1
+                continue
+            res = (m.get("result") or "").lower()
+            if res not in ("yes", "no"):
+                if p["close_ts"] < now - 3600:
+                    self.pos.pop(tk, None)   # never resolved: drop it
+                continue
+            won = (res == p["side"])
+            payout_c = 100.0 * p["n"] if won else 0.0
+            pnl_c = payout_c - p["cost_c"] - p["fee_c"]
+            self.realized_c += pnl_c
+            self.stats["settled"] += 1
+            self.stats["wins" if pnl_c > 0 else "losses"] += 1
+            self.stats[p["lane"] + "_n"] = self.stats.get(
+                p["lane"] + "_n", 0) + 1
+            b = str(int(min(0.99, max(0.0, p["p_side"])) * 10) * 10)
+            row = self.calib.setdefault(b, [0, 0])
+            row[0] += 1
+            row[1] += 1 if won else 0
+            self.settled.append({
+                "tk": tk, "label": p["label"], "lane": p["lane"],
+                "side": p["side"], "n": round(p["n"], 2),
+                "px": round(p["cost_c"] / max(1e-9, p["n"]), 2),
+                "model_p": p["p_side"], "won": won,
+                "pnl": round(pnl_c / 100.0, 2),
+                "fee": round(p["fee_c"] / 100.0, 2),
+                "t_left": p.get("t_left"),
+                "ts": datetime.datetime.now().isoformat(timespec="seconds")})
+            del self.settled[:-200]
+            self.proxy_err.append({
+                "tk": tk, "spot": p["spot_at_entry"],
+                "strike": p["strike"],
+                "d": round(p["spot_at_entry"] - p["strike"], 4),
+                "res": res, "t_left": p.get("t_left")})
+            del self.proxy_err[:-200]
+            self.pos.pop(tk, None)
+
+    # ---------------- reporting ----------------
+    def _calib_table(self):
+        out = []
+        for b in sorted(self.calib, key=lambda x: int(x)):
+            n, w = self.calib[b]
+            out.append({"bucket": f"{b}-{int(b) + 9}%", "n": n,
+                        "hit": round(100.0 * w / n, 1) if n else None})
+        return out
+
+    def _adverse(self):
+        """Did the market move against us right after we were filled?
+        The phantom book died on this number; the same clock rules here."""
+        if not self.fills:
+            return {"n": 0, "avg": None}
+        rows = [f for f in self.fills if f.get("after") is not None]
+        if not rows:
+            return {"n": 0, "avg": None}
+        return {"n": len(rows),
+                "avg": round(sum(f["after"] for f in rows) / len(rows), 2)}
+
+    def score_adverse(self, mkts):
+        by_tk = {m["tk"]: m for m in mkts}
+        for f in self.fills[-200:]:
+            if f.get("after") is not None:
+                continue
+            m = by_tk.get(f["tk"])
+            if not m or m.get("yes_bid") is None:
+                continue
+            if time.time() - f["ts"] < 20:
+                continue
+            mid = ((m["yes_bid"] or 0) + (m["yes_ask"] or 0)) / 2.0
+            now_px = mid if f["side"] == "yes" else 100.0 - mid
+            f["after"] = round(now_px - f["px"], 2)
+
+    def _lane_report(self):
+        out = {}
+        for s in self.settled:
+            r = out.setdefault(s["lane"], {"n": 0, "w": 0, "pnl": 0.0,
+                                           "fees": 0.0})
+            r["n"] += 1
+            r["w"] += 1 if s["won"] else 0
+            r["pnl"] = round(r["pnl"] + s["pnl"], 2)
+            r["fees"] = round(r["fees"] + s.get("fee", 0.0), 2)
+        for r in out.values():
+            r["per_turn"] = round(r["pnl"] / r["n"], 3) if r["n"] else None
+        return out
+
+    def _open_pnl_c(self, mkts):
+        by_tk = {m["tk"]: m for m in mkts}
+        tot = 0.0
+        for tk, p in self.pos.items():
+            m = by_tk.get(tk)
+            if not m or m.get("yes_bid") is None:
+                tot -= p["fee_c"]
+                continue
+            mid = ((m["yes_bid"] or 0) + (m["yes_ask"] or 0)) / 2.0
+            mk = mid if p["side"] == "yes" else 100.0 - mid
+            tot += mk * p["n"] - p["cost_c"] - p["fee_c"]
+        return tot
+
+    def _clock(self):
+        n = self.stats.get("settled", 0)
+        return {"n": n, "goal": CLOCK_GOAL, "verdict_due": n >= CLOCK_GOAL}
+
+    # ---------------- the cycle ----------------
+    def step(self):
+        """ORDER MATTERS (the phantom lesson): settle the window that
+        just elapsed against the quotes that were actually resting during
+        it, THEN post new quotes. A quote can only be hit by a print that
+        happened after it existed - getting this backwards is the
+        look-ahead bug that invalidated an entire phantom ledger."""
+        now0 = time.time()
+        proxy = self.fetch_proxy()
+        mkts = self.fetch_markets()
+        since = self._last_ts or (now0 - 120)
+        trades = self.fetch_trades(since)
+        self.check_fills(trades, since)
+        self.settle_check()
+        quoted = self.quote(mkts, proxy)
+        self.resting = dict(self.quotes)
+        self._last_ts = now0
+        self.score_adverse(mkts)
+        self.stats["cycles"] += 1
+
+        open_c = self._open_pnl_c(mkts)
+        hrs = max(1e-9, (time.time() - self._t0) / 3600.0)
+        total_c = self.realized_c + open_c
+        rows = []
+        for m in mkts:
+            st = m["series"]
+            pa = proxy.get(st)
+            sig = self.sigma_s(st)
+            p = (model_p(pa[0], m["strike"], sig, m["close_ts"] - now0)
+                 if (pa and sig) else None)
+            rows.append({
+                "tk": m["tk"], "label": m["label"],
+                "strike": m["strike"],
+                "spot": round(pa[0], 4) if pa else None,
+                "d": round(pa[0] - m["strike"], 4) if pa else None,
+                "t_left": round(m["close_ts"] - now0),
+                "yes_bid": m.get("yes_bid"), "yes_ask": m.get("yes_ask"),
+                "depth": m.get("depth"),
+                "model_p": round(p, 3) if p is not None else None,
+                "quoted": m["tk"] in self.quotes})
+        state = {
+            "updated": datetime.datetime.now().isoformat(timespec="seconds"),
+            "era": ERA, "mode": "PAPER",
+            "series": sorted(SERIES),
+            "windows": rows,
+            "quoted": quoted,
+            "cycles": self.stats["cycles"],
+            "hours": round(hrs, 2),
+            "fills_strict": self.stats["fills_strict"],
+            "fills_loose": self.stats["fills_loose"],
+            "trades_seen": self.stats["trades_seen"],
+            "open_n": len(self.pos),
+            "positions": [
+                {"tk": p["tk"], "label": p["label"], "lane": p["lane"],
+                 "side": p["side"], "n": round(p["n"], 2),
+                 "px": round(p["cost_c"] / max(1e-9, p["n"]), 2),
+                 "model_p": p["p_side"]}
+                for p in self.pos.values()],
+            "realized": round(self.realized_c / 100.0, 2),
+            "open_pnl": round(open_c / 100.0, 2),
+            "total": round(total_c / 100.0, 2),
+            "settled_n": self.stats["settled"],
+            "wins": self.stats["wins"], "losses": self.stats["losses"],
+            "capital": round(self._capital_c() / 100.0, 2),
+            "capital_max": round(BOOK_CAPITAL_C / 100.0, 2),
+            # THE deliverable of phase 0. Not the P&L - the calibration.
+            # If the model says 90% and 90% of them win, the edge is
+            # real and sizing is the only remaining question. If it says
+            # 90% and 70% win, the model is a liar and the lane dies.
+            "calibration": self._calib_table(),
+            "by_lane": self._lane_report(),
+            "adverse": self._adverse(),
+            "clock": self._clock(),
+            "settled": self.settled[-12:][::-1],
+            "refuse": {k: self.stats.get(k, 0) for k in
+                       ("no_vol", "no_proxy", "capped", "band_skip",
+                        "no_edge")},
+            "rules": {"size": SIZE, "band": [MIN_PX_C, MAX_PX_C],
+                      "edge_c": EDGE_C, "endgame_s": ENDGAME_S,
+                      "endgame_p": ENDGAME_P, "tail_p": TAIL_P,
+                      "max_pos": MAX_POS, "maker_rate": MAKER_RATE,
+                      "vol_n": MIN_VOL_N},
+            "vol": {st: (round(self.sigma_s(st), 5)
+                         if self.sigma_s(st) else None) for st in SERIES},
+            "ticks": {st: len(self.ticks.get(st) or []) for st in SERIES},
+            "errs": self.errs,
+        }
+        self.pnl_days[datetime.date.today().isoformat()] = round(
+            total_c / 100.0, 2)
+        if len(self.pnl_days) > 60:
+            for k in sorted(self.pnl_days)[:-60]:
+                self.pnl_days.pop(k, None)
+        state["pnl_days"] = dict(sorted(self.pnl_days.items())[-10:])
+        _days = sorted(self.pnl_days.items())
+        _delta, _prev = {}, 0.0
+        for _d, _v in _days[-11:]:
+            _delta[_d] = round(float(_v) - _prev, 2)
+            _prev = float(_v)
+        state["pnl_delta"] = dict(list(_delta.items())[-10:])
+        self.last = state
+        if self.rec is not None:
+            try:
+                self.rec.write({"ts": state["updated"], "kind": "tick",
+                                "windows": rows, "quoted": quoted,
+                                "total": state["total"]})
+            except Exception:
+                pass
+        self.save(dict(state))
+        return state
+
+
+def main():                                          # pragma: no cover
+    b = TickBook()
+    while True:
+        try:
+            s = b.step()
+            print(f"TICK: {len(s['windows'])} windows | {s['quoted']} quoted"
+                  f" | open {s['open_n']} | settled {s['settled_n']}"
+                  f" | total ${s['total']:+.2f}")
+        except Exception as e:
+            print("tick step failed:", e)
+        time.sleep(int(os.environ.get("TICK_SLEEP", "20")))
+
+
+if __name__ == "__main__":                           # pragma: no cover
+    main()
