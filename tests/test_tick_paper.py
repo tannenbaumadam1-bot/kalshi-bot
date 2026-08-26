@@ -567,3 +567,18 @@ def test_the_env_var_wins_over_the_file():
         assert T._pyth_key() == "env-key"
     finally:
         del os.environ["PYTH_API_KEY"]
+
+
+def test_a_pasted_key_survives_the_do_console_paste_markers():
+    """The DO web console wraps pasted text in ESC[200~ ... ESC[201~.
+    Those bytes reach the Authorization header and produce a 401 that is
+    indistinguishable from a wrong key."""
+    assert T._clean_key("\x1b[200~DjnY9WUabc123\x1b[201~") == "DjnY9WUabc123"
+    assert T._clean_key("200~DjnY9WUabc123201~") == "DjnY9WUabc123"
+    assert T._clean_key(" DjnY9WUabc123 \n") == "DjnY9WUabc123"
+    assert T._clean_key("") == ""
+
+
+def test_a_clean_key_is_left_alone():
+    for k in ("abc-123_XY.z", "AAAA1111bbbb2222", "a+b/c="):
+        assert T._clean_key(k) == k

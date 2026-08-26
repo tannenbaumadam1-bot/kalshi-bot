@@ -76,6 +76,7 @@ import datetime
 import json
 import math
 import os
+import re
 import time
 import urllib.request
 
@@ -223,6 +224,28 @@ UA = {"User-Agent": "kalshibot-tick/1.0"}
 # Pyth closed public Hermes access (auth required from 2026-07-31); every
 # request now 401s without a key. Set PYTH_API_KEY to restore the model
 # lanes. Until then the feed-independent work continues - see feed_state.
+_KEY_JUNK = re.compile(r"\x1b\[[0-9;]*[a-zA-Z~]|[\x00-\x1f\x7f]")
+
+
+def _clean_key(raw):
+    """Scrub a key of terminal paste artefacts.
+
+    The DigitalOcean web console wraps pasted text in bracketed-paste
+    markers (ESC[200~ ... ESC[201~). Those bytes land in the file and are
+    then sent inside an Authorization header, which fails with a 401 that
+    looks exactly like a bad key - a genuinely nasty hour of debugging
+    for anyone who hits it. Strip escape sequences and control bytes, and
+    keep only the characters an API key can actually contain, so paste
+    works as well as typing."""
+    if not raw:
+        return ""
+    k = _KEY_JUNK.sub("", str(raw)).strip()
+    for marker in ("200~", "201~"):
+        k = k.replace(marker, "")
+    k = "".join(c for c in k if c.isalnum() or c in "-_.=+/")
+    return k.strip()
+
+
 def _pyth_key():
     """The key, from the environment or from a file on the server.
 
@@ -232,14 +255,14 @@ def _pyth_key():
     ONE short line typed at the DigitalOcean console - which is the only
     thing that console reliably accepts (pasting into it injects
     bracketed-paste markers that corrupt the command)."""
-    k = os.environ.get("PYTH_API_KEY", "").strip()
+    k = _clean_key(os.environ.get("PYTH_API_KEY", ""))
     if k:
         return k
     for path in (os.path.join("logs", "pyth_key.txt"),
                  "/opt/kalshibot/logs/pyth_key.txt"):
         try:
             with open(path) as f:
-                k = f.read().strip()
+                k = _clean_key(f.read())
             if k:
                 return k
         except Exception:
