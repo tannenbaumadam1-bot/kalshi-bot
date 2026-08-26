@@ -673,3 +673,83 @@ def test_an_exit_does_not_credit_itself_a_calibration_win():
     b.check_exits([m], {"KXGOLD15M": (100.5, 1.0)})
     assert b.calib == {}                      # nothing credited
     assert len(b.pend_calib) == 1             # parked for the real result
+
+
+# ---------- aggressive regime (Adam 8/26) ----------
+def test_the_edge_test_is_net_of_the_round_trip_fee():
+    """A wide band is only safe if the arithmetic prices the fee. A
+    gross test would buy a 4c edge that costs 5c to trade - exactly how
+    phantom lost 2.45c on every pair it captured."""
+    b = T.TickBook()
+    # mid-priced market where fees peak: gross edge exists, net does not
+    out = b.decide(_mkt(yes_bid=48.0, yes_ask=52.0), 100.05, 0.02, 400)
+    if out is not None:
+        _l, _p, px, _s, p_side = out
+        rt = (T.fee_c(px, 1, True)
+              + T.fee_c(min(99.0, px + T.EDGE_C), 1, True))
+        assert p_side * 100 - px - rt >= T.EDGE_C
+
+
+def test_a_broken_thesis_is_stopped_out_even_at_a_loss():
+    """Distinct from the flatten leak: this fires only when the model
+    has crossed to the other side, so the reason for holding is gone."""
+    b = T.TickBook()
+    b.pos["T1"] = {"tk": "T1", "series": "KXGOLD15M", "label": "gold",
+                   "lane": "endgame", "side": "yes", "n": 5.0,
+                   "cost_c": 440.0, "fee_c": 0.0, "strike": 100.0,
+                   "close_ts": time.time() + 120, "model_p": 0.88,
+                   "p_side": 0.88, "spot_at_entry": 100.5, "t_left": 120,
+                   "opened": "2000-01-01T00:00:00"}
+    b.ticks["KXGOLD15M"] = [(1000 + i * 20, 100.0 - i * 0.05)
+                            for i in range(30)]
+    b.basis["KXGOLD15M"] = [0.0, 0.0, 0.0]
+    # spot now far BELOW the strike: the yes thesis is dead
+    m = _mkt(tk="T1", yes_bid=20.0, yes_ask=22.0,
+             close_ts=time.time() + 120)
+    b.check_exits([m], {"KXGOLD15M": (98.0, 1.0)})
+    assert "T1" not in b.pos
+    assert b.stats.get("stops") == 1
+    assert b.settled[-1]["stop"] is True
+    assert b.settled[-1]["pnl"] < 0          # a real loss, taken
+
+
+def test_round_trips_are_capped_per_window():
+    b = T.TickBook()
+    b.trips["T1"] = T.MAX_TRIPS
+    b.ticks["KXGOLD15M"] = [(1000 + i * 20, 4650.0 + i * 0.4)
+                            for i in range(30)]
+    b.basis["KXGOLD15M"] = [0.0, 0.0, 0.0]
+    b.fetch_book = lambda tk: (90.0, 94.0, 10.0, 10.0)
+    m = {"tk": "T1", "series": "KXGOLD15M", "label": "gold",
+         "strike": 4600.0, "open_ts": time.time() - 300,
+         "close_ts": time.time() + 300, "title": "",
+         "yes_bid": 90.0, "yes_ask": 94.0}
+    assert b.quote([m], {"KXGOLD15M": (4660.0, 1.0)}) == 0
+    assert b.stats.get("trip_capped", 0) >= 1
+
+
+def test_re_entry_after_an_exit_is_allowed():
+    """'Trade in and out over and over' - an exited market must be
+    quotable again inside the same window."""
+    b = T.TickBook()
+    b.trips["T1"] = 1                       # one completed round trip
+    b.ticks["KXGOLD15M"] = [(1000 + i * 20, 4650.0 + i * 0.4)
+                            for i in range(30)]
+    b.basis["KXGOLD15M"] = [0.0, 0.0, 0.0]
+    b.fetch_book = lambda tk: (90.0, 94.0, 10.0, 10.0)
+    m = {"tk": "T1", "series": "KXGOLD15M", "label": "gold",
+         "strike": 4600.0, "open_ts": time.time() - 300,
+         "close_ts": time.time() + 300, "title": "",
+         "yes_bid": 90.0, "yes_ask": 94.0}
+    assert b.quote([m], {"KXGOLD15M": (4660.0, 1.0)}) == 1
+
+
+def test_aggression_did_not_reopen_the_fill_hole():
+    """The caps are bigger, not absent - the +$304 must stay impossible."""
+    b = T.TickBook()
+    q = _q()
+    b.resting = {"T1": q}
+    b.check_fills([{"tk": "T1", "px": 85.0, "ct": 500, "ts": time.time()}
+                   for _ in range(50)], 0)
+    assert b.pos["T1"]["n"] <= T.MAX_POS
+    assert b._capital_c() <= T.BOOK_CAPITAL_C

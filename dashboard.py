@@ -1134,7 +1134,7 @@ async function load(){
       tile('Paper fills',(T.fills_strict||0)+' strict &middot; '+(T.fills_loose||0)+' loose','strict = a real print traded THROUGH our resting bid &middot; '+(T.trades_seen||0)+' prints seen &middot; '+(T.cycles||0)+' cycles'),
       tile('Lanes',Object.keys(lanes).length?Object.keys(lanes).map(function(k){return k+' '+M(lanes[k].pnl)}).join(' &middot; '):'&ndash;','endgame = certainty the clock already delivered &middot; tail = the longshot-bias harvest'),
       tile('Why we stood aside',(RF.no_edge||0)+' no edge &middot; '+(RF.band_skip||0)+' out of band','+'+(RF.no_vol||0)+' warming up &middot; '+(RF.proxy_dead||0)+' dead proxy &middot; '+(RF.capped||0)+' capped &mdash; a quiet book here means the market was efficient, which is itself the finding'),
-      tile('In and out',(T.exits||0)+' early exits','sold back to the book before settlement rather than riding a binary &middot; the live weather ledger says lifts +$88.82 vs settles &minus;$91.05'),
+      tile('In and out',(T.trips||0)+' round trips &middot; '+(T.turns_h||0)+'/hr','bought and sold back INSIDE the window rather than riding a binary &middot; '+(T.exits||0)+' exits of which '+(T.stops||0)+' were stops on a broken thesis &middot; the live weather ledger says lifts +$88.82 vs settles &minus;$91.05'),
       tile('Instrument zero-error',Object.keys(T.basis||{}).map(function(k){return k.replace('KX','').replace('15M','')+' '+(T.basis[k]!=null?(T.basis[k]>0?'+':'')+T.basis[k].toFixed(4):'<span class=mut>learning</span>')}).join(' &middot; '),'our proxy MINUS Kalshi&rsquo;s settlement feed, measured free at every window open and subtracted before any distance is computed. WTI read &minus;0.075 against windows that only travel ~0.05 &mdash; the error was bigger than the signal. Samples: '+Object.keys(T.basis_n||{}).map(function(k){return k.replace('KX','').replace('15M','')+' '+T.basis_n[k]}).join('/')),
       tile('True arbitrage',(T.arb_seen||0)+' crossed books','yes ask + no ask &lt; 100 after BOTH fees &mdash; locked profit with no view. Counted, not assumed: on a liquid book this should be ~zero'),
       (function(){var P=T.pair||{};var r=(P.rate!=null)?(P.rate*100).toFixed(0)+'%':'&ndash;';var b=(P.breakeven!=null)?(P.breakeven*100).toFixed(0)+'%':'&ndash;';
@@ -1164,7 +1164,7 @@ async function load(){
       +'<td>'+String(s.side||'').toUpperCase()+'</td>'
       +'<td class=num>'+(s.px!=null?s.px+'&cent;':'&ndash;')+(s.exit_px!=null?' &rarr; '+s.exit_px+'&cent;':'')+'</td>'
       +'<td class=num>'+(s.model_p!=null?(s.model_p*100).toFixed(0)+'%':'&ndash;')+'</td>'
-      +'<td>'+(s.won?'<span class=pos>WON</span>':'<span class=neg>LOST</span>')+'</td>'
+      +'<td>'+(s.stop?'<span class=neg>STOPPED</span>':(s.won?'<span class=pos>WON</span>':'<span class=neg>LOST</span>'))+'</td>'
       +'<td class=num><span class="'+C(s.pnl)+'">'+M(s.pnl)+'</span></td></tr>';}).join('')
       ||'<tr><td colspan=8 class=empty>Nothing settled yet&hellip;</td></tr>';}
   // Book 4 (phantom) renderer retired 8/25 - see the panel note above.

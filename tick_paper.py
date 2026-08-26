@@ -109,19 +109,45 @@ SERIES = {k: v for k, v in SERIES.items()
 TAKER_RATE = 0.07
 MAKER_RATE = float(os.environ.get("TICK_MAKER_RATE", "0.0175"))
 
-BOOK_CAPITAL_C = int(os.environ.get("TICK_CAPITAL", "10000"))   # $100 paper
-SIZE = int(os.environ.get("TICK_SIZE", "5"))          # contracts per entry
-MAX_POS = int(os.environ.get("TICK_MAX_POS", "20"))   # per market
+# ---------------------------------------------------------------------
+# AGGRESSIVE REGIME (Adam 8/26: "be insanely aggressive on the paper
+# book, you can trade in and out of the market over and over to recycle
+# capital"). Set deliberately at the tick2 reset, because the project
+# rule is that a ledger cannot be compared across a constraint change -
+# so the constraints get chosen ONCE, at the start of an era, and then
+# left alone.
+#
+# The case for aggression here is not bravado, it is SAMPLE RATE. The
+# gate is 200 settled windows and the data trial is 13 days. A timid
+# book measures nothing in that window. Paper carries no dollar risk,
+# so the only real cost of trading more is that we learn faster, and
+# widening the entry bar fills the calibration table across the WHOLE
+# probability range instead of only the 90%+ bucket - which makes the
+# table strictly more informative about whether the model can be
+# trusted at all.
+#
+# What aggression must NOT do is re-open the accounting hole that
+# manufactured +$304 this morning. Every cap below is still ENFORCED AT
+# FILL TIME; they are simply larger numbers now.
+BOOK_CAPITAL_C = int(os.environ.get("TICK_CAPITAL", "100000"))  # $1,000
+SIZE = int(os.environ.get("TICK_SIZE", "10"))         # contracts per entry
+MAX_POS = int(os.environ.get("TICK_MAX_POS", "50"))   # per market
 # Only ever buy the cheap-certain side. Above MAX_PX_C there is no room
 # left to pay for the fee; below MIN_PX_C we are buying a lottery ticket,
 # which is the side we intend to SELL to.
-MIN_PX_C = int(os.environ.get("TICK_MIN_PX", "55"))
+# Wide band: the old 55-97 floor could only ever express one opinion
+# ("buy the favourite"). The fee curve, not a hard floor, is what makes
+# mid-prices expensive - and the edge test below is now NET OF FEES, so
+# the arithmetic refuses bad prices on its own merits instead of a
+# blanket ban. 15-97 keeps us off the 1-14c lottery tickets, where a
+# one-tick move is a 100% swing and our model has no resolution.
+MIN_PX_C = int(os.environ.get("TICK_MIN_PX", "15"))
 MAX_PX_C = int(os.environ.get("TICK_MAX_PX", "97"))
-EDGE_C = float(os.environ.get("TICK_EDGE", "4"))      # model - price, cents
-ENDGAME_S = int(os.environ.get("TICK_ENDGAME_S", "300"))   # last 5 min
-ENDGAME_P = float(os.environ.get("TICK_ENDGAME_P", "0.90"))
-TAIL_P = float(os.environ.get("TICK_TAIL_P", "0.97"))      # tail lane bar
-TAIL_MAX_S = int(os.environ.get("TICK_TAIL_MAX_S", "600"))
+EDGE_C = float(os.environ.get("TICK_EDGE", "2"))      # NET of fees, cents
+ENDGAME_S = int(os.environ.get("TICK_ENDGAME_S", "900"))   # whole window
+ENDGAME_P = float(os.environ.get("TICK_ENDGAME_P", "0.75"))
+TAIL_P = float(os.environ.get("TICK_TAIL_P", "0.90"))      # tail lane bar
+TAIL_MAX_S = int(os.environ.get("TICK_TAIL_MAX_S", "900"))
 VOL_WINDOW = int(os.environ.get("TICK_VOL_WINDOW", "180"))  # ticks kept
 MIN_VOL_N = int(os.environ.get("TICK_MIN_VOL_N", "12"))
 # SMALL-SAMPLE / JUMP HAIRCUT. Measured on the first live tape (8/25):
@@ -154,8 +180,17 @@ LIVE_MIN_N = int(os.environ.get("TICK_LIVE_MIN_N", "15"))
 # paid early and recycling the collateral beats riding a position into
 # a binary outcome. EXIT_EDGE_C is how far the market must come back
 # toward (or past) our model before we take the money.
-EXIT_EDGE_C = float(os.environ.get("TICK_EXIT_EDGE", "2"))
-EXIT_MIN_HOLD_S = int(os.environ.get("TICK_EXIT_MIN_HOLD", "20"))
+EXIT_EDGE_C = float(os.environ.get("TICK_EXIT_EDGE", "1"))
+EXIT_MIN_HOLD_S = int(os.environ.get("TICK_EXIT_MIN_HOLD", "5"))
+# THESIS-BROKEN STOP. Distinct from the live book's flatten leak, which
+# pays the spread to abandon trades that are still RIGHT (-0.097/ch, the
+# worst number in that ledger). This fires only when the model has
+# crossed to the other side of the coin - we bought a 75% and it is now
+# a 40% - which is not impatience, it is the reason for holding having
+# evaporated. Cutting there is what frees collateral to be redeployed
+# inside the same window.
+STOP_P = float(os.environ.get("TICK_STOP_P", "0.45"))
+MAX_TRIPS = int(os.environ.get("TICK_MAX_TRIPS", "6"))   # per window
 # TRUE ARB: if YES ask + NO ask < 100 minus both fees, buying both sides
 # locks a profit no matter how it settles. Almost certainly absent on a
 # liquid book - which is exactly why it is worth counting rather than
@@ -378,6 +413,7 @@ class TickBook:
         self.proxy_err = []    # |proxy - strike| behaviour vs outcome
         self.fills = []        # for adverse-selection scoring
         self.arbs = []         # true crossed books, if they ever appear
+        self.trips = {}        # tk -> completed round trips this window
         self.pend_calib = []   # exited claims awaiting the real outcome
         self.pair = {}         # tk -> {lo, hi} yes-price extremes seen
         self.pair_stats = {"n": 0, "both": 0, "one": 0, "none": 0}
@@ -408,7 +444,7 @@ class TickBook:
     PERSIST = ("pos", "settled", "calib", "proxy_err", "fills",
                "pnl_days", "realized_c", "stats", "errs", "t0", "ticks",
                "arbs", "basis_obs", "basis_seen", "pair_obs",
-               "pair_stats", "pend_calib")
+               "pair_stats", "pend_calib", "trips")
 
     def load(self):
         try:
@@ -428,6 +464,7 @@ class TickBook:
             self.arbs = (d.get("arbs") or [])[-40:]
             self.pair = d.get("pair_obs") or {}
             self.pend_calib = (d.get("pend_calib") or [])[-200:]
+            self.trips = d.get("trips") or {}
             self.pair_stats.update(d.get("pair_stats") or {})
             self.basis = {k: list(v)[-BASIS_N:] for k, v in
                           (d.get("basis_obs") or {}).items()}
@@ -471,6 +508,7 @@ class TickBook:
             state["pair_obs"] = self.pair
             state["pair_stats"] = self.pair_stats
             state["pend_calib"] = self.pend_calib[-200:]
+            state["trips"] = self.trips
             state["ticks"] = {k: v[-VOL_WINDOW:]
                               for k, v in self.ticks.items()}
             json.dump(state, open(STATE, "w"))
@@ -620,6 +658,10 @@ class TickBook:
             else:
                 self.pair_stats["none"] += 1
             self.pair.pop(tk, None)
+        for tk in list(self.trips):
+            r = self.pair.get(tk)
+            if tk not in live and not r:
+                self.trips.pop(tk, None)
         if len(self.pair) > 40:
             for k in sorted(self.pair,
                             key=lambda x: self.pair[x].get("close", 0))[:20]:
@@ -849,7 +891,15 @@ class TickBook:
             if not (MIN_PX_C <= px <= MAX_PX_C):
                 self.stats["band_skip"] += 1
                 continue
-            edge = p_side * 100.0 - px
+            # NET of the round trip. Widening the band into mid-prices
+            # is only safe if the arithmetic prices the fee, which peaks
+            # at 50c (0.07 x P x (1-P)) and vanishes at the extremes. A
+            # gross-edge test would happily buy a 4c edge that costs 5c
+            # to trade - which is precisely how the phantom book lost
+            # 2.45c on every pair it captured.
+            rt_fee = (fee_c(px, 1, maker=True)
+                      + fee_c(min(99.0, px + EDGE_C), 1, maker=True))
+            edge = p_side * 100.0 - px - rt_fee
             if edge < EDGE_C:
                 self.stats["no_edge"] += 1
                 continue
@@ -945,6 +995,15 @@ class TickBook:
             held = self.pos.get(m["tk"], {}).get("n", 0.0)
             if held >= MAX_POS:
                 self.stats["capped"] += 1
+                continue
+            # RE-ENTRY IS THE POINT (Adam: "trade in and out over and
+            # over"). Nothing blocks quoting a market we have already
+            # traded and exited this window - but cap the round trips so
+            # one choppy window cannot dominate the sample and so the
+            # fee drag of churn stays visible rather than infinite.
+            if self.trips.get(m["tk"], 0) >= MAX_TRIPS:
+                self.stats["trip_capped"] = self.stats.get(
+                    "trip_capped", 0) + 1
                 continue
             add_c = our_px * SIZE
             if self._capital_c() + add_c > BOOK_CAPITAL_C:
@@ -1096,18 +1155,28 @@ class TickBook:
             if bid is None:
                 continue
             sell_px = round(bid, 2)
-            remaining = p_side * 100.0 - sell_px
-            if remaining > EXIT_EDGE_C:
-                continue        # still cheap: the trade is not finished
             avg = pos["cost_c"] / max(1e-9, pos["n"])
-            if sell_px <= avg:
-                continue        # never pay to leave a thesis intact
+            remaining = p_side * 100.0 - sell_px
+            broken = p_side < STOP_P
+            if not broken:
+                if remaining > EXIT_EDGE_C:
+                    continue    # still cheap: the trade is not finished
+                if sell_px <= avg:
+                    continue    # never pay to leave a thesis INTACT
+            # ...but when the thesis is BROKEN - we bought a 75% and the
+            # model now reads it below STOP_P - the reason for holding
+            # has evaporated, and taking the loss frees the collateral
+            # to be redeployed inside the same window. That is the
+            # difference between a stop and the flatten leak.
             n = pos["n"]
             fee = fee_c(sell_px, n, maker=True)
             pnl_c = sell_px * n - pos["cost_c"] - pos["fee_c"] - fee
             self.realized_c += pnl_c
             self.stats["exits"] += 1
+            if broken:
+                self.stats["stops"] = self.stats.get("stops", 0) + 1
             self.stats["settled"] += 1
+            self.trips[tk] = self.trips.get(tk, 0) + 1
             self.stats["wins" if pnl_c > 0 else "losses"] += 1
             # CALIBRATION INTEGRITY: an exit used to credit itself an
             # automatic win here, on the reasoning that the market
@@ -1124,6 +1193,7 @@ class TickBook:
             self.settled.append({
                 "tk": tk, "label": pos["label"], "lane": "exit",
                 "entry_lane": pos["lane"], "side": pos["side"],
+                "stop": broken,
                 "n": round(n, 2), "px": round(avg, 2),
                 "exit_px": sell_px, "model_p": pos["p_side"],
                 "won": pnl_c > 0, "pnl": round(pnl_c / 100.0, 2),
@@ -1364,6 +1434,14 @@ class TickBook:
             "clock": self._clock(),
             "settled": self.settled[-12:][::-1],
             "exits": self.stats.get("exits", 0),
+            "stops": self.stats.get("stops", 0),
+            "trips": sum(self.trips.values()),
+            "trip_capped": self.stats.get("trip_capped", 0),
+            # CAPITAL TURNOVER - how many times the whole book recycles
+            # per hour. Volume alone is vanity; turnover x edge is P&L.
+            "turns_h": round(
+                sum(self.trips.values())
+                / max(1e-9, (time.time() - self._t0) / 3600.0), 2),
             "arbs": self.arbs[-8:][::-1],
             "arb_seen": self.stats.get("arb_seen", 0),
             "live_bp": {st: (round(self.liveness_bp(st), 2)
@@ -1399,7 +1477,10 @@ class TickBook:
                       "max_pos": MAX_POS, "maker_rate": MAKER_RATE,
                       "vol_n": MIN_VOL_N,
                       "exit_edge_c": EXIT_EDGE_C,
-                      "min_live_bp": MIN_LIVE_BP},
+                      "min_live_bp": MIN_LIVE_BP,
+                      "capital": BOOK_CAPITAL_C / 100.0,
+                      "stop_p": STOP_P, "max_trips": MAX_TRIPS,
+                      "endgame_s": ENDGAME_S},
             "vol": {st: (round(self.sigma_s(st), 5)
                          if self.sigma_s(st) else None) for st in SERIES},
             "ticks": {st: len(self.ticks.get(st) or []) for st in SERIES},
