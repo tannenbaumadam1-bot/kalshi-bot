@@ -795,3 +795,27 @@ def test_backfill_does_not_double_count_a_window():
     n1 = len(b.basis.get("KXGOLD15M") or [])
     b.backfill_basis()
     assert len(b.basis.get("KXGOLD15M") or []) == n1
+
+
+def test_an_era_reset_keeps_the_price_tape_and_the_instrument_offset():
+    """The ledger is regime-specific; the feeds are not. Wiping the tape
+    and the measured offset on an era bump cost 45 minutes of blind dead
+    time after every reset, for no epistemic gain."""
+    path = os.path.join(tempfile.mkdtemp(), "s.json")
+    T.STATE = path
+    json.dump({"era": "an_older_era",
+               "realized_c": 5000.0,
+               "settled": [{"pnl": 1.0}],
+               "calib": {"90": [10, 9]},
+               "ticks": {"KXGOLD15M": [[1000, 4600.0], [1020, 4601.0]]},
+               "basis_obs": {"KXGOLD15M": [1.0, 1.1, 1.2]},
+               "basis_seen": ["W1"]}, open(path, "w"))
+    b = T.TickBook()
+    # ledger discarded
+    assert b.realized_c == 0.0
+    assert b.settled == []
+    assert b.calib == {}
+    # instrument knowledge kept
+    assert b.basis_of("KXGOLD15M") is not None
+    assert len(b.ticks.get("KXGOLD15M") or []) == 2
+    assert "W1" in b._basis_seen

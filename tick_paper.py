@@ -450,7 +450,21 @@ class TickBook:
         try:
             d = json.load(open(STATE))
             if d.get("era") != ERA:
-                return          # a ledger from another regime is not ours
+                # A LEDGER from another regime is not ours - P&L, settles
+                # and calibration all reset. But the PRICE TAPE and the
+                # INSTRUMENT OFFSET are not ledger entries: they are
+                # properties of the feeds themselves, true regardless of
+                # what strategy we were running when we measured them.
+                # Wiping them on an era bump cost 45 minutes of blind
+                # dead time after every reset, for no epistemic gain -
+                # like recalibrating a thermometer because you changed
+                # your mind about dinner. Carry them across.
+                self.ticks = {k: [tuple(x) for x in v][-VOL_WINDOW:]
+                              for k, v in (d.get("ticks") or {}).items()}
+                self.basis = {k: list(v)[-BASIS_N:] for k, v in
+                              (d.get("basis_obs") or {}).items()}
+                self._basis_seen = set(d.get("basis_seen") or [])
+                return
             self.pos = d.get("pos") or {}
             self.settled = (d.get("settled") or [])[-200:]
             self.calib = d.get("calib") or {}
