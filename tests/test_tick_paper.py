@@ -510,3 +510,39 @@ def test_the_pair_tracker_never_places_a_trade():
     b.pair["P1"] = {"lo": 10.0, "hi": 90.0, "close": time.time() - 60}
     b.track_pair([])
     assert not b.pos and b.realized_c == 0.0
+
+
+# ---------- the bug I shipped twice in one session ----------
+def test_no_save_key_may_collide_with_a_published_key():
+    """save() writes into the same dict step() publishes. Twice now a
+    raw observation list has silently replaced the computed report of
+    the same name on the tracker ("basis", then "pair"). This test makes
+    the class of bug impossible rather than trusting me to remember."""
+    b = T.TickBook()
+    b.basis["KXGOLD15M"] = [1.0, 1.1, 1.2]
+    b.pair["X"] = {"lo": 10.0, "hi": 90.0, "close": time.time()}
+    published = {"basis": b.basis_of("KXGOLD15M"), "pair": b.pair_report(),
+                 "calibration": b._calib_table(), "settled": [],
+                 "positions": [], "windows": []}
+    saved = dict(published)
+    b.save(saved)
+    for k, v in published.items():
+        assert saved[k] == v, f"save() clobbered published key {k!r}"
+
+
+def test_a_refusing_feed_is_backed_off_not_hammered():
+    """327 errors and 1,446 refusals accumulated before anyone looked."""
+    b = T.TickBook()
+    b._feed_block_until = time.time() + 60
+    assert b.fetch_proxy() == {}
+    assert b.errs == 0            # backed off, did not even try
+
+
+def test_feed_health_is_published_not_swallowed():
+    b = T.TickBook()
+    b._feed_err = "HTTP Error 401: Unauthorized"
+    b.fetch_markets = lambda: []
+    b.fetch_proxy = lambda: {}
+    st = b.step()
+    assert st["feed"]["ok"] is False
+    assert "401" in st["feed"]["err"]

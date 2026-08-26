@@ -1122,8 +1122,11 @@ async function load(){
         +'<td class=num><span class="'+C(h.pnl)+'">'+M(h.pnl)+'</span></td></tr>').join('');}}
   if(d.tick){const T=d.tick,TR=T.rules||{};
     $('tkwrap').style.display='block';
+    var FD=T.feed||{};
     $('tkmode').innerHTML='<span class=chip style="background:rgba(56,189,248,.16);color:#7dd3fc">PAPER &middot; NO MONEY</span>'
-      +' <span class=mut style="font-size:11px">era '+(T.era||'tick1')+' &middot; 15-minute gold/silver/WTI windows &middot; distance-vs-clock model on a Pyth proxy &middot; fills only when a REAL print trades through us</span>';
+      +(FD.ok===false?' <span class=chip style="background:rgba(248,113,113,.18);color:#fca5a5">PRICE FEED BLOCKED</span>':'')
+      +' <span class=mut style="font-size:11px">era '+(T.era||'tick1')+' &middot; 15-minute gold/silver/WTI windows &middot; distance-vs-clock model on a Pyth proxy &middot; fills only when a REAL print trades through us</span>'
+      +(FD.ok===false?'<div class=mut style="font-size:11px;margin-top:6px;color:#fca5a5">Pyth closed public Hermes access (auth required since 2026-07-31) &mdash; every request 401s. The MODEL lanes are paused until a PYTH_API_KEY is set. Everything that reads Kalshi&rsquo;s own book keeps running: pair-completion tracking, the true-arb scanner and the fee math. Feed says: '+(FD.err||'')+'</div>':'');
     const cl=T.clock||{},lanes=T.by_lane||{},RF=T.refuse||{};
     $('tktiles').innerHTML=[
       tile('TOTAL P&L','<span class="'+C(T.total)+'">'+M(T.total||0)+'</span>','banked '+M(T.realized||0)+' from '+(T.settled_n||0)+' settled &middot; open '+M(T.open_pnl||0)+' &middot; using '+M(T.capital||0)+' of '+M(T.capital_max||100)),

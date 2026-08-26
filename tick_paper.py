@@ -220,10 +220,18 @@ BASIS_WINDOW_S = int(os.environ.get("TICK_BASIS_WINDOW", "30"))
 PAIR_L = float(os.environ.get("TICK_PAIR_L", "45"))
 CLOCK_GOAL = int(os.environ.get("TICK_CLOCK", "200"))       # settle gate
 UA = {"User-Agent": "kalshibot-tick/1.0"}
+# Pyth closed public Hermes access (auth required from 2026-07-31); every
+# request now 401s without a key. Set PYTH_API_KEY to restore the model
+# lanes. Until then the feed-independent work continues - see feed_state.
+PYTH_KEY = os.environ.get("PYTH_API_KEY", "").strip()
+FEED_BACKOFF_S = int(os.environ.get("TICK_FEED_BACKOFF", "300"))
 
 
-def _get(url, timeout=15):
-    req = urllib.request.Request(url, headers=UA)
+def _get(url, timeout=15, key=False):
+    h = dict(UA)
+    if key and PYTH_KEY:
+        h["Authorization"] = "Bearer " + PYTH_KEY
+    req = urllib.request.Request(url, headers=h)
     with urllib.request.urlopen(req, timeout=timeout) as r:
         return json.load(r)
 
@@ -340,6 +348,8 @@ class TickBook:
         self._seen = set()
         self._last_ts = 0.0
         self._t0 = time.time()
+        self._feed_block_until = 0.0
+        self._feed_err = ""
         self.load()
 
     # ---------------- persistence ----------------
@@ -348,7 +358,8 @@ class TickBook:
     # file keeps ONE list and a test asserts the two sides match.
     PERSIST = ("pos", "settled", "calib", "proxy_err", "fills",
                "pnl_days", "realized_c", "stats", "errs", "t0", "ticks",
-               "arbs", "basis_obs", "basis_seen", "pair", "pair_stats")
+               "arbs", "basis_obs", "basis_seen", "pair_obs",
+               "pair_stats")
 
     def load(self):
         try:
@@ -366,7 +377,7 @@ class TickBook:
             self.errs = d.get("errs") or 0
             self._t0 = d.get("t0") or self._t0
             self.arbs = (d.get("arbs") or [])[-40:]
-            self.pair = d.get("pair") or {}
+            self.pair = d.get("pair_obs") or {}
             self.pair_stats.update(d.get("pair_stats") or {})
             self.basis = {k: list(v)[-BASIS_N:] for k, v in
                           (d.get("basis_obs") or {}).items()}
@@ -400,7 +411,14 @@ class TickBook:
             state["basis_obs"] = {k: v[-BASIS_N:]
                                   for k, v in self.basis.items()}
             state["basis_seen"] = sorted(self._basis_seen)[-200:]
-            state["pair"] = self.pair
+            # persist under a DIFFERENT key than the published report -
+            # step() publishes state["pair"] as the completion REPORT,
+            # and writing the raw per-window extremes into the same key
+            # replaced it on the tracker. Second time I have made this
+            # exact mistake in one session (see basis_obs); hence the
+            # test below that forbids any save key from colliding with a
+            # published one.
+            state["pair_obs"] = self.pair
             state["pair_stats"] = self.pair_stats
             state["ticks"] = {k: v[-VOL_WINDOW:]
                               for k, v in self.ticks.items()}
@@ -421,10 +439,21 @@ class TickBook:
                + "&".join("ids[]=" + i for i in ids)
                + "&parsed=true&encoding=hex")
         out = {}
+        # BACKOFF: a feed that is refusing us will refuse us again in 20
+        # seconds. Retrying on every cycle burned 327 errors and 1,446
+        # refusals into the ledger before anyone looked. Back off, and
+        # say WHY on the tracker instead of failing quietly.
+        if self._feed_block_until > time.time():
+            return {}
         try:
-            d = _get(url)
-        except Exception:
+            d = _get(url, key=True)
+            self._feed_err = ""
+        except Exception as e:
             self.errs += 1
+            msg = str(e)
+            self._feed_err = msg[:140]
+            if "401" in msg or "403" in msg or "429" in msg:
+                self._feed_block_until = time.time() + FEED_BACKOFF_S
             return {}
         now = time.time()
         by_id = {}
@@ -1199,6 +1228,15 @@ class TickBook:
                       for st in SERIES},
             "basis_n": {st: len(self.basis.get(st) or []) for st in SERIES},
             "pair": self.pair_report(),
+            "feed": {
+                "ok": not self._feed_err,
+                "err": self._feed_err,
+                "keyed": bool(PYTH_KEY),
+                "blocked_for_s": max(0, round(self._feed_block_until
+                                              - time.time())),
+                # what still works WITHOUT the price feed: everything
+                # that reads Kalshi's own book
+                "book_lanes_ok": True},
             "refuse": {k: self.stats.get(k, 0) for k in
                        ("no_vol", "no_proxy", "capped", "band_skip",
                         "no_edge", "proxy_dead", "no_basis")},
