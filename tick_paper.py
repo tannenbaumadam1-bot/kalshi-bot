@@ -180,6 +180,44 @@ ARB_MIN_C = float(os.environ.get("TICK_ARB_MIN", "1"))
 BASIS_N = int(os.environ.get("TICK_BASIS_N", "8"))
 MIN_BASIS_N = int(os.environ.get("TICK_MIN_BASIS_N", "3"))
 BASIS_WINDOW_S = int(os.environ.get("TICK_BASIS_WINDOW", "30"))
+# PAIR / LEGGED-ARB TRACKER (Adam 8/25: "over 15 minutes you can buy yes
+# and no for a guaranteed arb continuously").
+#
+# The arithmetic is exact and the insight is right: buying YES at its low
+# and NO at its low costs min_yes + (100 - max_yes) = 100 MINUS the price
+# range. So the locked profit IS the intra-window range. Measured over 59
+# real settled windows the median range is 59-79c, which looks like free
+# money - and that is precisely why it has to be simulated rather than
+# admired.
+#
+# BACKTEST VERDICT (54-60 windows, 8/25-8/26, STRICT fills - a print must
+# trade THROUGH the bid, the standard phantom taught us to use):
+#     bid 44c  both legs 74%   EV -4.26c/window
+#     bid 45c  both legs 78%   EV -4.00c/window
+#     bid 46c  both legs 78%   EV -5.78c/window
+#     bid 48c  both legs 89%   EV -3.67c/window
+#   cutting the naked leg early helps but never rescues it (-4.00 ->
+#   -2.79 at 45c/T-180s). NEGATIVE AT EVERY LEVEL AND EVERY POLICY.
+#
+# WHY, structurally: the leg that fills ALONE fills precisely because the
+# price ran away from it and did not come back - and "ran away and did
+# not come back" is the definition of that leg losing. In the sample this
+# correlation was perfect: 12 of 12 one-legged windows at 45c lost the
+# leg outright. So the trade is 78% x +6c against 22% x -46c.
+#
+# Bid deeper and the lock grows but both-fills collapse; bid shallower and
+# both-fills approach certainty while the lock shrinks toward the fee. The
+# market prices that trade-off almost exactly right - which is what an
+# efficient book looks like from the inside.
+#
+# BREAKEVEN, so a regime change can be recognised instead of argued about:
+#   P(both) / P(one) = (L + fee) / (100 - 2L - 2*fee)
+#   at 45c that needs both-legs ~88.5% (we see 78%); at 48c ~96% (89%).
+# This tracker therefore does NOT trade. It measures the completion rate
+# every window and publishes it against the breakeven line, so if the
+# market ever turns choppy enough to clear the bar, we find out from the
+# tape rather than from a hunch.
+PAIR_L = float(os.environ.get("TICK_PAIR_L", "45"))
 CLOCK_GOAL = int(os.environ.get("TICK_CLOCK", "200"))       # settle gate
 UA = {"User-Agent": "kalshibot-tick/1.0"}
 
@@ -285,6 +323,8 @@ class TickBook:
         self.proxy_err = []    # |proxy - strike| behaviour vs outcome
         self.fills = []        # for adverse-selection scoring
         self.arbs = []         # true crossed books, if they ever appear
+        self.pair = {}         # tk -> {lo, hi} yes-price extremes seen
+        self.pair_stats = {"n": 0, "both": 0, "one": 0, "none": 0}
         self.basis = {}        # series -> [proxy - strike observations]
         self._basis_seen = set()   # windows already measured
         self.pnl_days = {}
@@ -308,7 +348,7 @@ class TickBook:
     # file keeps ONE list and a test asserts the two sides match.
     PERSIST = ("pos", "settled", "calib", "proxy_err", "fills",
                "pnl_days", "realized_c", "stats", "errs", "t0", "ticks",
-               "arbs", "basis_obs", "basis_seen")
+               "arbs", "basis_obs", "basis_seen", "pair", "pair_stats")
 
     def load(self):
         try:
@@ -326,6 +366,8 @@ class TickBook:
             self.errs = d.get("errs") or 0
             self._t0 = d.get("t0") or self._t0
             self.arbs = (d.get("arbs") or [])[-40:]
+            self.pair = d.get("pair") or {}
+            self.pair_stats.update(d.get("pair_stats") or {})
             self.basis = {k: list(v)[-BASIS_N:] for k, v in
                           (d.get("basis_obs") or {}).items()}
             # a window already measured must not be measured twice after
@@ -358,6 +400,8 @@ class TickBook:
             state["basis_obs"] = {k: v[-BASIS_N:]
                                   for k, v in self.basis.items()}
             state["basis_seen"] = sorted(self._basis_seen)[-200:]
+            state["pair"] = self.pair
+            state["pair_stats"] = self.pair_stats
             state["ticks"] = {k: v[-VOL_WINDOW:]
                               for k, v in self.ticks.items()}
             json.dump(state, open(STATE, "w"))
@@ -434,6 +478,63 @@ class TickBook:
         if not cands:
             return None
         return max(cands) * VOL_MULT
+
+    def track_pair(self, mkts):
+        """Record each window's YES-price extremes and, when the window
+        closes, whether a legged pair at PAIR_L would have COMPLETED.
+
+        Measures, never trades - see the PAIR_L note above for the
+        backtest that put this lane on ice. What it is watching for is a
+        regime change: completion has to clear ~88.5% at 45c before the
+        trade pays, and the only honest way to know is to keep counting."""
+        live = set()
+        for m in mkts:
+            tk = m["tk"]
+            live.add(tk)
+            yb, ya = m.get("yes_bid"), m.get("yes_ask")
+            if yb is None or ya is None:
+                continue
+            mid = (yb + ya) / 2.0
+            r = self.pair.setdefault(tk, {"lo": mid, "hi": mid,
+                                          "close": m["close_ts"]})
+            r["lo"] = min(r["lo"], yb)     # cheapest YES on offer
+            r["hi"] = max(r["hi"], ya)     # dearest YES = cheapest NO
+        now = time.time()
+        for tk, r in list(self.pair.items()):
+            if tk in live or r.get("close", 0) > now - 30:
+                continue
+            yes_leg = r["lo"] < PAIR_L
+            no_leg = r["hi"] > (100.0 - PAIR_L)
+            self.pair_stats["n"] += 1
+            if yes_leg and no_leg:
+                self.pair_stats["both"] += 1
+            elif yes_leg or no_leg:
+                self.pair_stats["one"] += 1
+            else:
+                self.pair_stats["none"] += 1
+            self.pair.pop(tk, None)
+        if len(self.pair) > 40:
+            for k in sorted(self.pair,
+                            key=lambda x: self.pair[x].get("close", 0))[:20]:
+                self.pair.pop(k, None)
+
+    def pair_report(self):
+        """Completion rate against the breakeven it must clear to pay."""
+        st = dict(self.pair_stats)
+        n = st.get("n", 0)
+        f = fee_c(PAIR_L, 1, maker=True)
+        lock = 100.0 - 2 * PAIR_L - 2 * f          # profit if both fill
+        risk = PAIR_L + f                          # loss if only one does
+        # P*lock = (1-P)*risk  ->  P = risk / (lock + risk)
+        need = risk / (lock + risk) if (lock + risk) else None
+        got = (st["both"] / n) if n else None
+        return {"n": n, "both": st.get("both", 0), "one": st.get("one", 0),
+                "none": st.get("none", 0), "L": PAIR_L,
+                "lock_c": round(lock, 2), "risk_c": round(risk, 2),
+                "rate": round(got, 3) if got is not None else None,
+                "breakeven": round(need, 3) if need else None,
+                "pays": (got is not None and need is not None
+                         and got >= need)}
 
     def measure_basis(self, mkts):
         """One free observation per window: at the instant a window
@@ -687,6 +788,7 @@ class TickBook:
         self.quotes = {}
         now = time.time()
         self.measure_basis(mkts)
+        self.track_pair(mkts)
         for m in mkts:
             px_age = proxy.get(m["series"])
             if not px_age:
@@ -1096,6 +1198,7 @@ class TickBook:
                            if self.basis_of(st) is not None else None)
                       for st in SERIES},
             "basis_n": {st: len(self.basis.get(st) or []) for st in SERIES},
+            "pair": self.pair_report(),
             "refuse": {k: self.stats.get(k, 0) for k in
                        ("no_vol", "no_proxy", "capped", "band_skip",
                         "no_edge", "proxy_dead", "no_basis")},

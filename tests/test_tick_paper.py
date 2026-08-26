@@ -470,3 +470,43 @@ def test_the_correction_removes_the_offset_from_the_distance():
     b.basis["KXWTI15M"] = [-0.0754, -0.0750, -0.0758]
     adj = b.adj_spot("KXWTI15M", 82.2146)
     assert abs(adj - 82.29) < 0.002        # lands back on the strike
+
+
+# ---------- pair / legged-arb tracker (Adam 8/25) ----------
+def test_pair_completes_when_the_window_swings_through_both_legs():
+    b = T.TickBook()
+    m = _mkt(tk="P1", close_ts=time.time() - 60)
+    b.pair["P1"] = {"lo": 20.0, "hi": 80.0, "close": time.time() - 60}
+    b.track_pair([])
+    assert b.pair_stats["both"] == 1
+
+
+def test_pair_is_one_legged_when_the_window_trends():
+    b = T.TickBook()
+    b.pair["P1"] = {"lo": 20.0, "hi": 40.0, "close": time.time() - 60}
+    b.track_pair([])
+    assert b.pair_stats["one"] == 1
+    assert b.pair_stats["both"] == 0
+
+
+def test_pair_report_states_the_breakeven_it_must_clear():
+    """78% observed vs ~88.5% needed at 45c is why this lane is on ice."""
+    b = T.TickBook()
+    b.pair_stats = {"n": 100, "both": 78, "one": 22, "none": 0}
+    r = b.pair_report()
+    assert r["rate"] == 0.78
+    assert 0.80 < r["breakeven"] < 0.95
+    assert r["pays"] is False
+
+
+def test_pair_report_flips_to_pays_if_the_regime_ever_clears_the_bar():
+    b = T.TickBook()
+    b.pair_stats = {"n": 100, "both": 97, "one": 3, "none": 0}
+    assert b.pair_report()["pays"] is True
+
+
+def test_the_pair_tracker_never_places_a_trade():
+    b = T.TickBook()
+    b.pair["P1"] = {"lo": 10.0, "hi": 90.0, "close": time.time() - 60}
+    b.track_pair([])
+    assert not b.pos and b.realized_c == 0.0
