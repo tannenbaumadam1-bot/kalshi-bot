@@ -397,6 +397,7 @@ class TickBook:
         self._t0 = time.time()
         self._feed_block_until = 0.0
         self._feed_err = ""
+        self._dead_ids = set()   # feed ids this plan cannot see
         self.load()
 
     # ---------------- persistence ----------------
@@ -479,7 +480,8 @@ class TickBook:
         series -> (price, age_s). A stale feed is reported, never
         silently used: modelling a 900-second window off a 5-minute-old
         price is worse than not modelling it at all."""
-        ids = sorted({v[0] for v in SERIES.values()})
+        ids = sorted({v[0] for v in SERIES.values()}
+                     - self._dead_ids)
         if not ids:
             return {}
         url = (HERMES + "/v2/updates/price/latest?"
@@ -506,6 +508,27 @@ class TickBook:
             self._feed_err = msg[:140]
             if "401" in msg or "403" in msg or "429" in msg:
                 self._feed_block_until = time.time() + FEED_BACKOFF_S
+            elif "404" in msg:
+                # ONE UNAVAILABLE FEED BLINDS ALL OF THEM. Hermes 404s
+                # the entire batch when any single id is missing, naming
+                # the offender in the body: "Price IDs not found: <id>".
+                # Measured 8/26 - WTI (USOILSPOT) is not in this plan's
+                # feed set, so gold and silver, both perfectly available,
+                # returned nothing for hours. Prune the offender and keep
+                # the rest of the book alive; if the plan later covers
+                # it, clearing _dead_ids on restart picks it up again.
+                body = ""
+                try:
+                    body = e.read().decode("utf-8", "ignore")
+                except Exception:
+                    pass
+                found = False
+                for fid in {v[0] for v in SERIES.values()}:
+                    if fid in body or fid in msg:
+                        self._dead_ids.add(fid)
+                        found = True
+                if not found:
+                    self._feed_block_until = time.time() + FEED_BACKOFF_S
             return {}
         now = time.time()
         by_id = {}
@@ -1288,7 +1311,11 @@ class TickBook:
                                               - time.time())),
                 # what still works WITHOUT the price feed: everything
                 # that reads Kalshi's own book
-                "book_lanes_ok": True},
+                "book_lanes_ok": True,
+                # feeds this plan cannot see - named, not silently absent
+                "unavailable": sorted(
+                    lab for st, (fid, lab) in SERIES.items()
+                    if fid in self._dead_ids)},
             "refuse": {k: self.stats.get(k, 0) for k in
                        ("no_vol", "no_proxy", "capped", "band_skip",
                         "no_edge", "proxy_dead", "no_basis")},

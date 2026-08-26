@@ -582,3 +582,22 @@ def test_a_pasted_key_survives_the_do_console_paste_markers():
 def test_a_clean_key_is_left_alone():
     for k in ("abc-123_XY.z", "AAAA1111bbbb2222", "a+b/c="):
         assert T._clean_key(k) == k
+
+
+def test_one_unavailable_feed_does_not_blind_the_others():
+    """Hermes 404s the WHOLE batch when any single id is missing. On
+    8/26 WTI was absent from the plan and gold+silver - both perfectly
+    available - returned nothing for hours."""
+    b = T.TickBook()
+    wti = T.SERIES["KXWTI15M"][0]
+    b._dead_ids.add(wti)
+    seen = {}
+
+    def fake_get(url, timeout=15, key=False):
+        seen["url"] = url
+        return {"parsed": []}
+
+    T._get = fake_get
+    b.fetch_proxy()
+    assert wti not in seen["url"]
+    assert T.SERIES["KXGOLD15M"][0] in seen["url"]
