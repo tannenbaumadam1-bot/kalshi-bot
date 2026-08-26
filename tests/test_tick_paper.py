@@ -601,3 +601,75 @@ def test_one_unavailable_feed_does_not_blind_the_others():
     b.fetch_proxy()
     assert wti not in seen["url"]
     assert T.SERIES["KXGOLD15M"][0] in seen["url"]
+
+
+# ---------- the +$304 fabrication (8/26) ----------
+def _q(px=90.0, side="yes"):
+    return {"tk": "T1", "series": "KXGOLD15M", "label": "gold",
+            "lane": "endgame", "our_px": px, "side": side, "strike": 100.0,
+            "close_ts": time.time() + 60, "model_p": 0.95, "p_side": 0.95,
+            "spot": 100.5, "t_left": 60, "ts": time.time() - 5,
+            "filled": 0.0}
+
+
+def test_a_resting_order_can_only_fill_its_own_size_in_total():
+    """THE BUG: _fill was called once per print for up to SIZE contracts
+    EACH. One 5-lot quote in a busy book took 677 contracts - $623 of
+    collateral on a $100 book - and fabricated +$304 of P&L."""
+    b = T.TickBook()
+    q = _q()
+    b.resting = {"T1": q}
+    prints = [{"tk": "T1", "px": 85.0, "ct": 50, "ts": time.time()}
+              for _ in range(40)]
+    b.check_fills(prints, 0)
+    assert b.pos["T1"]["n"] <= T.SIZE
+
+
+def test_position_cap_is_enforced_at_fill_time_not_only_at_quote_time():
+    b = T.TickBook()
+    for i in range(20):
+        q = _q()
+        b.resting = {"T1": q}
+        b.check_fills([{"tk": "T1", "px": 85.0, "ct": 50,
+                        "ts": time.time()}], 0)
+    assert b.pos["T1"]["n"] <= T.MAX_POS
+
+
+def test_the_book_cannot_spend_more_collateral_than_it_has():
+    b = T.TickBook()
+    for i in range(60):
+        q = _q(px=90.0)
+        q["tk"] = f"T{i}"
+        b.resting = {q["tk"]: q}
+        b.check_fills([{"tk": q["tk"], "px": 85.0, "ct": 50,
+                        "ts": time.time()}], 0)
+    assert b._capital_c() <= T.BOOK_CAPITAL_C
+
+
+def test_fill_returns_the_size_actually_taken():
+    b = T.TickBook()
+    q = _q()
+    assert b._fill(q, 3.0, 90.0) == 3.0
+    b.pos["T1"]["n"] = T.MAX_POS
+    assert b._fill(q, 3.0, 90.0) == 0.0
+
+
+def test_an_exit_does_not_credit_itself_a_calibration_win():
+    """We exit the trades that are WORKING, so scoring exits as wins
+    guarantees a flattering table however bad the model is - the 8/17
+    sold_net winner-selection bias in a new hat."""
+    b = T.TickBook()
+    b.pos["T1"] = {"tk": "T1", "series": "KXGOLD15M", "label": "gold",
+                   "lane": "endgame", "side": "yes", "n": 5.0,
+                   "cost_c": 440.0, "fee_c": 0.0, "strike": 100.0,
+                   "close_ts": time.time() + 120, "model_p": 0.95,
+                   "p_side": 0.95, "spot_at_entry": 100.5, "t_left": 120,
+                   "opened": "2000-01-01T00:00:00"}
+    b.ticks["KXGOLD15M"] = [(1000 + i * 20, 100.0 + i * 0.05)
+                            for i in range(30)]
+    b.basis["KXGOLD15M"] = [0.0, 0.0, 0.0]
+    m = _mkt(tk="T1", yes_bid=97.0, yes_ask=98.0,
+             close_ts=time.time() + 120)
+    b.check_exits([m], {"KXGOLD15M": (100.5, 1.0)})
+    assert b.calib == {}                      # nothing credited
+    assert len(b.pend_calib) == 1             # parked for the real result

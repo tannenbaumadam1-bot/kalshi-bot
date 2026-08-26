@@ -89,7 +89,7 @@ KALSHI = os.environ.get("TICK_KALSHI",
                         "https://api.elections.kalshi.com/trade-api/v2")
 HERMES = os.environ.get("TICK_HERMES", "https://hermes.pyth.network")
 STATE = os.environ.get("TICK_STATE", os.path.join("logs", "tick_state.json"))
-ERA = os.environ.get("TICK_ERA", "tick1")
+ERA = os.environ.get("TICK_ERA", "tick2")
 
 # --- the surface -------------------------------------------------------
 # series -> (public Pyth proxy feed id, human label). Only series whose
@@ -378,6 +378,7 @@ class TickBook:
         self.proxy_err = []    # |proxy - strike| behaviour vs outcome
         self.fills = []        # for adverse-selection scoring
         self.arbs = []         # true crossed books, if they ever appear
+        self.pend_calib = []   # exited claims awaiting the real outcome
         self.pair = {}         # tk -> {lo, hi} yes-price extremes seen
         self.pair_stats = {"n": 0, "both": 0, "one": 0, "none": 0}
         self.basis = {}        # series -> [proxy - strike observations]
@@ -407,7 +408,7 @@ class TickBook:
     PERSIST = ("pos", "settled", "calib", "proxy_err", "fills",
                "pnl_days", "realized_c", "stats", "errs", "t0", "ticks",
                "arbs", "basis_obs", "basis_seen", "pair_obs",
-               "pair_stats")
+               "pair_stats", "pend_calib")
 
     def load(self):
         try:
@@ -426,6 +427,7 @@ class TickBook:
             self._t0 = d.get("t0") or self._t0
             self.arbs = (d.get("arbs") or [])[-40:]
             self.pair = d.get("pair_obs") or {}
+            self.pend_calib = (d.get("pend_calib") or [])[-200:]
             self.pair_stats.update(d.get("pair_stats") or {})
             self.basis = {k: list(v)[-BASIS_N:] for k, v in
                           (d.get("basis_obs") or {}).items()}
@@ -468,6 +470,7 @@ class TickBook:
             # published one.
             state["pair_obs"] = self.pair
             state["pair_stats"] = self.pair_stats
+            state["pend_calib"] = self.pend_calib[-200:]
             state["ticks"] = {k: v[-VOL_WINDOW:]
                               for k, v in self.ticks.items()}
             json.dump(state, open(STATE, "w"))
@@ -947,8 +950,12 @@ class TickBook:
             if self._capital_c() + add_c > BOOK_CAPITAL_C:
                 self.stats["capped"] += 1
                 continue
+            _prev = self.resting.get(m["tk"]) or {}
+            _carry = (float(_prev.get("filled", 0.0))
+                      if (_prev.get("our_px") == our_px
+                          and _prev.get("side") == side) else 0.0)
             self.quotes[m["tk"]] = dict(
-                m, lane=lane, our_px=our_px, side=side,
+                m, lane=lane, our_px=our_px, side=side, filled=_carry,
                 model_p=round(p_yes, 4), p_side=round(p_side, 4),
                 spot=spot, sigma=sig, t_left=round(t_left),
                 edge=round(p_side * 100.0 - our_px, 2), ts=now)
@@ -987,13 +994,46 @@ class TickBook:
                     continue
                 if not through:
                     continue
-                n = min(float(t["ct"]), float(SIZE))
+                # A RESTING ORDER HAS A FINITE SIZE. This loop used to
+                # call _fill once per print for up to SIZE contracts
+                # EACH, so a single 5-lot quote sitting in a busy book
+                # accumulated hundreds of contracts - 677 on one window,
+                # $623 of collateral on a $100 book, and a fabricated
+                # +$304 P&L. An order for 5 can fill 5 in total, ever.
+                left = float(SIZE) - float(q.get("filled", 0.0))
+                if left <= 0:
+                    break
+                n = min(float(t["ct"]), left)
                 if n <= 0:
                     continue
-                self._fill(q, n, our)
+                got = self._fill(q, n, our)
+                if got <= 0:
+                    break               # a cap refused it: stop trying
+                q["filled"] = float(q.get("filled", 0.0)) + got
                 self.stats["fills_strict"] += 1
 
     def _fill(self, q, n, px):
+        """Book a paper fill, and ENFORCE THE CAPS HERE.
+
+        Position and capital limits used to be checked only when posting
+        a quote, which is the wrong place: quoting is an intention, a
+        fill is the thing that actually consumes the book. Both are now
+        enforced at the moment inventory is created, and the fill is
+        trimmed to whatever room is genuinely left. Returns the size
+        actually taken, so the caller can stop when a cap bites."""
+        held = float(self.pos.get(q["tk"], {}).get("n", 0.0))
+        room = float(MAX_POS) - held
+        if room <= 0:
+            self.stats["capped"] += 1
+            return 0.0
+        n = min(float(n), room)
+        cap_left = (float(BOOK_CAPITAL_C) - self._capital_c()) / max(1e-9, px)
+        if cap_left <= 0:
+            self.stats["cap_full"] = self.stats.get("cap_full", 0) + 1
+            return 0.0
+        n = min(n, cap_left)
+        if n <= 0:
+            return 0.0
         p = self.pos.setdefault(q["tk"], {
             "tk": q["tk"], "series": q["series"], "label": q["label"],
             "lane": q["lane"], "side": q["side"], "n": 0.0, "cost_c": 0.0,
@@ -1008,6 +1048,7 @@ class TickBook:
                            "side": q["side"], "lane": q["lane"],
                            "model_p": q["p_side"], "ts": time.time()})
         del self.fills[:-400]
+        return n
 
     # ---------------- the exit lane ----------------
     def check_exits(self, mkts, proxy):
@@ -1068,13 +1109,18 @@ class TickBook:
             self.stats["exits"] += 1
             self.stats["settled"] += 1
             self.stats["wins" if pnl_c > 0 else "losses"] += 1
-            b = str(int(min(0.99, max(0.0, pos["p_side"])) * 10) * 10)
-            row = self.calib.setdefault(b, [0, 0])
-            row[0] += 1
-            # an exit is graded on the MODEL's original claim, not the
-            # outcome we never waited for: at exit time the market is
-            # agreeing with us, which is the model being right.
-            row[1] += 1
+            # CALIBRATION INTEGRITY: an exit used to credit itself an
+            # automatic win here, on the reasoning that the market
+            # agreeing with us IS the model being right. That is the
+            # 8/17 sold_net winner-selection bias wearing a new hat - we
+            # exit the trades that are working, so scoring exits as wins
+            # guarantees a flattering table no matter how bad the model
+            # is. Instead the claim is parked and graded later against
+            # Kalshi's actual result, P&L unaffected.
+            self.pend_calib.append({
+                "tk": tk, "p_side": pos["p_side"], "side": pos["side"],
+                "close_ts": pos["close_ts"]})
+            del self.pend_calib[:-200]
             self.settled.append({
                 "tk": tk, "label": pos["label"], "lane": "exit",
                 "entry_lane": pos["lane"], "side": pos["side"],
@@ -1089,6 +1135,33 @@ class TickBook:
             self.pos.pop(tk, None)
 
     # ---------------- settlement ----------------
+    def grade_pending(self):
+        """Resolve exited claims against Kalshi's real result.
+
+        P&L was banked at the exit; this only decides whether the
+        model's stated probability came true, so the calibration table
+        covers every prediction we made rather than only the ones we
+        chose to sit through."""
+        now = time.time()
+        for row in list(self.pend_calib):
+            if row["close_ts"] > now - 60:
+                continue
+            try:
+                m = _get(f"{KALSHI}/markets/{row['tk']}")["market"]
+            except Exception:
+                self.errs += 1
+                continue
+            res = (m.get("result") or "").lower()
+            if res not in ("yes", "no"):
+                if row["close_ts"] < now - 3600:
+                    self.pend_calib.remove(row)
+                continue
+            b = str(int(min(0.99, max(0.0, row["p_side"])) * 10) * 10)
+            c = self.calib.setdefault(b, [0, 0])
+            c[0] += 1
+            c[1] += 1 if res == row["side"] else 0
+            self.pend_calib.remove(row)
+
     def settle_check(self):
         """Grade finished windows against KALSHI'S OWN RESULT.
 
@@ -1224,6 +1297,7 @@ class TickBook:
         # chance to be sold. Running these the other way round would
         # let a position expire that we had already decided to leave.
         self.check_exits(mkts, proxy)
+        self.grade_pending()
         self.settle_check()
         quoted = self.quote(mkts, proxy)
         self.resting = dict(self.quotes)
