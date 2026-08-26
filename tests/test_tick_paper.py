@@ -753,3 +753,45 @@ def test_aggression_did_not_reopen_the_fill_hole():
                    for _ in range(50)], 0)
     assert b.pos["T1"]["n"] <= T.MAX_POS
     assert b._capital_c() <= T.BOOK_CAPITAL_C
+
+
+def test_basis_backfills_from_already_closed_windows():
+    """One sample per 15-min window meant an era reset cost 45 minutes
+    of dead time. Closed windows carry strikes at known past instants,
+    and our tape covers the last hour - so the warmup is recoverable in
+    a single pass."""
+    b = T.TickBook()
+    base = time.time() - 3000
+    b.ticks["KXGOLD15M"] = [(base + i * 20, 4600.0 + i * 0.1)
+                            for i in range(150)]
+
+    def fake_get(url, timeout=15, key=False):
+        if "status=settled" in url and "KXGOLD15M" in url:
+            return {"markets": [
+                {"ticker": f"W{i}", "floor_strike": 4600.0 + i,
+                 "open_time": base + 300 + i * 900} for i in range(3)]}
+        return {"markets": []}
+
+    T._get = fake_get
+    b.backfill_basis()
+    assert len(b.basis.get("KXGOLD15M") or []) >= 3
+    assert b.basis_of("KXGOLD15M") is not None
+
+
+def test_backfill_does_not_double_count_a_window():
+    b = T.TickBook()
+    base = time.time() - 3000
+    b.ticks["KXGOLD15M"] = [(base + i * 20, 4600.0 + i * 0.1)
+                            for i in range(150)]
+
+    def fake_get(url, timeout=15, key=False):
+        if "status=settled" in url and "KXGOLD15M" in url:
+            return {"markets": [{"ticker": "W1", "floor_strike": 4650.0,
+                                 "open_time": base + 600}]}
+        return {"markets": []}
+
+    T._get = fake_get
+    b.backfill_basis()
+    n1 = len(b.basis.get("KXGOLD15M") or [])
+    b.backfill_basis()
+    assert len(b.basis.get("KXGOLD15M") or []) == n1

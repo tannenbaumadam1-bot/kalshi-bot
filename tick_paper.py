@@ -685,6 +685,50 @@ class TickBook:
                 "pays": (got is not None and need is not None
                          and got >= need)}
 
+    def backfill_basis(self):
+        """Learn the instrument offset from windows that ALREADY closed.
+
+        The offset is only measurable at a window's open, which yields
+        one sample per 15 minutes - so an era reset cost 45 minutes of
+        dead time before the book could quote anything. That is a design
+        flaw, and an avoidable one: every RECENTLY CLOSED window carries
+        a strike that was, by definition, the settlement feed's value at
+        a known past instant. Our own price tape covers the last hour.
+        Matching the two backfills the whole warmup in one pass, on the
+        next cycle after a restart, with no extra assumptions."""
+        for st in SERIES:
+            if len(self.basis.get(st) or []) >= MIN_BASIS_N:
+                continue
+            tape = self.ticks.get(st) or []
+            if not tape:
+                continue
+            oldest = tape[0][0]
+            try:
+                d = _get(f"{KALSHI}/markets?series_ticker={st}"
+                         f"&status=settled&limit=20")
+                rows = d.get("markets", [])
+            except Exception:
+                self.errs += 1
+                continue
+            for m in rows:
+                tk = m.get("ticker")
+                ot = _ts(m.get("open_time"))
+                strike = _num(m.get("floor_strike"), None)
+                if (not tk or tk in self._basis_seen or not ot
+                        or strike in (None, 0.0) or ot < oldest):
+                    continue
+                near = [(abs(t - ot), p) for t, p in tape
+                        if abs(t - ot) <= BASIS_WINDOW_S]
+                if not near:
+                    continue
+                _dt, px = min(near)
+                self.basis.setdefault(st, []).append(
+                    round(px - strike, 6))
+                del self.basis[st][:-BASIS_N]
+                self._basis_seen.add(tk)
+                self.stats["basis_backfill"] = self.stats.get(
+                    "basis_backfill", 0) + 1
+
     def measure_basis(self, mkts):
         """One free observation per window: at the instant a window
         opens, Kalshi's settlement feed EQUALS the new strike, so the
@@ -945,6 +989,10 @@ class TickBook:
         self.quotes = {}
         now = time.time()
         self.measure_basis(mkts)
+        # only while still warming up - one cheap call, then never again
+        if any(len(self.basis.get(st) or []) < MIN_BASIS_N
+               for st in SERIES):
+            self.backfill_basis()
         self.track_pair(mkts)
         for m in mkts:
             px_age = proxy.get(m["series"])
@@ -1454,6 +1502,7 @@ class TickBook:
                            if self.basis_of(st) is not None else None)
                       for st in SERIES},
             "basis_n": {st: len(self.basis.get(st) or []) for st in SERIES},
+            "basis_backfill": self.stats.get("basis_backfill", 0),
             "pair": self.pair_report(),
             "feed": {
                 "ok": not self._feed_err,
