@@ -223,7 +223,31 @@ UA = {"User-Agent": "kalshibot-tick/1.0"}
 # Pyth closed public Hermes access (auth required from 2026-07-31); every
 # request now 401s without a key. Set PYTH_API_KEY to restore the model
 # lanes. Until then the feed-independent work continues - see feed_state.
-PYTH_KEY = os.environ.get("PYTH_API_KEY", "").strip()
+def _pyth_key():
+    """The key, from the environment or from a file on the server.
+
+    The file path matters: logs/ is gitignored and lives only on the
+    droplet, so the key never enters the repo, this chat, or a systemd
+    unit that someone might paste into a screenshot. Putting it there is
+    ONE short line typed at the DigitalOcean console - which is the only
+    thing that console reliably accepts (pasting into it injects
+    bracketed-paste markers that corrupt the command)."""
+    k = os.environ.get("PYTH_API_KEY", "").strip()
+    if k:
+        return k
+    for path in (os.path.join("logs", "pyth_key.txt"),
+                 "/opt/kalshibot/logs/pyth_key.txt"):
+        try:
+            with open(path) as f:
+                k = f.read().strip()
+            if k:
+                return k
+        except Exception:
+            continue
+    return ""
+
+
+PYTH_KEY = _pyth_key()
 FEED_BACKOFF_S = int(os.environ.get("TICK_FEED_BACKOFF", "300"))
 
 
@@ -445,6 +469,11 @@ class TickBook:
         # say WHY on the tracker instead of failing quietly.
         if self._feed_block_until > time.time():
             return {}
+        # re-read every cycle: writing the key file should take effect on
+        # the next tick, with no deploy and no service restart
+        global PYTH_KEY
+        if not PYTH_KEY:
+            PYTH_KEY = _pyth_key()
         try:
             d = _get(url, key=True)
             self._feed_err = ""

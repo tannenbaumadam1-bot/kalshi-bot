@@ -546,3 +546,24 @@ def test_feed_health_is_published_not_swallowed():
     st = b.step()
     assert st["feed"]["ok"] is False
     assert "401" in st["feed"]["err"]
+
+
+def test_the_api_key_can_arrive_by_file_so_it_never_enters_git():
+    d = tempfile.mkdtemp()
+    os.makedirs(os.path.join(d, "logs"), exist_ok=True)
+    with open(os.path.join(d, "logs", "pyth_key.txt"), "w") as f:
+        f.write("  test-key-123  \n")
+    cwd = os.getcwd()
+    try:
+        os.chdir(d)
+        assert T._pyth_key() == "test-key-123"
+    finally:
+        os.chdir(cwd)
+
+
+def test_the_env_var_wins_over_the_file():
+    os.environ["PYTH_API_KEY"] = "env-key"
+    try:
+        assert T._pyth_key() == "env-key"
+    finally:
+        del os.environ["PYTH_API_KEY"]
