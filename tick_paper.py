@@ -214,8 +214,12 @@ ARB_MIN_C = float(os.environ.get("TICK_ARB_MIN", "1"))
 # times - trading before you know your instrument's zero error is how
 # the WTI row happened.
 BASIS_N = int(os.environ.get("TICK_BASIS_N", "8"))
-MIN_BASIS_N = int(os.environ.get("TICK_MIN_BASIS_N", "3"))
-BASIS_WINDOW_S = int(os.environ.get("TICK_BASIS_WINDOW", "30"))
+# Two anchors is enough to START. The offset keeps refining as every
+# new window adds one, and trading with a two-sample offset is far
+# closer to the truth than refusing to trade at all - the alternative
+# is not "more accuracy", it is no data.
+MIN_BASIS_N = int(os.environ.get("TICK_MIN_BASIS_N", "2"))
+BASIS_WINDOW_S = int(os.environ.get("TICK_BASIS_WINDOW", "90"))
 # PAIR / LEGGED-ARB TRACKER (Adam 8/25: "over 15 minutes you can buy yes
 # and no for a guaranteed arb continuously").
 #
@@ -1517,6 +1521,12 @@ class TickBook:
                       for st in SERIES},
             "basis_n": {st: len(self.basis.get(st) or []) for st in SERIES},
             "basis_backfill": self.stats.get("basis_backfill", 0),
+            "tape": {st: {"n": len(self.ticks.get(st) or []),
+                          "span_min": round(
+                              ((self.ticks.get(st) or [(0, 0)])[-1][0]
+                               - (self.ticks.get(st) or [(0, 0)])[0][0])
+                              / 60.0, 1)}
+                     for st in SERIES},
             "pair": self.pair_report(),
             "feed": {
                 "ok": not self._feed_err,
