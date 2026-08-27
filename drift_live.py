@@ -484,6 +484,15 @@ ACTIVE_UTC_TO = int(os.environ.get("DRIFT_LIVE_ACTIVE_TO", "24"))
 # merely happened to start near $100. If Adam deposits more, bump this
 # (or set DRIFT_LIVE_DEPOSITS_C) or every % silently overstates.
 DEPOSITS_C = int(os.environ.get("DRIFT_LIVE_DEPOSITS_C", "10000"))
+# 8/27 WITHDRAWALS. Adam withdrew $72 on 8/26-27, and every percentage on
+# the tracker instantly lied: ROI read -26.9% when the book was actually
+# +45% on cash in ($73.11 left + $72 taken out = $145.11 on $100).
+# Worse than cosmetic - the WEEKLY BREAKER measures drawdown from a
+# rolling NAV peak, so a withdrawal is indistinguishable from a loss of
+# the same size and would halt a perfectly healthy book. Money the owner
+# takes out is not money the strategy lost.
+# Set DRIFT_LIVE_WITHDRAWN_C to the cumulative total, in cents.
+WITHDRAWN_C = int(os.environ.get("DRIFT_LIVE_WITHDRAWN_C", "7204"))
 
 # 8/14 WEEKLY CIRCUIT BREAKER (proposed 8/11, unbuilt until now). The
 # DAILY halt is 15% of NAV, so three bad days in a row trip nothing and
@@ -1411,6 +1420,7 @@ class DriftLive:
                  # like the deposit - it is a launch artifact. This is the
                  # real money in; the dashboard anchors every % here.
                  "deposits": round(DEPOSITS_C / 100.0, 2),
+                 "withdrawn": round(WITHDRAWN_C / 100.0, 2),
                  # 8/14 WEEKLY CIRCUIT BREAKER state.
                  "week": {"halted": bool(getattr(self, "week_halted", False)),
                           "on": WEEK_HALT_ON,

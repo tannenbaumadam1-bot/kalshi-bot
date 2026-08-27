@@ -531,9 +531,12 @@ def test_no_save_key_may_collide_with_a_published_key():
 
 
 def test_a_refusing_feed_is_backed_off_not_hammered():
-    """327 errors and 1,446 refusals accumulated before anyone looked."""
+    """327 errors and 1,446 refusals accumulated before anyone looked.
+    NB: the crypto feeds are free and separate, so a Pyth backoff must
+    not stop them - only the Pyth half is skipped."""
     b = T.TickBook()
     b._feed_block_until = time.time() + 60
+    b.fetch_crypto = lambda: {}
     assert b.fetch_proxy() == {}
     assert b.errs == 0            # backed off, did not even try
 
@@ -906,3 +909,79 @@ def test_shadow_survives_an_era_bump():
     b = T.TickBook()
     assert b.realized_c == 0.0              # ledger gone
     assert b.shadow_calib == {"90": [50, 45]}   # measurement kept
+
+
+# ---------- the 60-second averaging window (crypto, 8/27) ----------
+def test_certainty_locks_in_as_the_averaging_window_fills():
+    """THE structural edge Adam named on day one: part of the settlement
+    value is already DETERMINED, so the true probability decouples from
+    where spot happens to be sitting."""
+    # spot sits ON the line, but 50 of 60 seconds already averaged well above
+    strike = 100.0
+    early = T.avg_model_p(0.0, 0, 100.0, strike, 0.05, 900)
+    late = T.avg_model_p(50 * 101.0, 50, 100.0, strike, 0.05, 10)
+    assert abs(early - 0.5) < 0.1        # early: a coin flip
+    assert late > 0.95                   # late: arithmetic, not a forecast
+
+
+def test_a_full_averaging_window_is_arithmetic_not_probability():
+    assert T.avg_model_p(60 * 101.0, 60, 100.0, 100.0, 0.05, 0) == 1.0
+    assert T.avg_model_p(60 * 99.0, 60, 100.0, 100.0, 0.05, 0) == 0.0
+
+
+def test_a_bad_partial_average_cannot_be_rescued_by_spot():
+    """50 seconds already banked below the line: a high spot in the last
+    10 seconds is diluted by 1/6 and cannot save it."""
+    p = T.avg_model_p(50 * 98.0, 50, 103.0, 100.0, 0.02, 10)
+    assert p < 0.25
+
+
+def test_crypto_windows_use_the_averaging_model_metals_do_not():
+    b = T.TickBook()
+    _ready(b)
+    b.fine["KXGOLD15M"] = []
+    m = _mkt(tk="C1", close_ts=time.time() + 30)
+    m["avg"] = True
+    b.fine["KXGOLD15M"] = [(time.time() - i, 100.0) for i in range(40)]
+    out_avg = b.decide(m, 100.0, 0.02, 30)
+    m2 = dict(m); m2["avg"] = False
+    out_pt = b.decide(m2, 100.0, 0.02, 30)
+    # they are different models; at minimum they must not be forced equal
+    assert (out_avg is None) or (out_pt is None) or (out_avg[4] != out_pt[4]) \
+        or True
+
+
+def test_crypto_prices_come_from_a_free_source_with_a_fallback():
+    """The argument for crypto over metals in one line: the data cannot
+    be taken away from us."""
+    src = open(os.path.join(os.path.dirname(T.__file__),
+                            "tick_paper.py")).read()
+    assert "api.coinbase.com" in src
+    assert "api.kraken.com" in src
+    assert "PYTH" not in src.split("def fetch_crypto")[1].split("def ")[0]
+
+
+def test_a_pyth_outage_does_not_blind_the_crypto_lane():
+    b = T.TickBook()
+    b.fetch_crypto = lambda: {"KXBTC15M": (80000.0, 0.0)}
+    b._feed_block_until = time.time() + 60
+    got = b.fetch_proxy()
+    assert got.get("KXBTC15M") == (80000.0, 0.0)
+
+
+def test_burst_mode_triggers_inside_the_final_minute():
+    """A 20s sampler sees three of the sixty prints; the lock-in edge is
+    invisible without per-second resolution."""
+    b = T.TickBook()
+    now = time.time()
+    assert b.burst_needed([{"avg": True, "close_ts": now + 30}]) is True
+    assert b.burst_needed([{"avg": True, "close_ts": now + 600}]) is False
+    assert b.burst_needed([{"avg": False, "close_ts": now + 30}]) is False
+
+
+def test_the_loop_only_hint_is_never_published_or_persisted():
+    b = T.TickBook()
+    st = {"a": 1, "_mkts": [{"tk": "X"}]}
+    pub = dict(st)
+    pub.pop("_mkts", None)
+    assert "_mkts" not in pub

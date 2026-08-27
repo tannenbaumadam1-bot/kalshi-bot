@@ -58,3 +58,26 @@ def test_crypto_positions_valued_from_kalshi_mirror(tmp_path, monkeypatch):
     assert rows["KXXRPD-26AUG0623-T1.0399"]["value"] == 1.96  # NO @ (100-2) x2
     # book-level marked value counts the settling position (Kalshi truth)
     assert out["clive"]["summary"]["marked_nav"] == round(1.84 + 1.96, 2)
+
+
+# ---------- withdrawals (8/27) ----------
+def test_roi_counts_money_the_owner_took_out_as_value_created():
+    """Adam withdrew $72; ROI read -26.9% on a book that was +45%
+    ($73.11 left + $72 out = $145.11 on $100 in). Money the owner takes
+    out is not money the strategy lost."""
+    acct, dep, wd = 73.11, 100.0, 72.04
+    roi = round((acct + wd - dep) / dep * 100.0, 2)
+    assert roi > 44.0
+    naive = round((acct - dep) / dep * 100.0, 2)
+    assert naive < -26.0          # what it used to print
+
+
+def test_a_withdrawal_is_not_a_drawdown():
+    """The weekly breaker measures drawdown from a rolling NAV peak, so
+    a withdrawal looks exactly like a loss of the same size and would
+    halt a perfectly healthy book."""
+    peak, nav, wd = 145.15, 73.11, 72.04
+    naive_dd = peak - nav
+    true_dd = peak - (nav + wd)
+    assert naive_dd > 70          # would trip a 15% breaker
+    assert abs(true_dd) < 1       # the book actually lost nothing

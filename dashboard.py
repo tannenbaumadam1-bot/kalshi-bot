@@ -574,12 +574,19 @@ def build_data():
                 # is conservative, not fabricated.)
                 _open = dv.get("open") or []
                 _stale = any(b.get("now") is None for b in _open)
+                _wd = float((dv.get("summary") or {}).get("withdrawn") or 0)
                 if _dep > 0:
                     dv["deposits"] = _dep
-                    dv["roi_on_cash"] = round((acct - _dep) / _dep * 100.0, 2)
+                    dv["withdrawn"] = _wd
+                    # value CREATED = what is still in the account plus
+                    # what the owner has taken out. Ignoring withdrawals
+                    # made a +45% book report -26.9% on 8/27.
+                    dv["roi_on_cash"] = round(
+                        (acct + _wd - _dep) / _dep * 100.0, 2)
                     dv["marks_stale"] = bool(_stale)
                     dv["realized_true"] = (None if _stale
-                                           else round(acct - _dep - _unreal, 2))
+                                           else round(acct + _wd - _dep
+                                                      - _unreal, 2))
                     # k_realized has been provably wrong (said -81 while
                     # NAV proved +21). Never render it as truth again
                     # without this flag beside it.
@@ -1129,7 +1136,7 @@ async function load(){
     var FD=T.feed||{};
     $('tkmode').innerHTML='<span class=chip style="background:rgba(56,189,248,.16);color:#7dd3fc">PAPER &middot; NO MONEY</span>'
       +(FD.ok===false?' <span class=chip style="background:rgba(248,113,113,.18);color:#fca5a5">PRICE FEED BLOCKED</span>':'')
-      +' <span class=mut style="font-size:11px">era '+(T.era||'tick1')+' &middot; 15-minute gold/silver/WTI windows &middot; distance-vs-clock model on a Pyth proxy &middot; fills only when a REAL print trades through us</span>'
+      +' <span class=mut style="font-size:11px">era '+(T.era||'tick1')+' &middot; 15-minute gold/silver/WTI windows &middot; metals: distance-vs-clock on a Pyth proxy &middot; CRYPTO: 60-second AVERAGING settlement, where part of the answer locks in before the window closes &mdash; free Coinbase/Kraken data, 24/7 &middot; fills only when a REAL print trades through us</span>'
       +(FD.ok===false?'<div class=mut style="font-size:11px;margin-top:6px;color:#fca5a5">Pyth closed public Hermes access (auth required since 2026-07-31) &mdash; every request 401s. The MODEL lanes are paused until a PYTH_API_KEY is set. Everything that reads Kalshi&rsquo;s own book keeps running: pair-completion tracking, the true-arb scanner and the fee math. Feed says: '+(FD.err||'')+'</div>':'');
     const cl=T.clock||{},lanes=T.by_lane||{},RF=T.refuse||{};
     $('tktiles').innerHTML=[
@@ -1154,7 +1161,7 @@ async function load(){
       +'<td class=num>'+(w.yes_bid!=null?w.yes_bid+'/'+w.yes_ask:'&ndash;')+'</td>'
       +'<td class=num>'+(w.model_p!=null?(w.model_p*100).toFixed(1)+'%':'<span class=mut>warming</span>')+'</td>'
       +'<td class=num>'+(edge!=null?(edge>0?'+':'')+edge.toFixed(1)+'&cent;':'&ndash;')+'</td>'
-      +'<td>'+(w.dead?'<span class=neg>feed dead</span>':(w.quoted?'<span class=pos>quoting</span>':'<span class=mut>&mdash;</span>'))+'</td></tr>';}).join('')
+      +'<td>'+(w.dead?'<span class=neg>feed dead</span>':(w.quoted?'<span class=pos>quoting</span>':'<span class=mut>&mdash;</span>'))+(w.avg?' <span class=chip style="background:rgba(52,211,153,.14);color:#6ee7b7;font-size:10px">AVG'+(w.locked!=null?' '+w.locked+'% locked':'')+'</span>':'')+'</td></tr>';}).join('')
       ||'<tr><td colspan=9 class=empty>No open window right now&hellip;</td></tr>';
     var SH=T.shadow||{},ST=SH.table||[];
     $('tkshadow').innerHTML=ST.map(function(c){

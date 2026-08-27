@@ -103,6 +103,40 @@ SERIES = {
     "KXWTI15M": ("925ca92ff005ae943c158e3563f59698ce7e75c5a8c8dd43303a0"
                  "a154887b3e6", "wti"),
 }
+# ---------------------------------------------------------------------
+# CRYPTO 15-MINUTE WINDOWS (8/27) - the structurally best target on the
+# exchange, and the one Adam described from the very beginning.
+#
+# THREE THINGS MAKE THESE STRICTLY BETTER THAN THE METALS:
+# 1. THEY SETTLE ON A 60-SECOND AVERAGE, not a point-in-time candle
+#    close. "the simple average of the sixty seconds of CF Benchmarks'
+#    BRTI before 3:15 PM". That is the progressive lock-in Adam named on
+#    day one: as the final minute elapses, part of the settlement value
+#    is ALREADY DETERMINED, and the true probability decouples from
+#    where spot happens to be sitting. It is arithmetic, not forecasting
+#    - the one shape this shop has repeatedly proven it can harvest.
+# 2. THE DATA IS FREE, FOREVER. Coinbase and Kraken serve BTC/ETH/SOL
+#    spot with no key, no tier and no 13-day trial - unlike the metals,
+#    where the settlement feed sits behind a paid plan and even our
+#    proxy expires. A lane that cannot lose its data is worth more than
+#    a lane that might.
+# 3. THEY TRADE 24/7. Metals windows stop overnight and at weekends;
+#    crypto never does, which roughly triples the sample rate per day.
+# BTC's book is also the deepest of any 15-minute market (~8,200
+# contracts at touch when measured).
+CRYPTO = {
+    "KXBTC15M": ("BTC-USD", "btc"),
+    "KXETH15M": ("ETH-USD", "eth"),
+    "KXSOL15M": ("SOL-USD", "sol"),
+}
+CRYPTO = {k: v for k, v in CRYPTO.items()
+          if k in os.environ.get("TICK_CRYPTO", ",".join(CRYPTO))}
+# settlement is the mean of the sixty one-second prints before the
+# boundary, so the model needs per-second resolution in that last minute
+AVG_WINDOW_S = int(os.environ.get("TICK_AVG_WINDOW", "60"))
+BURST_AT_S = int(os.environ.get("TICK_BURST_AT", "75"))    # sample fast
+COINBASE = os.environ.get("TICK_COINBASE", "https://api.coinbase.com")
+
 SERIES = {k: v for k, v in SERIES.items()
           if k in os.environ.get("TICK_SERIES", ",".join(SERIES))}
 
@@ -407,6 +441,38 @@ def model_p(spot, strike, sigma_s, t_left_s):
     return _norm_cdf((spot - strike) / s)
 
 
+def avg_model_p(partial, n_have, spot, strike, sigma_s, t_left):
+    """P(settlement average >= strike) for a 60-second averaging window.
+
+    THE WHOLE POINT. Settlement is mean(60 one-second prints before T).
+    With n_have of those seconds already observed and summed into
+    `partial`, the remaining k = 60 - n_have seconds are the only thing
+    still unknown - and they enter the average diluted by k/60.
+
+        A = (partial + R) / 60,  R = sum of the k unknown prints
+        A >= K   <=>   R >= 60K - partial
+
+    R has mean ~ k*spot and, for a random walk sampled once a second,
+    standard deviation ~ sigma * k^1.5 / sqrt(3) (the integrated-variance
+    term: later seconds have drifted further, so the sum's variance grows
+    faster than k). That factor is why certainty accrues so sharply in the
+    last twenty seconds - and why a trader reading a price ticker cannot
+    see it. When k = 0 the answer is arithmetic, not probability.
+    """
+    k = max(0, AVG_WINDOW_S - int(n_have))
+    if k <= 0:
+        return 1.0 if (partial / max(1, n_have)) >= strike else 0.0
+    need = AVG_WINDOW_S * strike - partial
+    mean_r = k * spot
+    sd_r = max(1e-9, sigma_s * (k ** 1.5) / math.sqrt(3.0))
+    # plus the uncertainty of where spot itself will be when the window
+    # opens, if we are still ahead of it
+    lead = max(0.0, t_left - AVG_WINDOW_S)
+    if lead > 0:
+        sd_r = math.sqrt(sd_r ** 2 + (k * sigma_s * math.sqrt(lead)) ** 2)
+    return _norm_cdf((mean_r - need) / sd_r)
+
+
 def _ts(s):
     if not s:
         return 0.0
@@ -433,6 +499,7 @@ class TickBook:
         self.proxy_err = []    # |proxy - strike| behaviour vs outcome
         self.fills = []        # for adverse-selection scoring
         self.arbs = []         # true crossed books, if they ever appear
+        self.fine = {}         # series -> per-second prints (averaging)
         self.shadow = {}       # tk -> the model's claim, awaiting outcome
         self.shadow_calib = {}  # bucket -> [n, hits] on EVERY window
         self.trips = {}        # tk -> completed round trips this window
@@ -467,7 +534,7 @@ class TickBook:
                "pnl_days", "realized_c", "stats", "errs", "t0", "ticks",
                "arbs", "basis_obs", "basis_seen", "pair_obs",
                "pair_stats", "pend_calib", "trips", "shadow",
-               "shadow_calib")
+               "shadow_calib", "fine")
 
     def load(self):
         try:
@@ -507,6 +574,8 @@ class TickBook:
             self.pair = d.get("pair_obs") or {}
             self.pend_calib = (d.get("pend_calib") or [])[-200:]
             self.trips = d.get("trips") or {}
+            self.fine = {k: [tuple(x) for x in v]
+                         for k, v in (d.get("fine") or {}).items()}
             self.shadow = d.get("shadow") or {}
             self.shadow_calib = d.get("shadow_calib") or {}
             self.pair_stats.update(d.get("pair_stats") or {})
@@ -555,6 +624,7 @@ class TickBook:
             state["trips"] = self.trips
             state["shadow"] = self.shadow
             state["shadow_calib"] = self.shadow_calib
+            state["fine"] = {k: v[-400:] for k, v in self.fine.items()}
             state["ticks"] = {k: v[-VOL_WINDOW:]
                               for k, v in self.ticks.items()}
             json.dump(state, open(STATE, "w"))
@@ -567,20 +637,20 @@ class TickBook:
         series -> (price, age_s). A stale feed is reported, never
         silently used: modelling a 900-second window off a 5-minute-old
         price is worse than not modelling it at all."""
+        out = self.fetch_crypto()          # free, always available
         ids = sorted({v[0] for v in SERIES.values()}
                      - self._dead_ids)
         if not ids:
-            return {}
+            return out
         url = (HERMES + "/v2/updates/price/latest?"
                + "&".join("ids[]=" + i for i in ids)
                + "&parsed=true&encoding=hex")
-        out = {}
         # BACKOFF: a feed that is refusing us will refuse us again in 20
         # seconds. Retrying on every cycle burned 327 errors and 1,446
         # refusals into the ledger before anyone looked. Back off, and
         # say WHY on the tracker instead of failing quietly.
         if self._feed_block_until > time.time():
-            return {}
+            return out
         # re-read every cycle: writing the key file should take effect on
         # the next tick, with no deploy and no service restart
         global PYTH_KEY
@@ -616,7 +686,7 @@ class TickBook:
                         found = True
                 if not found:
                     self._feed_block_until = time.time() + FEED_BACKOFF_S
-            return {}
+            return out          # crypto prices survive a Pyth outage
         now = time.time()
         by_id = {}
         for p in d.get("parsed", []):
@@ -635,6 +705,51 @@ class TickBook:
                     tape.append((round(now), price))
                 del tape[:-VOL_WINDOW]
         return out
+
+    def fetch_crypto(self):
+        """Free spot prices. No key, no tier, no expiry.
+
+        Coinbase first, Kraken as a fallback - two independent public
+        endpoints, so one going down does not blind the lane. This is
+        the argument for crypto over metals in one line: the data cannot
+        be taken away from us."""
+        out = {}
+        for st, (pair, _lab) in CRYPTO.items():
+            px = None
+            try:
+                d = _get(f"{COINBASE}/v2/prices/{pair}/spot", timeout=8)
+                px = float(d["data"]["amount"])
+            except Exception:
+                try:
+                    kp = pair.replace("BTC", "XBT").replace("-", "")
+                    d = _get("https://api.kraken.com/0/public/Ticker"
+                             f"?pair={kp}", timeout=8)
+                    r = list((d.get("result") or {}).values())[0]
+                    px = float(r["c"][0])
+                except Exception:
+                    self.errs += 1
+            if px and px > 0:
+                out[st] = (px, 0.0)
+                now = time.time()
+                tape = self.ticks.setdefault(st, [])
+                if not tape or tape[-1][0] != round(now):
+                    tape.append((round(now), px))
+                del tape[:-VOL_WINDOW]
+                # SECOND-BY-SECOND tape, kept separately: the settlement
+                # average needs the individual prints, and the coarse
+                # vol tape above is deliberately thinned.
+                fine = self.fine.setdefault(st, [])
+                fine.append((round(now, 1), px))
+                cut = now - (AVG_WINDOW_S + BURST_AT_S + 30)
+                self.fine[st] = [r for r in fine if r[0] >= cut]
+        return out
+
+    def partial_avg(self, series, close_ts):
+        """(sum, count) of the settlement window's prints seen so far."""
+        lo = close_ts - AVG_WINDOW_S
+        rows = [p for t, p in (self.fine.get(series) or [])
+                if lo <= t < close_ts]
+        return (sum(rows), len(rows))
 
     def sigma_s(self, series):
         """Per-second price volatility from the proxy's own tape.
@@ -839,7 +954,7 @@ class TickBook:
         series is live at a time - these are single-strike up/down
         windows, not ladders."""
         out = []
-        for st in SERIES:
+        for st in list(SERIES) + list(CRYPTO):
             try:
                 d = _get(f"{KALSHI}/markets?series_ticker={st}"
                          f"&status=open&limit=5")
@@ -855,7 +970,9 @@ class TickBook:
                     continue
                 out.append({
                     "tk": m.get("ticker"), "series": st,
-                    "label": SERIES[st][1],
+                    "label": (SERIES[st][1] if st in SERIES
+                              else CRYPTO[st][1]),
+                    "avg": st in CRYPTO,
                     "strike": strike,
                     "open_ts": _ts(m.get("open_time")),
                     "close_ts": close,
@@ -960,7 +1077,13 @@ class TickBook:
         whichever side the model happens to favour. A 96%-likely YES
         offered at 95 is a worse trade than a 60%-likely NO offered at
         48, and the old code could not see the second one at all."""
-        p_raw = model_p(spot, m["strike"], sig, t_left)
+        if m.get("avg"):
+            # 60-second averaging settlement: part of the answer is
+            # already determined and the rest is diluted by k/60
+            ps, pn = self.partial_avg(m["series"], m["close_ts"])
+            p_raw = avg_model_p(ps, pn, spot, m["strike"], sig, t_left)
+        else:
+            p_raw = model_p(spot, m["strike"], sig, t_left)
         # Never claim more certainty than CONF_CAP. The far tail is
         # exactly where a wrong vol estimate does its damage, and a
         # "99%" that is really 90% is a losing trade dressed as a gift.
@@ -1190,6 +1313,7 @@ class TickBook:
         p = self.pos.setdefault(q["tk"], {
             "tk": q["tk"], "series": q["series"], "label": q["label"],
             "lane": q["lane"], "side": q["side"], "n": 0.0, "cost_c": 0.0,
+            "avg": bool(q.get("avg")),
             "fee_c": 0.0, "strike": q["strike"], "close_ts": q["close_ts"],
             "model_p": q["model_p"], "p_side": q["p_side"],
             "spot_at_entry": q["spot"], "t_left": q["t_left"],
@@ -1238,7 +1362,12 @@ class TickBook:
             _sp = self.adj_spot(pos["series"], pa[0])
             if _sp is None:
                 continue
-            p_raw = model_p(_sp, pos["strike"], sig, t_left)
+            if pos.get("avg"):
+                _ps, _pn = self.partial_avg(pos["series"], pos["close_ts"])
+                p_raw = avg_model_p(_ps, _pn, _sp, pos["strike"], sig,
+                                    t_left)
+            else:
+                p_raw = model_p(_sp, pos["strike"], sig, t_left)
             p_yes = min(CONF_CAP, max(1.0 - CONF_CAP, p_raw))
             p_side = p_yes if pos["side"] == "yes" else 1.0 - p_yes
             # what we could sell into right now, passively
@@ -1316,7 +1445,11 @@ class TickBook:
             spot = self.adj_spot(st, pa[0])
             if spot is None:
                 continue
-            p = model_p(spot, m["strike"], sig, left)
+            if m.get("avg"):
+                _ps, _pn = self.partial_avg(st, m["close_ts"])
+                p = avg_model_p(_ps, _pn, spot, m["strike"], sig, left)
+            else:
+                p = model_p(spot, m["strike"], sig, left)
             p = min(CONF_CAP, max(1.0 - CONF_CAP, p))
             # MOMENTUM, recorded as a FEATURE rather than traded on
             # (Adam wants momentum trades; the disciplined order is to
@@ -1556,8 +1689,15 @@ class TickBook:
             pa = proxy.get(st)
             sig = self.sigma_s(st)
             _adj = self.adj_spot(st, pa[0]) if pa else None
-            p = (model_p(_adj, m["strike"], sig, m["close_ts"] - now0)
-                 if (_adj is not None and sig) else None)
+            _tl = m["close_ts"] - now0
+            if _adj is not None and sig:
+                if m.get("avg"):
+                    _ps, _pn = self.partial_avg(st, m["close_ts"])
+                    p = avg_model_p(_ps, _pn, _adj, m["strike"], sig, _tl)
+                else:
+                    p = model_p(_adj, m["strike"], sig, _tl)
+            else:
+                p = None
             rows.append({
                 "tk": m["tk"], "label": m["label"],
                 "strike": m["strike"],
@@ -1570,6 +1710,10 @@ class TickBook:
                 "depth": m.get("depth"),
                 "model_p": round(p, 3) if p is not None else None,
                 "quoted": m["tk"] in self.quotes,
+                "avg": bool(m.get("avg")),
+                "locked": (round(100.0 * self.partial_avg(
+                    st, m["close_ts"])[1] / AVG_WINDOW_S, 0)
+                    if m.get("avg") else None),
                 "dead": self.proxy_dead(st)})
         state = {
             "updated": datetime.datetime.now().isoformat(timespec="seconds"),
@@ -1682,6 +1826,8 @@ class TickBook:
             _prev = float(_v)
         state["pnl_delta"] = dict(list(_delta.items())[-10:])
         self.last = state
+        state["_mkts"] = [{"tk": m["tk"], "avg": m.get("avg"),
+                           "close_ts": m["close_ts"]} for m in mkts]
         if self.rec is not None:
             try:
                 self.rec.write({"ts": state["updated"], "kind": "tick",
@@ -1689,8 +1835,19 @@ class TickBook:
                                 "total": state["total"]})
             except Exception:
                 pass
-        self.save(dict(state))
+        _pub = dict(state)
+        _pub.pop("_mkts", None)      # loop-only, never persisted/published
+        self.save(_pub)
         return state
+
+
+    def burst_needed(self, mkts):
+        """Is any crypto window inside its final minute right now?"""
+        now = time.time()
+        for m in mkts:
+            if m.get("avg") and 0 < (m["close_ts"] - now) <= BURST_AT_S:
+                return True
+        return False
 
 
 def start_thread():
@@ -1712,9 +1869,25 @@ def start_thread():
     def _loop():
         b = TickBook()
         sleep_s = int(os.environ.get("TICK_SLEEP", "20"))
+        burst_s = float(os.environ.get("TICK_BURST_SLEEP", "1.5"))
         while True:
             try:
-                b.step()
+                st = b.step()
+                # BURST MODE. The settlement average is the mean of SIXTY
+                # ONE-SECOND PRINTS, so a 20-second sampler sees three of
+                # them and the whole lock-in edge is invisible. Inside the
+                # final minute we poll the free crypto feeds every ~1.5s -
+                # cheap, keyless, and it is the difference between
+                # measuring this edge and merely believing in it.
+                if b.burst_needed(st.get("_mkts") or []):
+                    t_end = time.time() + BURST_AT_S
+                    while time.time() < t_end:
+                        try:
+                            b.fetch_crypto()
+                        except Exception:
+                            b.errs += 1
+                        time.sleep(burst_s)
+                    continue
             except Exception:
                 b.errs += 1
             time.sleep(sleep_s)
