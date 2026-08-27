@@ -259,34 +259,69 @@ def kind_prob(pfn, kind, strike, cap):
     return pfn(strike)
 
 
-def find_temp_markets(max_days=2):
-    """Near-term Kalshi daily temperature markets (whitelisted series only)."""
-    out, cursor, pages = [], None, 0
-    now = datetime.datetime.now(datetime.timezone.utc)
-    while pages < 45:
-        p = {"limit": 200, "status": "open", "with_nested_markets": "true"}
-        if cursor: p["cursor"] = cursor
+def _parse_ts(v):
+    """Kalshi timestamps, tolerantly. The old code used a strict
+    "%Y-%m-%dT%H:%M:%SZ" strptime; the API now also emits fractional
+    seconds and explicit offsets ("2026-08-26T17:59:59.55167+00:00"),
+    and every one of those was silently dropped by a bare except."""
+    if not v:
+        return None
+    t = str(v).replace("Z", "+00:00")
+    t = re.sub(r"\.(\d{1,6})\d*", lambda m: "." + m.group(1).ljust(6, "0"), t)
+    try:
+        dt = datetime.datetime.fromisoformat(t)
+    except Exception:
         try:
-            d = requests.get(KALSHI + "/events", params=p, timeout=20).json()
+            dt = datetime.datetime.strptime(str(v), "%Y-%m-%dT%H:%M:%SZ")
         except Exception:
-            break
-        pages += 1
-        for ev in d.get("events", []) or []:
-            st = ev.get("series_ticker", "") or ""
-            if st not in SERIES:
-                continue
-            city, is_low = SERIES[st]
-            for mk in ev.get("markets", []) or []:
-                ct = mk.get("close_time", "")
-                try:
-                    close = datetime.datetime.strptime(ct, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=datetime.timezone.utc)
-                except Exception:
+            return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=datetime.timezone.utc)
+    return dt
+
+
+def find_temp_markets(max_days=2):
+    """Near-term Kalshi daily temperature markets (whitelisted series only).
+
+    SERIES-FIRST FETCH (2026-08-27). This walked /events with a 45-page
+    cap and stopped finding anything: measured that day, 45 pages and
+    9,000 events returned ZERO weather markets, because Kalshi's event
+    list has grown far past the point where ours appear in it. The book
+    was not refusing trades - it could not SEE a single market, and had
+    placed nothing for two days while looking perfectly healthy.
+
+    Same defect, third book: the crypto lane hit it, then the phantom
+    book, and the fix is the same one that worked both times - ask for
+    each series by name instead of paging a global feed and hoping.
+    ~30 direct calls, bounded and deterministic, and it cannot be
+    outgrown by the exchange adding markets elsewhere.
+    """
+    out = []
+    now = datetime.datetime.now(datetime.timezone.utc)
+    for st, (city, is_low) in SERIES.items():
+        cursor, pages = None, 0
+        while pages < 4:
+            p = {"limit": 200, "status": "open", "series_ticker": st}
+            if cursor:
+                p["cursor"] = cursor
+            try:
+                d = requests.get(KALSHI + "/markets", params=p,
+                                 timeout=20).json()
+            except Exception:
+                break
+            pages += 1
+            for mk in d.get("markets", []) or []:
+                ct = mk.get("close_time", "") or ""
+                close = _parse_ts(ct)
+                if close is None:
                     continue
                 hrs = (close - now).total_seconds() / 3600
                 if hrs < -2 or hrs > max_days * 24:
                     continue
-                ks = classify_market(mk.get("strike_type"), mk.get("floor_strike"),
-                                     mk.get("cap_strike"), mk.get("yes_sub_title"))
+                ks = classify_market(mk.get("strike_type"),
+                                     mk.get("floor_strike"),
+                                     mk.get("cap_strike"),
+                                     mk.get("yes_sub_title"))
                 if ks is None:
                     continue
                 kind, strike, cap = ks
@@ -296,17 +331,20 @@ def find_temp_markets(max_days=2):
                     "bid_size": float(mk.get("yes_bid_size_fp") or 0),
                     "ask_size": float(mk.get("yes_ask_size_fp") or 0),
                     "vol": float(mk.get("volume_24h_fp") or 0),
-                    "yes_bid": _c(mk.get("yes_bid_dollars")), "yes_ask": _c(mk.get("yes_ask_dollars")),
-                    # settlement day comes from the TICKER (unambiguous), not
-                    # close_time (which is the next UTC day -> v2-v6 forecast
-                    # the wrong day). Fallback keeps oddball tickers working.
-                    "date": ticker_date(mk["ticker"]) or close.astimezone().strftime("%Y-%m-%d"),
+                    "yes_bid": _c(mk.get("yes_bid_dollars")),
+                    "yes_ask": _c(mk.get("yes_ask_dollars")),
+                    # settlement day comes from the TICKER (unambiguous),
+                    # not close_time (the next UTC day -> forecasts the
+                    # wrong day). Fallback keeps oddball tickers working.
+                    "date": (ticker_date(mk["ticker"])
+                             or close.astimezone().strftime("%Y-%m-%d")),
                     "hrs": hrs,
-                    "title": ev.get("title", ""), "sub": mk.get("yes_sub_title", ""),
+                    "title": mk.get("title", "") or "",
+                    "sub": mk.get("yes_sub_title", ""),
                 })
-        cursor = d.get("cursor")
-        if not cursor:
-            break
+            cursor = d.get("cursor")
+            if not cursor:
+                break
     return out
 
 

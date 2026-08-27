@@ -75,3 +75,48 @@ def _run():
 
 if __name__ == "__main__":
     sys.exit(_run())
+
+
+# ---------- series-first market fetch (the 2-day blackout, 8/27) ----------
+def test_timestamps_with_fractional_seconds_are_parsed():
+    """The strict "%Y-%m-%dT%H:%M:%SZ" strptime silently dropped every
+    row once Kalshi began emitting fractional seconds and offsets."""
+    import weather_edge as we
+    for raw in ("2026-08-26T17:59:59.55167+00:00",
+                "2026-08-26T17:59:59Z",
+                "2026-08-26T17:59:59.123456Z"):
+        assert we._parse_ts(raw) is not None
+    assert we._parse_ts("") is None
+    assert we._parse_ts("not a date") is None
+
+
+def test_market_fetch_asks_for_each_series_by_name():
+    """It walked /events with a 45-page cap and found NOTHING: measured
+    8/27, 45 pages and 9,000 events returned zero weather markets. A
+    global feed we do not control can always outgrow our page budget;
+    asking for each series by name cannot be outgrown."""
+    import weather_edge as we
+    seen = {"urls": [], "params": []}
+
+    class _R:
+        @staticmethod
+        def json():
+            return {"markets": [], "cursor": None}
+
+    def fake_get(url, params=None, timeout=None):
+        seen["urls"].append(url)
+        seen["params"].append(params or {})
+        return _R()
+
+    real = we.requests.get
+    try:
+        we.requests.get = fake_get
+        we.find_temp_markets(max_days=1)
+    finally:
+        we.requests.get = real
+    assert seen["urls"], "no request was made"
+    assert all(u.endswith("/markets") for u in seen["urls"])
+    assert all(p.get("series_ticker") for p in seen["params"])
+    # every whitelisted series is asked for BY NAME
+    asked = {p["series_ticker"] for p in seen["params"]}
+    assert asked == set(we.SERIES)
