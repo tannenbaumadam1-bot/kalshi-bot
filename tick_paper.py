@@ -861,7 +861,10 @@ class TickBook:
         a known past instant. Our own price tape covers the last hour.
         Matching the two backfills the whole warmup in one pass, on the
         next cycle after a restart, with no extra assumptions."""
-        for st in SERIES:
+        # CRYPTO TOO. The backfill loop iterated only the metals, so the
+        # crypto lane could never recover its anchors from history and
+        # sat blind waiting a full window for each one.
+        for st in list(SERIES) + list(CRYPTO):
             if len(self.basis.get(st) or []) >= MIN_BASIS_N:
                 continue
             tape = self.ticks.get(st) or []
@@ -1164,7 +1167,7 @@ class TickBook:
         self.measure_basis(mkts)
         # only while still warming up - one cheap call, then never again
         if any(len(self.basis.get(st) or []) < MIN_BASIS_N
-               for st in SERIES):
+               for st in list(SERIES) + list(CRYPTO)):
             self.backfill_basis()
         self.track_pair(mkts)
         for m in mkts:

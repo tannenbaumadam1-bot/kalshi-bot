@@ -994,3 +994,26 @@ def test_the_loop_only_hint_is_never_published_or_persisted():
     pub = dict(st)
     pub.pop("_mkts", None)
     assert "_mkts" not in pub
+
+
+def test_backfill_covers_the_crypto_lane_too():
+    """The loop iterated only the metals, so crypto could never recover
+    its anchors from history and sat blind a full window per anchor."""
+    b = T.TickBook()
+    base = time.time() - 3000
+    b.ticks["KXBTC15M"] = [(base + i * 20, 80000.0 + i)
+                           for i in range(150)]
+    calls = []
+
+    def fake_get(url, timeout=15, key=False):
+        calls.append(url)
+        if "KXBTC15M" in url and "status=settled" in url:
+            return {"markets": [
+                {"ticker": f"B{i}", "floor_strike": 80000.0 + i * 10,
+                 "open_time": base + 300 + i * 900} for i in range(3)]}
+        return {"markets": []}
+
+    T._get = fake_get
+    b.backfill_basis()
+    assert any("KXBTC15M" in u for u in calls)
+    assert len(b.basis.get("KXBTC15M") or []) >= 2
