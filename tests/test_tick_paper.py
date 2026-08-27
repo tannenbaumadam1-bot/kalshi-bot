@@ -1017,3 +1017,34 @@ def test_backfill_covers_the_crypto_lane_too():
     b.backfill_basis()
     assert any("KXBTC15M" in u for u in calls)
     assert len(b.basis.get("KXBTC15M") or []) >= 2
+
+
+# ---------- the thread that died quietly (8/27) ----------
+def test_the_book_beats_every_cycle():
+    """It stopped for 29 minutes while the rest of paper.py kept
+    running, and nothing noticed - the exact failure I had built an
+    alarm for on the LIVE book that same morning."""
+    b = T.TickBook()
+    b.fetch_markets = lambda: []
+    b.fetch_proxy = lambda: {}
+    before = b._beat
+    time.sleep(0.01)
+    b.step()
+    assert b._beat > before
+
+
+def test_the_worker_loop_cannot_die_on_a_non_exception():
+    """A bare `except Exception` still lets a thread vanish on anything
+    outside that tree."""
+    src = open(os.path.join(os.path.dirname(T.__file__),
+                            "tick_paper.py")).read()
+    loop = src.split("def start_thread")[1]
+    assert "except BaseException" in loop
+
+
+def test_paper_restarts_a_dead_or_stale_tick_thread():
+    """A dead worker must be revived, not merely reported."""
+    src = open(os.path.join(os.path.dirname(T.__file__),
+                            "paper.py")).read()
+    assert "tick_paper.start_thread()" in src.split("RESTARTING")[1]
+    assert "is_alive()" in src

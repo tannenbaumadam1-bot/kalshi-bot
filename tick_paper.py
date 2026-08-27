@@ -521,6 +521,7 @@ class TickBook:
         self._seen = set()
         self._last_ts = 0.0
         self._t0 = time.time()
+        self._beat = time.time()
         self._feed_block_until = 0.0
         self._feed_err = ""
         self._dead_ids = set()   # feed ids this plan cannot see
@@ -1714,6 +1715,7 @@ class TickBook:
         self._last_ts = now0
         self.score_adverse(mkts)
         self.stats["cycles"] += 1
+        self.heartbeat()
 
         open_c = self._open_pnl_c(mkts)
         hrs = max(1e-9, (time.time() - self._t0) / 3600.0)
@@ -1894,6 +1896,11 @@ class TickBook:
                 return True
         return False
 
+    def heartbeat(self):
+        """Proof of life, written every cycle."""
+        self._beat = time.time()
+        return self._beat
+
 
 def start_thread():
     """Run the book on its OWN clock, in a daemon thread.
@@ -1912,9 +1919,14 @@ def start_thread():
     import threading
 
     def _loop():
+        # BUILT AFTER THE THREAD DIED SILENTLY (8/27). It stopped for 29
+        # minutes while the rest of paper.py kept running, and nothing
+        # noticed - the exact failure I had built an alarm for on the
+        # LIVE book that same morning, reproduced one file over. A
+        # worker that can die quietly will.
         b = TickBook()
         sleep_s = int(os.environ.get("TICK_SLEEP", "20"))
-        burst_s = float(os.environ.get("TICK_BURST_SLEEP", "1.5"))
+        burst_s = float(os.environ.get("TICK_BURST_SLEEP", "2.0"))
         while True:
             try:
                 st = b.step()
@@ -1925,16 +1937,26 @@ def start_thread():
                 # cheap, keyless, and it is the difference between
                 # measuring this edge and merely believing in it.
                 if b.burst_needed(st.get("_mkts") or []):
+                    # bounded, and it keeps beating throughout so a long
+                    # burst can never be mistaken for a hang
                     t_end = time.time() + BURST_AT_S
                     while time.time() < t_end:
                         try:
                             b.fetch_crypto()
+                            b.heartbeat()
                         except Exception:
                             b.errs += 1
                         time.sleep(burst_s)
                     continue
-            except Exception:
+            except BaseException:
+                # BaseException, not Exception: a bare Exception handler
+                # still lets the thread die on anything outside that
+                # tree, which is how a worker vanishes without a trace.
                 b.errs += 1
+                try:
+                    b.heartbeat()
+                except Exception:
+                    pass
             time.sleep(sleep_s)
 
     t = threading.Thread(target=_loop, name="tick", daemon=True)

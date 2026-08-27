@@ -863,12 +863,24 @@ def main():
                 try:
                     _tp = os.path.join("logs", "tick_state.json")
                     _ts2 = json.load(open(_tp))
+                    _age = time.time() - os.path.getmtime(_tp)
                     print(f"  TICK(15m): {len(_ts2.get('windows', []))} "
                           f"windows | {_ts2.get('quoted', 0)} quoted | "
                           f"open {_ts2.get('open_n', 0)} | settled "
                           f"{_ts2.get('settled_n', 0)} | total "
-                          f"${_ts2.get('total', 0):+.2f} | alive "
+                          f"${_ts2.get('total', 0):+.2f} | age "
+                          f"{_age:.0f}s | alive "
                           f"{'yes' if tk_bot.is_alive() else 'NO'}")
+                    # WATCHDOG. The tick thread died silently on 8/27 and
+                    # sat dead for 29 minutes while this loop happily
+                    # printed stale numbers beside it. A dead worker must
+                    # be revived, not merely reported.
+                    if (not tk_bot.is_alive()) or _age > 300:
+                        print("  TICK: thread dead or stale - RESTARTING")
+                        try:
+                            tk_bot = tick_paper.start_thread()
+                        except Exception as _e:
+                            print(f"  TICK restart failed: {_e}")
                 except Exception as e:
                     print(f"  tick heartbeat skipped: {e}")
             if cu_bot is not None and n % 10 == 4:

@@ -1140,8 +1140,10 @@ async function load(){
   if(d.tick){const T=d.tick,TR=T.rules||{};
     $('tkwrap').style.display='block';
     var FD=T.feed||{};
+    var _tage=(function(){try{return (Date.now()-new Date(T.updated+'Z').getTime())/1000;}catch(e){return null;}})();
     $('tkmode').innerHTML='<span class=chip style="background:rgba(56,189,248,.16);color:#7dd3fc">PAPER &middot; NO MONEY</span>'
       +(FD.ok===false?' <span class=chip style="background:rgba(248,113,113,.18);color:#fca5a5">PRICE FEED BLOCKED</span>':'')
+      +((_tage!=null&&_tage>300)?' <span class=chip style="background:rgba(248,113,113,.18);color:#fca5a5">STALLED &mdash; no update for '+Math.round(_tage/60)+'m</span>':'')
       +' <span class=mut style="font-size:11px">era '+(T.era||'tick1')+' &middot; 15-minute gold/silver/WTI windows &middot; metals: distance-vs-clock on a Pyth proxy &middot; CRYPTO: 60-second AVERAGING settlement, where part of the answer locks in before the window closes &mdash; free Coinbase/Kraken data, 24/7 &middot; fills only when a REAL print trades through us</span>'
       +(FD.ok===false?'<div class=mut style="font-size:11px;margin-top:6px;color:#fca5a5">Pyth closed public Hermes access (auth required since 2026-07-31) &mdash; every request 401s. The MODEL lanes are paused until a PYTH_API_KEY is set. Everything that reads Kalshi&rsquo;s own book keeps running: pair-completion tracking, the true-arb scanner and the fee math. Feed says: '+(FD.err||'')+'</div>':'');
     const cl=T.clock||{},lanes=T.by_lane||{},RF=T.refuse||{};
