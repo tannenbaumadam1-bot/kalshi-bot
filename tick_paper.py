@@ -1629,6 +1629,34 @@ class TickBook:
             now_px = mid if f["side"] == "yes" else 100.0 - mid
             f["after"] = round(now_px - f["px"], 2)
 
+    def _by_market(self):
+        """P&L per MARKET (btc, eth, gold...), which is the split Adam
+        actually reads - 'is the crypto lane working?' is a question the
+        lane-level table cannot answer."""
+        out = {}
+        for r in self.settled:
+            lab = r.get("label") or "?"
+            m = out.setdefault(lab, {"n": 0, "w": 0, "pnl": 0.0,
+                                     "fees": 0.0, "avg": False})
+            m["n"] += 1
+            m["w"] += 1 if r.get("won") else 0
+            m["pnl"] = round(m["pnl"] + (r.get("pnl") or 0.0), 2)
+            m["fees"] = round(m["fees"] + (r.get("fee") or 0.0), 2)
+        for st, (_pair, lab) in CRYPTO.items():
+            if lab in out:
+                out[lab]["avg"] = True
+        for lab, m in out.items():
+            m["per_turn"] = round(m["pnl"] / m["n"], 3) if m["n"] else None
+            m["hit"] = round(100.0 * m["w"] / m["n"], 0) if m["n"] else None
+        # markets we are watching but have not traded yet still deserve a
+        # row - an empty row is information, a missing row looks like a bug
+        for st in list(SERIES) + list(CRYPTO):
+            lab = (SERIES.get(st) or CRYPTO.get(st))[1]
+            out.setdefault(lab, {"n": 0, "w": 0, "pnl": 0.0, "fees": 0.0,
+                                 "avg": st in CRYPTO, "per_turn": None,
+                                 "hit": None})
+        return out
+
     def _lane_report(self):
         out = {}
         for s in self.settled:
@@ -1753,6 +1781,13 @@ class TickBook:
             # 90% and 70% win, the model is a liar and the lane dies.
             "calibration": self._calib_table(),
             "by_lane": self._lane_report(),
+            "by_market": self._by_market(),
+            "crypto_pnl": round(sum(
+                m["pnl"] for lab, m in self._by_market().items()
+                if m.get("avg")), 2),
+            "metals_pnl": round(sum(
+                m["pnl"] for lab, m in self._by_market().items()
+                if not m.get("avg")), 2),
             "adverse": self._adverse(),
             "clock": self._clock(),
             "settled": self.settled[-12:][::-1],

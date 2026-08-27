@@ -795,11 +795,17 @@ td.num,th.num{text-align:right}
 <div id=tkwrap style="display:none;border:1.5px solid rgba(56,189,248,.45);border-radius:12px;padding:14px 18px;margin:14px 0 4px;background:linear-gradient(180deg,rgba(56,189,248,.05),transparent)">
 <h2 style="margin:0 0 10px">Book 5 &middot; Tick <span id=tkmode style="text-transform:none;letter-spacing:0"></span></h2>
 <div class=grid id=tktiles></div>
-<div style="margin-top:12px"><div class=t style="margin-bottom:6px">Live 15-minute windows &mdash; the model vs the book</div>
-<table><thead><tr><th>Market</th><th class=num>Strike</th><th class=num>Spot (Pyth)</th>
-<th class=num>Distance</th><th class=num>Time left</th><th class=num>Book</th>
-<th class=num>Model</th><th class=num>Edge</th><th>Quoting</th></tr></thead>
-<tbody id=tkwin></tbody></table></div>
+<div style="margin-top:14px"><div class=t style="margin-bottom:6px">P&amp;L by market &mdash; is the crypto lane working?</div>
+<table><thead><tr><th>Market</th><th>Settles on</th><th class=num>Trades</th>
+<th class=num>Won</th><th class=num>Per trade</th><th class=num>Fees</th><th class=num>P&amp;L</th></tr></thead>
+<tbody id=tkmkt></tbody></table>
+<div class=mut style="font-size:11px;margin-top:6px">CRYPTO settles on a <b>60-second average</b>, so part of the answer is locked in before the window closes &mdash; that is the edge. METALS settle on a single price at the bell, so the outcome is live to the last instant.</div></div>
+<div style="margin-top:14px"><div class=t style="margin-bottom:6px">Live 15-minute windows &mdash; what the bot is looking at right now</div>
+<table><thead><tr><th>Market</th><th class=num>Target</th><th class=num>Price now</th>
+<th class=num>Distance</th><th class=num>Time left</th><th class=num>Locked in</th><th class=num>Book says</th>
+<th class=num>We say</th><th class=num>Edge</th><th>Status</th></tr></thead>
+<tbody id=tkwin></tbody></table>
+<div class=mut style="font-size:11px;margin-top:6px"><b>Book says</b> = the market&rsquo;s price as a probability. <b>We say</b> = our model. <b>Edge</b> = the gap, and we only trade when it clears the round-trip fee. A quiet book means the market is priced correctly &mdash; that is a finding, not a fault.</div></div>
 <div style="margin-top:12px"><div class=t style="margin-bottom:6px">SHADOW calibration &mdash; the model scored on EVERY window, traded or not <span id=tkshadown class=mut style="font-weight:400;text-transform:none;letter-spacing:0"></span></div>
 <table><thead><tr><th>Model said</th><th class=num>Windows</th><th class=num>Actually happened</th><th class=num>Deviation</th><th>Verdict</th></tr></thead>
 <tbody id=tkshadow></tbody></table>
@@ -1140,7 +1146,8 @@ async function load(){
       +(FD.ok===false?'<div class=mut style="font-size:11px;margin-top:6px;color:#fca5a5">Pyth closed public Hermes access (auth required since 2026-07-31) &mdash; every request 401s. The MODEL lanes are paused until a PYTH_API_KEY is set. Everything that reads Kalshi&rsquo;s own book keeps running: pair-completion tracking, the true-arb scanner and the fee math. Feed says: '+(FD.err||'')+'</div>':'');
     const cl=T.clock||{},lanes=T.by_lane||{},RF=T.refuse||{};
     $('tktiles').innerHTML=[
-      tile('TOTAL P&L','<span class="'+C(T.total)+'">'+M(T.total||0)+'</span>','banked '+M(T.realized||0)+' from '+(T.settled_n||0)+' settled &middot; open '+M(T.open_pnl||0)+' &middot; using '+M(T.capital||0)+' of '+M(T.capital_max||100)),
+      tile('TOTAL P&L','<span class="'+C(T.total)+'">'+M(T.total||0)+'</span>','on a '+M(T.capital_max||100)+' paper book &middot; '+(T.settled_n||0)+' trades closed &middot; '+(T.wins||0)+'W/'+(T.losses||0)+'L &middot; '+M(T.open_pnl||0)+' still open'),
+      tile('CRYPTO vs METALS','<span class="'+C(T.crypto_pnl)+'">'+M(T.crypto_pnl||0)+'</span> <span class=mut style="font-size:14px">vs</span> <span class="'+C(T.metals_pnl)+'">'+M(T.metals_pnl||0)+'</span>','crypto (BTC/ETH/SOL) settles on a 60-second AVERAGE &mdash; the lock-in edge, on free 24/7 data. Metals settle on one price at the bell, and their feed is on a paid trial.'),
       tile('Evidence clock',(cl.n||0)+' / '+(cl.goal||200),(cl.verdict_due?'<span class=neg>VERDICT DUE</span>':'settled windows before this lane is judged')+' &middot; '+(T.wins||0)+'W / '+(T.losses||0)+'L'),
       tile('Paper fills',(T.fills_strict||0)+' strict &middot; '+(T.fills_loose||0)+' loose','strict = a real print traded THROUGH our resting bid &middot; '+(T.trades_seen||0)+' prints seen &middot; '+(T.cycles||0)+' cycles'),
       tile('Lanes',Object.keys(lanes).length?Object.keys(lanes).map(function(k){return k+' '+M(lanes[k].pnl)}).join(' &middot; '):'&ndash;','endgame = certainty the clock already delivered &middot; tail = the longshot-bias harvest'),
@@ -1151,18 +1158,31 @@ async function load(){
       (function(){var P=T.pair||{};var r=(P.rate!=null)?(P.rate*100).toFixed(0)+'%':'&ndash;';var b=(P.breakeven!=null)?(P.breakeven*100).toFixed(0)+'%':'&ndash;';
        return tile('Legged pair completion','<span class="'+(P.pays?'pos':'neg')+'">'+r+'</span> <span class=mut style="font-size:12px">need '+b+'</span>','buy YES low + NO low = 100 &minus; the window&rsquo;s range, so the lock IS the range. But the leg that fills ALONE fills because price ran away and stayed away &mdash; which is that leg losing. '+(P.both||0)+' both &middot; '+(P.one||0)+' one-legged &middot; n='+(P.n||0)+' &middot; lock +'+(P.lock_c||0)+'&cent; vs risk &minus;'+(P.risk_c||0)+'&cent;. Measured, not traded: backtest was negative at every level.');})()
     ].join('');
+    var BM=T.by_market||{};
+    $('tkmkt').innerHTML=Object.keys(BM).sort(function(a,b){return (BM[b].avg?1:0)-(BM[a].avg?1:0)||a.localeCompare(b);}).map(function(k){
+      var m=BM[k];
+      return '<tr><td><b>'+k.toUpperCase()+'</b>'+(m.avg?' <span class=chip style="background:rgba(52,211,153,.16);color:#6ee7b7;font-size:10px">CRYPTO</span>':'')+'</td>'
+      +'<td class=mut style="font-size:11px">'+(m.avg?'60-second average &mdash; locks in early':'one price at the bell')+'</td>'
+      +'<td class=num>'+m.n+'</td>'
+      +'<td class=num>'+(m.hit!=null?m.hit.toFixed(0)+'%':'&ndash;')+'</td>'
+      +'<td class=num>'+(m.per_turn!=null?M(m.per_turn):'&ndash;')+'</td>'
+      +'<td class=num class=mut>'+M(-(m.fees||0))+'</td>'
+      +'<td class=num><b><span class="'+C(m.pnl)+'">'+M(m.pnl||0)+'</span></b></td></tr>';}).join('')
+      ||'<tr><td colspan=7 class=empty>No trades yet&hellip;</td></tr>';
     $('tkwin').innerHTML=(T.windows||[]).map(function(w){
-      var edge=(w.model_p!=null&&w.yes_bid!=null)?(w.model_p*100-((w.yes_bid+w.yes_ask)/2)):null;
-      return '<tr><td>'+(w.label||'')+'</td>'
+      var bk=(w.yes_bid!=null&&w.yes_ask!=null)?((w.yes_bid+w.yes_ask)/2):null;
+      var edge=(w.model_p!=null&&bk!=null)?(w.model_p*100-bk):null;
+      return '<tr><td><b>'+(w.label||'').toUpperCase()+'</b>'+(w.avg?' <span class=chip style="background:rgba(52,211,153,.16);color:#6ee7b7;font-size:10px">AVG</span>':'')+'</td>'
       +'<td class=num>'+(w.strike!=null?w.strike:'&ndash;')+'</td>'
       +'<td class=num>'+(w.spot!=null?w.spot:'&ndash;')+'</td>'
       +'<td class=num><span class="'+C(w.d)+'">'+(w.d!=null?(w.d>0?'+':'')+w.d:'&ndash;')+'</span></td>'
-      +'<td class=num>'+(w.t_left!=null?w.t_left+'s':'&ndash;')+'</td>'
-      +'<td class=num>'+(w.yes_bid!=null?w.yes_bid+'/'+w.yes_ask:'&ndash;')+'</td>'
-      +'<td class=num>'+(w.model_p!=null?(w.model_p*100).toFixed(1)+'%':'<span class=mut>warming</span>')+'</td>'
-      +'<td class=num>'+(edge!=null?(edge>0?'+':'')+edge.toFixed(1)+'&cent;':'&ndash;')+'</td>'
-      +'<td>'+(w.dead?'<span class=neg>feed dead</span>':(w.quoted?'<span class=pos>quoting</span>':'<span class=mut>&mdash;</span>'))+(w.avg?' <span class=chip style="background:rgba(52,211,153,.14);color:#6ee7b7;font-size:10px">AVG'+(w.locked!=null?' '+w.locked+'% locked':'')+'</span>':'')+'</td></tr>';}).join('')
-      ||'<tr><td colspan=9 class=empty>No open window right now&hellip;</td></tr>';
+      +'<td class=num>'+(w.t_left!=null?(w.t_left>60?Math.round(w.t_left/60)+'m':w.t_left+'s'):'&ndash;')+'</td>'
+      +'<td class=num>'+(w.avg?((w.locked||0).toFixed(0)+'%'):'<span class=mut>n/a</span>')+'</td>'
+      +'<td class=num>'+(bk!=null?bk.toFixed(0)+'%':'&ndash;')+'</td>'
+      +'<td class=num><b>'+(w.model_p!=null?(w.model_p*100).toFixed(0)+'%':'<span class=mut>warming up</span>')+'</b></td>'
+      +'<td class=num>'+(edge!=null?'<span class="'+C(edge)+'">'+(edge>0?'+':'')+edge.toFixed(0)+'&cent;</span>':'&ndash;')+'</td>'
+      +'<td>'+(w.dead?'<span class=neg>feed dead</span>':(w.quoted?'<span class=pos>&#9679; trading</span>':'<span class=mut>watching</span>'))+'</td></tr>';}).join('')
+      ||'<tr><td colspan=10 class=empty>No open window right now&hellip;</td></tr>';
     var SH=T.shadow||{},ST=SH.table||[];
     $('tkshadow').innerHTML=ST.map(function(c){
       return '<tr><td>'+c.bucket+'</td><td class=num>'+c.n+'</td>'
