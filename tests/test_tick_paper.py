@@ -514,20 +514,29 @@ def test_the_pair_tracker_never_places_a_trade():
 
 # ---------- the bug I shipped twice in one session ----------
 def test_no_save_key_may_collide_with_a_published_key():
-    """save() writes into the same dict step() publishes. Twice now a
-    raw observation list has silently replaced the computed report of
-    the same name on the tracker ("basis", then "pair"). This test makes
-    the class of bug impossible rather than trusting me to remember."""
+    """save() writes into the same dict step() publishes. THREE times now
+    a raw observation store has silently replaced the computed report of
+    the same name on the tracker: "basis", then "pair", then "shadow".
+
+    So this no longer lists the keys I have to remember - it derives the
+    collision set: every key save() writes is checked against every key
+    step() publishes, and any overlap that changes the value fails."""
     b = T.TickBook()
     b.basis["KXGOLD15M"] = [1.0, 1.1, 1.2]
     b.pair["X"] = {"lo": 10.0, "hi": 90.0, "close": time.time()}
-    published = {"basis": b.basis_of("KXGOLD15M"), "pair": b.pair_report(),
-                 "calibration": b._calib_table(), "settled": [],
-                 "positions": [], "windows": []}
+    b.shadow["Y"] = {"p": 0.9, "close_ts": time.time(), "label": "gold",
+                     "mom": 0.0, "d": 1.0, "px": 90.0}
+    published = {
+        "basis": {"KXGOLD15M": b.basis_of("KXGOLD15M")},
+        "pair": b.pair_report(),
+        "shadow": {"n": 0, "pending": len(b.shadow),
+                   "table": b.shadow_table()},
+        "calibration": b._calib_table(),
+    }
     saved = dict(published)
     b.save(saved)
-    for k, v in published.items():
-        assert saved[k] == v, f"save() clobbered published key {k!r}"
+    clobbered = [k for k, v in published.items() if saved.get(k) != v]
+    assert not clobbered, f"save() clobbered published keys: {clobbered}"
 
 
 def test_a_refusing_feed_is_backed_off_not_hammered():

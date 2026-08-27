@@ -533,8 +533,8 @@ class TickBook:
     PERSIST = ("pos", "settled", "calib", "proxy_err", "fills",
                "pnl_days", "realized_c", "stats", "errs", "t0", "ticks",
                "arbs", "basis_obs", "basis_seen", "pair_obs",
-               "pair_stats", "pend_calib", "trips", "shadow",
-               "shadow_calib", "fine")
+               "pair_stats", "pend_calib", "trips",
+               "shadow_calib", "fine", "shadow_obs")
 
     def load(self):
         try:
@@ -557,7 +557,7 @@ class TickBook:
                 # shadow calibration measures the MODEL, not a trading
                 # regime - it survives an era bump for the same reason
                 # the price tape does
-                self.shadow = d.get("shadow") or {}
+                self.shadow = d.get("shadow_obs") or {}
                 self.shadow_calib = d.get("shadow_calib") or {}
                 return
             self.pos = d.get("pos") or {}
@@ -622,7 +622,11 @@ class TickBook:
             state["pair_stats"] = self.pair_stats
             state["pend_calib"] = self.pend_calib[-200:]
             state["trips"] = self.trips
-            state["shadow"] = self.shadow
+            # THIRD time a raw save key has clobbered a published
+            # report of the same name (basis, pair, now shadow). The
+            # test below now derives the collision set automatically
+            # instead of listing keys I have to remember.
+            state["shadow_obs"] = self.shadow
             state["shadow_calib"] = self.shadow_calib
             state["fine"] = {k: v[-400:] for k, v in self.fine.items()}
             state["ticks"] = {k: v[-VOL_WINDOW:]
@@ -1764,19 +1768,22 @@ class TickBook:
                              if self.liveness_bp(st) is not None else None)
                         for st in SERIES},
             "dead": sorted(st for st in SERIES if self.proxy_dead(st)),
+            "crypto": sorted(CRYPTO),
             # our instrument's measured zero error, per series, in the
             # settlement feed's own units and in basis points
             "basis": {st: (round(self.basis_of(st), 5)
                            if self.basis_of(st) is not None else None)
-                      for st in SERIES},
-            "basis_n": {st: len(self.basis.get(st) or []) for st in SERIES},
+                      for st in list(SERIES) + list(CRYPTO)},
+            "basis_n": {st: len(self.basis.get(st) or [])
+                        for st in list(SERIES) + list(CRYPTO)},
             "basis_backfill": self.stats.get("basis_backfill", 0),
+            "fine_n": {st: len(self.fine.get(st) or []) for st in CRYPTO},
             "tape": {st: {"n": len(self.ticks.get(st) or []),
                           "span_min": round(
                               ((self.ticks.get(st) or [(0, 0)])[-1][0]
                                - (self.ticks.get(st) or [(0, 0)])[0][0])
                               / 60.0, 1)}
-                     for st in SERIES},
+                     for st in list(SERIES) + list(CRYPTO)},
             "pair": self.pair_report(),
             "shadow": {"n": self.stats.get("shadow_n", 0),
                        "pending": len(self.shadow),
