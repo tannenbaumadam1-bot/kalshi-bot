@@ -1501,6 +1501,12 @@ class DriftLive:
                  # counts decay requotes, so the "20% conversion" figure
                  # was never real - this is.
                  "build": _BUILD,
+                 # A BOOK THAT GOES QUIET MUST SCREAM, NOT IDLE POLITELY
+                 "mkts_seen": int(getattr(self, "mkts_seen", 0)),
+                 "blind_cycles": int(getattr(self, "blind_cycles", 0)),
+                 "blind_s": (round(time.time()
+                                   - float(getattr(self, "mkts_seen_ts", 0)))
+                             if getattr(self, "mkts_seen_ts", 0) else None),
                  "rungs": self._rung_summary(),
                  "dust": round(self.dust_c() / 100.0, 2),
                  "rebid_n": len(getattr(self, "rebid", None) or {}),
@@ -4260,6 +4266,19 @@ class DriftLive:
             mkts = we.find_temp_markets(max_days=1)
         except Exception:
             mkts = None
+        # SILENCE ALARM (8/27). The book was blind for two days and every
+        # existing alarm missed it, because they all watch P&L, drawdown
+        # and refusals - numbers that only exist when the book is DOING
+        # something. A book that quietly stops doing anything sails past
+        # all of them. So count the markets the scan can SEE, and make
+        # consecutive blind cycles a published, loud number.
+        _seen = len(mkts or [])
+        self.mkts_seen = _seen
+        if _seen:
+            self.blind_cycles = 0
+            self.mkts_seen_ts = time.time()
+        else:
+            self.blind_cycles = int(getattr(self, "blind_cycles", 0)) + 1
         # 8/17 v3: mark the book BEFORE place() so the weekly breaker
         # (checked at the top of place) measures this cycle's marks,
         # not last cycle's cost basis.

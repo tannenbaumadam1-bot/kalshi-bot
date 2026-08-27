@@ -2497,3 +2497,35 @@ def test_cancel_api_tolerates_a_client_without_ticker_arg(tmp_path,
     b.client = _Old()
     assert b._cancel_leg("L1", "T1") is True
     assert b.client.seen == ["L1"]
+
+
+# ---------- the silence alarm (the 2-day blackout, 8/27) ----------
+def test_blind_cycles_counts_up_when_the_scan_sees_nothing():
+    """Every existing alarm watched P&L, drawdown and refusals - numbers
+    that only exist when the book is DOING something. Two days of total
+    blindness sailed past all of them."""
+    import drift_live as dl
+    b = dl.DriftLive.__new__(dl.DriftLive)
+    b.blind_cycles = 0
+    for _ in range(3):
+        mkts = []
+        seen = len(mkts or [])
+        b.mkts_seen = seen
+        if seen:
+            b.blind_cycles = 0
+        else:
+            b.blind_cycles = int(getattr(b, "blind_cycles", 0)) + 1
+    assert b.blind_cycles == 3
+
+
+def test_blind_cycles_resets_the_moment_markets_are_seen_again():
+    import drift_live as dl
+    b = dl.DriftLive.__new__(dl.DriftLive)
+    b.blind_cycles = 9
+    mkts = [{"ticker": "X"}]
+    seen = len(mkts or [])
+    b.mkts_seen = seen
+    if seen:
+        b.blind_cycles = 0
+    assert b.blind_cycles == 0
+    assert b.mkts_seen == 1

@@ -258,6 +258,22 @@ BASIS_WINDOW_S = int(os.environ.get("TICK_BASIS_WINDOW", "90"))
 # market ever turns choppy enough to clear the bar, we find out from the
 # tape rather than from a hunch.
 PAIR_L = float(os.environ.get("TICK_PAIR_L", "45"))
+# SHADOW CALIBRATION (8/27) - the highest-value instrument in this file.
+#
+# The calibration table only filled when we TRADED, which is both slow
+# and biased: we trade where we think we have edge, so the table
+# measured the model exactly where it was most confident and nowhere
+# else. At ~3 settles a day the 200-window clock was a month away.
+#
+# But the model can be scored on EVERY window whether we trade it or
+# not: record its probability at a fixed point in the window, then grade
+# it against Kalshi's settled result. That is ~192 observations a day
+# across gold and silver, unbiased by our own selection, and it fills
+# the clock in about a day. It also costs nothing and risks nothing.
+#
+# This is the number that decides whether the model has any edge at all,
+# and therefore whether this lane is ever worth paying for data.
+SHADOW_AT_S = int(os.environ.get("TICK_SHADOW_AT", "120"))  # T-minus 2 min
 CLOCK_GOAL = int(os.environ.get("TICK_CLOCK", "200"))       # settle gate
 UA = {"User-Agent": "kalshibot-tick/1.0"}
 # Pyth closed public Hermes access (auth required from 2026-07-31); every
@@ -417,6 +433,8 @@ class TickBook:
         self.proxy_err = []    # |proxy - strike| behaviour vs outcome
         self.fills = []        # for adverse-selection scoring
         self.arbs = []         # true crossed books, if they ever appear
+        self.shadow = {}       # tk -> the model's claim, awaiting outcome
+        self.shadow_calib = {}  # bucket -> [n, hits] on EVERY window
         self.trips = {}        # tk -> completed round trips this window
         self.pend_calib = []   # exited claims awaiting the real outcome
         self.pair = {}         # tk -> {lo, hi} yes-price extremes seen
@@ -448,7 +466,8 @@ class TickBook:
     PERSIST = ("pos", "settled", "calib", "proxy_err", "fills",
                "pnl_days", "realized_c", "stats", "errs", "t0", "ticks",
                "arbs", "basis_obs", "basis_seen", "pair_obs",
-               "pair_stats", "pend_calib", "trips")
+               "pair_stats", "pend_calib", "trips", "shadow",
+               "shadow_calib")
 
     def load(self):
         try:
@@ -468,6 +487,11 @@ class TickBook:
                 self.basis = {k: list(v)[-BASIS_N:] for k, v in
                               (d.get("basis_obs") or {}).items()}
                 self._basis_seen = set(d.get("basis_seen") or [])
+                # shadow calibration measures the MODEL, not a trading
+                # regime - it survives an era bump for the same reason
+                # the price tape does
+                self.shadow = d.get("shadow") or {}
+                self.shadow_calib = d.get("shadow_calib") or {}
                 return
             self.pos = d.get("pos") or {}
             self.settled = (d.get("settled") or [])[-200:]
@@ -483,6 +507,8 @@ class TickBook:
             self.pair = d.get("pair_obs") or {}
             self.pend_calib = (d.get("pend_calib") or [])[-200:]
             self.trips = d.get("trips") or {}
+            self.shadow = d.get("shadow") or {}
+            self.shadow_calib = d.get("shadow_calib") or {}
             self.pair_stats.update(d.get("pair_stats") or {})
             self.basis = {k: list(v)[-BASIS_N:] for k, v in
                           (d.get("basis_obs") or {}).items()}
@@ -527,6 +553,8 @@ class TickBook:
             state["pair_stats"] = self.pair_stats
             state["pend_calib"] = self.pend_calib[-200:]
             state["trips"] = self.trips
+            state["shadow"] = self.shadow
+            state["shadow_calib"] = self.shadow_calib
             state["ticks"] = {k: v[-VOL_WINDOW:]
                               for k, v in self.ticks.items()}
             json.dump(state, open(STATE, "w"))
@@ -1271,6 +1299,82 @@ class TickBook:
             self.pos.pop(tk, None)
 
     # ---------------- settlement ----------------
+    def observe_shadow(self, mkts, proxy):
+        """Record the model's claim on EVERY window, traded or not."""
+        now = time.time()
+        for m in mkts:
+            tk, st = m["tk"], m["series"]
+            if tk in self.shadow:
+                continue
+            left = m["close_ts"] - now
+            if left > SHADOW_AT_S or left <= 0:
+                continue            # one observation, at a fixed point
+            pa = proxy.get(st)
+            sig = self.sigma_s(st)
+            if not pa or sig is None or self.proxy_dead(st):
+                continue
+            spot = self.adj_spot(st, pa[0])
+            if spot is None:
+                continue
+            p = model_p(spot, m["strike"], sig, left)
+            p = min(CONF_CAP, max(1.0 - CONF_CAP, p))
+            # MOMENTUM, recorded as a FEATURE rather than traded on
+            # (Adam wants momentum trades; the disciplined order is to
+            # find out whether it predicts BEFORE betting on it). Recent
+            # drift of the proxy, in price units per second.
+            tape = self.ticks.get(st) or []
+            mom = None
+            if len(tape) >= 6:
+                (t0, p0), (t1, p1) = tape[-6], tape[-1]
+                if t1 > t0:
+                    mom = round((p1 - p0) / (t1 - t0), 8)
+            self.shadow[tk] = {"p": round(p, 4), "close_ts": m["close_ts"],
+                               "label": m["label"], "mom": mom,
+                               "d": round(spot - m["strike"], 6),
+                               "px": m.get("yes_bid")}
+        if len(self.shadow) > 400:
+            for k in sorted(self.shadow,
+                            key=lambda x: self.shadow[x]["close_ts"])[:200]:
+                self.shadow.pop(k, None)
+
+    def grade_shadow(self):
+        """Grade every recorded claim against Kalshi's settled result."""
+        now = time.time()
+        for tk, row in list(self.shadow.items()):
+            if row["close_ts"] > now - 60:
+                continue
+            try:
+                m = _get(f"{KALSHI}/markets/{tk}")["market"]
+            except Exception:
+                self.errs += 1
+                continue
+            res = (m.get("result") or "").lower()
+            if res not in ("yes", "no"):
+                if row["close_ts"] < now - 3600:
+                    self.shadow.pop(tk, None)
+                continue
+            p = row["p"]
+            b = str(int(min(0.99, max(0.0, p)) * 10) * 10)
+            c = self.shadow_calib.setdefault(b, [0, 0])
+            c[0] += 1
+            c[1] += 1 if res == "yes" else 0
+            self.stats["shadow_n"] = self.stats.get("shadow_n", 0) + 1
+            self.shadow.pop(tk, None)
+
+    def shadow_table(self):
+        """Reliability curve: when the model says X%, does X% happen?"""
+        out = []
+        for b in sorted(self.shadow_calib, key=lambda x: int(x)):
+            n, w = self.shadow_calib[b]
+            said = int(b) + 5
+            hit = (100.0 * w / n) if n else None
+            out.append({"bucket": f"{b}-{int(b) + 9}%", "n": n,
+                        "hit": round(hit, 1) if hit is not None else None,
+                        "said": said,
+                        "dev": (round(hit - said, 1)
+                                if hit is not None else None)})
+        return out
+
     def grade_pending(self):
         """Resolve exited claims against Kalshi's real result.
 
@@ -1432,6 +1536,8 @@ class TickBook:
         # graded by the exchange, but one still open should get the
         # chance to be sold. Running these the other way round would
         # let a position expire that we had already decided to leave.
+        self.observe_shadow(mkts, proxy)
+        self.grade_shadow()
         self.check_exits(mkts, proxy)
         self.grade_pending()
         self.settle_check()
@@ -1528,6 +1634,10 @@ class TickBook:
                               / 60.0, 1)}
                      for st in SERIES},
             "pair": self.pair_report(),
+            "shadow": {"n": self.stats.get("shadow_n", 0),
+                       "pending": len(self.shadow),
+                       "at_s": SHADOW_AT_S,
+                       "table": self.shadow_table()},
             "feed": {
                 "ok": not self._feed_err,
                 "err": self._feed_err,

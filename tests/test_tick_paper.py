@@ -819,3 +819,90 @@ def test_an_era_reset_keeps_the_price_tape_and_the_instrument_offset():
     assert b.basis_of("KXGOLD15M") is not None
     assert len(b.ticks.get("KXGOLD15M") or []) == 2
     assert "W1" in b._basis_seen
+
+
+# ---------- shadow calibration (8/27) ----------
+def _mk_window(tk="S1", close_in=60):
+    return {"tk": tk, "series": "KXGOLD15M", "label": "gold",
+            "strike": 100.0, "open_ts": time.time() - 800,
+            "close_ts": time.time() + close_in, "title": "",
+            "yes_bid": 60.0, "yes_ask": 62.0}
+
+
+def _ready(b):
+    b.ticks["KXGOLD15M"] = [(1000 + i * 20, 100.0 + (i % 4) * 0.05)
+                            for i in range(40)]
+    b.basis["KXGOLD15M"] = [0.0, 0.0, 0.0]
+
+
+def test_the_model_is_scored_on_every_window_not_only_traded_ones():
+    """The table used to fill only when we TRADED - slow, and biased to
+    exactly where the model was most confident."""
+    b = T.TickBook()
+    _ready(b)
+    b.observe_shadow([_mk_window()], {"KXGOLD15M": (100.5, 1.0)})
+    assert "S1" in b.shadow
+    assert 0.0 <= b.shadow["S1"]["p"] <= 1.0
+
+
+def test_a_window_is_observed_once_at_a_fixed_point():
+    b = T.TickBook()
+    _ready(b)
+    w = _mk_window()
+    b.observe_shadow([w], {"KXGOLD15M": (100.5, 1.0)})
+    p1 = b.shadow["S1"]["p"]
+    b.observe_shadow([w], {"KXGOLD15M": (200.0, 1.0)})
+    assert b.shadow["S1"]["p"] == p1        # not overwritten later
+
+
+def test_windows_are_not_observed_too_early():
+    b = T.TickBook()
+    _ready(b)
+    b.observe_shadow([_mk_window(close_in=800)], {"KXGOLD15M": (100.5, 1.0)})
+    assert b.shadow == {}
+
+
+def test_momentum_is_recorded_as_a_feature_not_traded_on():
+    """Adam wants momentum trades; the disciplined order is to find out
+    whether it predicts BEFORE betting on it."""
+    b = T.TickBook()
+    b.ticks["KXGOLD15M"] = [(1000 + i * 20, 100.0 + i * 0.1)
+                            for i in range(40)]
+    b.basis["KXGOLD15M"] = [0.0, 0.0, 0.0]
+    b.observe_shadow([_mk_window()], {"KXGOLD15M": (103.0, 1.0)})
+    assert b.shadow["S1"]["mom"] > 0        # recorded
+    src = open(os.path.join(os.path.dirname(T.__file__),
+                            "tick_paper.py")).read()
+    dec = src.split("def decide(")[1].split("def check_arb")[0]
+    assert "mom" not in dec                 # and NOT used to trade
+
+
+def test_shadow_grades_against_the_real_result():
+    b = T.TickBook()
+    b.shadow = {"S1": {"p": 0.95, "close_ts": time.time() - 120,
+                       "label": "gold", "mom": 0.0, "d": 1.0, "px": 90.0}}
+    T._get = lambda url, timeout=15, key=False: {
+        "market": {"result": "yes"}}
+    b.grade_shadow()
+    assert b.shadow_calib["90"] == [1, 1]
+    assert b.shadow == {}
+
+
+def test_shadow_table_reports_deviation_from_the_claim():
+    b = T.TickBook()
+    b.shadow_calib = {"90": [100, 70]}      # said ~95%, delivered 70%
+    row = b.shadow_table()[0]
+    assert row["hit"] == 70.0
+    assert row["dev"] < -20                 # badly overconfident
+
+
+def test_shadow_survives_an_era_bump():
+    """It measures the MODEL, not a trading regime."""
+    path = os.path.join(tempfile.mkdtemp(), "s.json")
+    T.STATE = path
+    json.dump({"era": "older", "realized_c": 999.0,
+               "shadow_calib": {"90": [50, 45]},
+               "shadow": {}}, open(path, "w"))
+    b = T.TickBook()
+    assert b.realized_c == 0.0              # ledger gone
+    assert b.shadow_calib == {"90": [50, 45]}   # measurement kept

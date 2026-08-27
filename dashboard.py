@@ -793,7 +793,11 @@ td.num,th.num{text-align:right}
 <th class=num>Distance</th><th class=num>Time left</th><th class=num>Book</th>
 <th class=num>Model</th><th class=num>Edge</th><th>Quoting</th></tr></thead>
 <tbody id=tkwin></tbody></table></div>
-<div style="margin-top:12px"><div class=t style="margin-bottom:6px">Calibration &mdash; THE deliverable. When the model says 90%, do 90% of them win?</div>
+<div style="margin-top:12px"><div class=t style="margin-bottom:6px">SHADOW calibration &mdash; the model scored on EVERY window, traded or not <span id=tkshadown class=mut style="font-weight:400;text-transform:none;letter-spacing:0"></span></div>
+<table><thead><tr><th>Model said</th><th class=num>Windows</th><th class=num>Actually happened</th><th class=num>Deviation</th><th>Verdict</th></tr></thead>
+<tbody id=tkshadow></tbody></table>
+<div class=mut style="font-size:11px;margin-top:6px">Unbiased and fast: ~192 observations a day instead of ~3, because it does not wait for us to choose a trade. This is the table that decides whether the model has any edge at all &mdash; and therefore whether this lane is ever worth paying for data.</div></div>
+<div style="margin-top:12px"><div class=t style="margin-bottom:6px">Traded calibration &mdash; the same question, on the windows we actually took</div>
 <table><thead><tr><th>Model said</th><th class=num>Windows</th><th class=num>Actually won</th><th>Verdict</th></tr></thead>
 <tbody id=tkcal></tbody></table>
 <div class=mut style="font-size:11px;margin-top:6px">A model that is right about its own confidence is a business; one that is overconfident is a slow way to lose. Nothing here trades real money &mdash; this table decides whether anything ever does.</div></div>
@@ -1152,6 +1156,14 @@ async function load(){
       +'<td class=num>'+(edge!=null?(edge>0?'+':'')+edge.toFixed(1)+'&cent;':'&ndash;')+'</td>'
       +'<td>'+(w.dead?'<span class=neg>feed dead</span>':(w.quoted?'<span class=pos>quoting</span>':'<span class=mut>&mdash;</span>'))+'</td></tr>';}).join('')
       ||'<tr><td colspan=9 class=empty>No open window right now&hellip;</td></tr>';
+    var SH=T.shadow||{},ST=SH.table||[];
+    $('tkshadow').innerHTML=ST.map(function(c){
+      return '<tr><td>'+c.bucket+'</td><td class=num>'+c.n+'</td>'
+      +'<td class=num>'+(c.hit!=null?c.hit.toFixed(0)+'%':'&ndash;')+'</td>'
+      +'<td class=num>'+(c.dev!=null?(c.dev>0?'+':'')+c.dev.toFixed(0)+'pp':'&ndash;')+'</td>'
+      +'<td>'+((c.n<20)?'<span class=mut>too few</span>':(Math.abs(c.dev)<=7?'<span class=pos>honest</span>':'<span class=neg>'+(c.dev<0?'OVERconfident':'UNDERconfident')+'</span>'))+'</td></tr>';}).join('')
+      ||'<tr><td colspan=5 class=empty>Scoring every window &mdash; first results within the hour&hellip;</td></tr>';
+    $('tkshadown').textContent=(SH.n||0)+' windows graded &middot; '+(SH.pending||0)+' pending';
     $('tkcal').innerHTML=(T.calibration||[]).map(function(c){
       var said=parseFloat(c.bucket)+5,dev=(c.hit!=null)?(c.hit-said):null;
       return '<tr><td>'+c.bucket+'</td><td class=num>'+c.n+'</td>'
