@@ -293,16 +293,18 @@ def test_start_thread_runs_the_book_on_its_own_clock():
     """paper.py cycles at 90s; a 15-minute window needs finer sampling
     than that or the endgame lane is unmeasurable."""
     os.environ["TICK_SLEEP"] = "600"          # don't actually loop here
-    t = T.start_thread()
+    T.LOCK = os.path.join(tempfile.mkdtemp(), "tick.lock")
+    t = T.start_thread("test")
+    assert t is not None
     assert t.daemon is True
-    assert t.name == "tick"
+    assert t.name.startswith("tick")
 
 
 def test_only_one_writer_paper_does_not_also_step_the_book():
     """Two writers on one json.dump is a corrupted ledger."""
     here = os.path.dirname(T.__file__)
     src = open(os.path.join(here, "paper.py")).read()
-    assert "tick_paper.start_thread()" in src
+    assert 'tick_paper.start_thread("paper")' in src
     assert "tk_bot.step()" not in src
 
 
@@ -1046,7 +1048,7 @@ def test_paper_restarts_a_dead_or_stale_tick_thread():
     """A dead worker must be revived, not merely reported."""
     src = open(os.path.join(os.path.dirname(T.__file__),
                             "paper.py")).read()
-    assert "tick_paper.start_thread()" in src.split("RESTARTING")[1]
+    assert 'tick_paper.start_thread("paper")' in src.split("RESTARTING")[1]
     assert "is_alive()" in src
 
 
@@ -1101,3 +1103,36 @@ def test_the_favourite_lane_pays_the_taker_fee_and_fills_by_crossing():
     assert b.pos["T1"]["n"] == T.SIZE
     assert b.pos["T1"]["fee_c"] == T.fee_c(88.0, T.SIZE, maker=False)
     assert b.stats.get("fills_taker") == 1
+
+
+# ---------- the single-writer lease (8/28) ----------
+def test_only_one_process_can_own_the_tick_ledger():
+    """kalshi-dashboard restarts on deploy and kalshi-paper does not, so
+    the worker must be able to run from either - but two processes
+    writing one json ledger would corrupt it, which is far worse than a
+    stalled one."""
+    T.LOCK = os.path.join(tempfile.mkdtemp(), "tick.lock")
+    assert T.take_lease("paper") is True
+    assert T.take_lease("dashboard") is False     # paper is alive
+    assert T.hold_lease("paper") is True
+
+
+def test_a_stale_lease_can_be_taken_over():
+    T.LOCK = os.path.join(tempfile.mkdtemp(), "tick.lock")
+    json.dump({"owner": "paper", "pid": 1, "ts": time.time() - 9999},
+              open(T.LOCK, "w"))
+    assert T.take_lease("dashboard") is True
+
+
+def test_the_holder_stands_down_when_it_loses_the_lease():
+    T.LOCK = os.path.join(tempfile.mkdtemp(), "tick.lock")
+    T.take_lease("paper")
+    json.dump({"owner": "dashboard", "pid": 2, "ts": time.time()},
+              open(T.LOCK, "w"))
+    assert T.hold_lease("paper") is False
+
+
+def test_start_thread_declines_when_another_owner_is_live():
+    T.LOCK = os.path.join(tempfile.mkdtemp(), "tick.lock")
+    T.take_lease("paper")
+    assert T.start_thread("dashboard") is None

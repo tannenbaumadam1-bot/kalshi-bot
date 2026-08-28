@@ -1289,7 +1289,33 @@ class H(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
 
+def _start_tick_fallback():
+    """Run the tick worker HERE if nobody else is.
+
+    kalshi-dashboard restarts on every deploy; kalshi-paper does not -
+    on 8/28 its tick thread had been dead nineteen hours with the fix
+    for it sitting undeployed, because the only process that could
+    deploy the fix was the one that had stopped restarting.
+
+    So the worker runs from whichever process is actually alive. The
+    single-writer LEASE in tick_paper makes this safe: this call is a
+    no-op whenever paper.py holds it, and only takes over once that
+    lease has gone stale. Two writers on one ledger is impossible by
+    construction, not by convention."""
+    if os.environ.get("DASH_TICK", "1") != "1":
+        return
+    try:
+        import tick_paper
+        t = tick_paper.start_thread("dashboard")
+        print("tick worker: started here"
+              if t is not None else
+              "tick worker: another process holds the lease")
+    except Exception as e:
+        print(f"tick worker unavailable: {e}")
+
+
 def main():
+    _start_tick_fallback()
     url = f"http://127.0.0.1:{PORT}"
     try:
         srv = ThreadingHTTPServer((HOST, PORT), H)

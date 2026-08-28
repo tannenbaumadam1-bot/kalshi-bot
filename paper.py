@@ -672,7 +672,7 @@ def main():
             import tick_paper
             # its own 20s clock in a daemon thread - see start_thread().
             # The main loop below only READS its published state.
-            tk_bot = tick_paper.start_thread()
+            tk_bot = tick_paper.start_thread("paper")
         except Exception as e:
             print(f"tick book unavailable: {e}")
             tk_bot = None
@@ -892,7 +892,7 @@ def main():
                     if (not tk_bot.is_alive()) or _age > 300:
                         print("  TICK: thread dead or stale - RESTARTING")
                         try:
-                            tk_bot = tick_paper.start_thread()
+                            tk_bot = tick_paper.start_thread("paper")
                         except Exception as _e:
                             print(f"  TICK restart failed: {_e}")
                 except Exception as e:

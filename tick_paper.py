@@ -1969,7 +1969,56 @@ class TickBook:
         return self._beat
 
 
-def start_thread():
+LOCK = os.environ.get("TICK_LOCK", os.path.join("logs", "tick.lock"))
+LEASE_S = int(os.environ.get("TICK_LEASE_S", "120"))
+
+
+def _lease_read():
+    try:
+        with open(LOCK) as f:
+            return json.load(f)
+    except Exception:
+        return None
+
+
+def take_lease(owner):
+    """Single-writer lease over the tick ledger.
+
+    WHY THIS EXISTS (8/28): kalshi-dashboard restarts on every deploy;
+    kalshi-paper does not, and its tick thread had been dead 19 hours
+    with new code unable to reach it. Hosting the worker in whichever
+    process actually gets deployed fixes that - but two processes both
+    writing one json ledger would corrupt it, which is a far worse
+    failure than a stalled one.
+
+    So: a lease, not a free-for-all. A process may claim it only if it
+    is unheld or the holder has stopped refreshing for LEASE_S. The
+    holder re-affirms every cycle and steps down the moment it finds
+    someone else's name on it. At most one writer, always."""
+    cur = _lease_read()
+    now = time.time()
+    if cur and cur.get("owner") != owner:
+        if (now - float(cur.get("ts") or 0)) < LEASE_S:
+            return False            # someone else is alive and writing
+    try:
+        os.makedirs(os.path.dirname(LOCK) or ".", exist_ok=True)
+        with open(LOCK, "w") as f:
+            json.dump({"owner": owner, "pid": os.getpid(), "ts": now}, f)
+        return True
+    except Exception:
+        return False
+
+
+def hold_lease(owner):
+    """Refresh, or report that we have lost it."""
+    cur = _lease_read()
+    if cur and cur.get("owner") != owner:
+        if (time.time() - float(cur.get("ts") or 0)) < LEASE_S:
+            return False
+    return take_lease(owner)
+
+
+def start_thread(owner="paper"):
     """Run the book on its OWN clock, in a daemon thread.
 
     WHY THIS EXISTS: paper.py's main loop cycles every 90 seconds. A
@@ -1985,6 +2034,9 @@ def start_thread():
     json.dump."""
     import threading
 
+    if not take_lease(owner):
+        return None                 # another process already owns it
+
     def _loop():
         # BUILT AFTER THE THREAD DIED SILENTLY (8/27). It stopped for 29
         # minutes while the rest of paper.py kept running, and nothing
@@ -1996,6 +2048,10 @@ def start_thread():
         burst_s = float(os.environ.get("TICK_BURST_SLEEP", "2.0"))
         while True:
             try:
+                if not hold_lease(owner):
+                    # someone else took over; stand down cleanly rather
+                    # than write a second time into one ledger
+                    return
                 st = b.step()
                 # BURST MODE. The settlement average is the mean of SIXTY
                 # ONE-SECOND PRINTS, so a 20-second sampler sees three of
@@ -2026,7 +2082,8 @@ def start_thread():
                     pass
             time.sleep(sleep_s)
 
-    t = threading.Thread(target=_loop, name="tick", daemon=True)
+    t = threading.Thread(target=_loop, name="tick-" + owner,
+                         daemon=True)
     t.start()
     return t
 

@@ -81,3 +81,15 @@ def test_a_withdrawal_is_not_a_drawdown():
     true_dd = peak - (nav + wd)
     assert naive_dd > 70          # would trip a 15% breaker
     assert abs(true_dd) < 1       # the book actually lost nothing
+
+
+def test_dashboard_can_host_the_tick_worker_when_paper_cannot():
+    """kalshi-dashboard restarts on every deploy; kalshi-paper does not.
+    On 8/28 the tick thread was dead nineteen hours with the fix for it
+    undeployed, because the only process that could deploy the fix was
+    the one that had stopped restarting."""
+    src = open("dashboard.py").read()
+    assert "_start_tick_fallback" in src
+    assert 'start_thread("dashboard")' in src
+    # and it must go through the lease, never around it
+    assert "lease" in src.split("_start_tick_fallback")[1][:1200].lower()
