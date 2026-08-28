@@ -394,6 +394,12 @@ def build_data():
         if not out.get("updated"):
             out["updated"] = out["dlive"].get("updated", "")
     out["dash"] = {"build": _DASH_BUILD, "tick_host": _TICK_HOST}
+    try:
+        _te = os.path.join("logs", "tick_error.json")
+        if os.path.exists(_te):
+            out["dash"]["tick_error"] = json.load(open(_te))
+    except Exception:
+        pass
     # poly reward-farming book RETIRED 7/23 (ledger archived, not deleted)
     # drift1 paper book retired 7/25; driftw2-fin retired 7/30
     # driftc = LANE 2 AUDITION (7/31): crypto drift paper book, gate 100

@@ -1969,6 +1969,8 @@ class TickBook:
         return self._beat
 
 
+ERRFILE = os.environ.get("TICK_ERRFILE",
+                         os.path.join("logs", "tick_error.json"))
 LOCK = os.environ.get("TICK_LOCK", os.path.join("logs", "tick.lock"))
 LEASE_S = int(os.environ.get("TICK_LEASE_S", "120"))
 
@@ -2071,13 +2073,31 @@ def start_thread(owner="paper"):
                             b.errs += 1
                         time.sleep(burst_s)
                     continue
-            except BaseException:
+            except BaseException as e:
                 # BaseException, not Exception: a bare Exception handler
                 # still lets the thread die on anything outside that
                 # tree, which is how a worker vanishes without a trace.
                 b.errs += 1
                 try:
                     b.heartbeat()
+                except Exception:
+                    pass
+                # WRITE THE FAILURE DOWN. If step() raises before it can
+                # save, the ledger simply freezes and looks identical to
+                # a dead thread - which cost an hour of guessing on
+                # 8/28. A separate file, so a broken cycle can never
+                # damage a good ledger.
+                try:
+                    import traceback
+                    os.makedirs(os.path.dirname(ERRFILE) or ".",
+                                exist_ok=True)
+                    with open(ERRFILE, "w") as f:
+                        json.dump({
+                            "ts": datetime.datetime.now().isoformat(
+                                timespec="seconds"),
+                            "owner": owner, "errs": b.errs,
+                            "error": repr(e)[:300],
+                            "where": traceback.format_exc()[-900:]}, f)
                 except Exception:
                     pass
             time.sleep(sleep_s)
