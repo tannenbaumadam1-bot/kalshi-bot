@@ -1048,3 +1048,56 @@ def test_paper_restarts_a_dead_or_stale_tick_thread():
                             "paper.py")).read()
     assert "tick_paper.start_thread()" in src.split("RESTARTING")[1]
     assert "is_alive()" in src
+
+
+# ---------- the favourite lane (8/28) ----------
+def test_the_favourite_lane_takes_near_certainty_without_beating_the_model():
+    """THE FIX. Every earlier lane demanded the model BEAT the market by
+    more than the fee, which the market almost never allowed - so the
+    book barely traded. Measured over 85 real windows, buying the
+    favourite at the market's own price in the final minute returns
+    +9.2c/trade in the 80-95c band."""
+    b = T.TickBook()
+    # market says 88c yes; our model agrees it is likely but has NO edge
+    out = b.decide(_mkt(yes_bid=87.0, yes_ask=88.0), 100.4, 0.05, 45)
+    assert out is not None
+    lane, _p, px, side, p_side = out
+    assert lane == "fav"
+    assert side == "yes"
+    assert T.FAV_MIN_C <= px <= T.FAV_MAX_C
+
+
+def test_the_favourite_lane_refuses_the_uncertain_band():
+    """The two LOSING configurations were both 70-90c: at those prices
+    you are buying genuine uncertainty, not near-certainty."""
+    b = T.TickBook()
+    out = b.decide(_mkt(yes_bid=72.0, yes_ask=74.0), 100.1, 0.05, 45)
+    assert out is None or out[0] != "fav"
+
+
+def test_the_model_can_veto_the_favourite():
+    """The model stops being the entry trigger and becomes a SAFETY
+    CHECK - take the favourite unless our arithmetic contradicts it."""
+    b = T.TickBook()
+    # book says 88c YES, but spot is far BELOW the line: model objects
+    out = b.decide(_mkt(yes_bid=87.0, yes_ask=88.0), 95.0, 0.05, 45)
+    assert out is None or out[0] != "fav"
+    assert b.stats.get("fav_vetoed", 0) >= 1
+
+
+def test_the_favourite_lane_only_fires_near_the_close():
+    b = T.TickBook()
+    out = b.decide(_mkt(yes_bid=87.0, yes_ask=88.0), 100.4, 0.05, 600)
+    assert out is None or out[0] != "fav"
+
+
+def test_the_favourite_lane_pays_the_taker_fee_and_fills_by_crossing():
+    """It lifts the offer, so it must not be graded as a patient maker."""
+    b = T.TickBook()
+    q = _q(px=88.0)
+    q["lane"] = "fav"
+    b.resting = {"T1": q}
+    b.check_fills([], 0)                      # no prints needed
+    assert b.pos["T1"]["n"] == T.SIZE
+    assert b.pos["T1"]["fee_c"] == T.fee_c(88.0, T.SIZE, maker=False)
+    assert b.stats.get("fills_taker") == 1

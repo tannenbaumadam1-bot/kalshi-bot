@@ -224,6 +224,42 @@ EXIT_MIN_HOLD_S = int(os.environ.get("TICK_EXIT_MIN_HOLD", "5"))
 # evaporated. Cutting there is what frees collateral to be redeployed
 # inside the same window.
 STOP_P = float(os.environ.get("TICK_STOP_P", "0.45"))
+# ---------------------------------------------------------------------
+# THE FAVOURITE LANE (8/28) - the trade Adam was making by hand, which
+# this bot could not find because it was asking the wrong question.
+#
+# Every lane until now demanded that our MODEL BEAT THE MARKET by more
+# than the fee. The market prices distance-vs-clock about as well as we
+# do, so that bar was almost never cleared and the book barely traded.
+#
+# But beating the market on probability is not the only way to be paid.
+# Measured over 85 real settled windows across BTC/ETH/SOL/gold: buying
+# the FAVOURITE at the market's own price inside the final minute, in
+# the 80-95c band, returns
+#       +9.2c/trade over the last 60s   (10 trades, 10 wins)
+#       +8.7c/trade over the last 30s   ( 8 trades,  8 wins)
+#       +4.7c/trade over the last 150s  (21 trades, 20 wins)
+# and is positive in 14 of 16 (window x band) configurations tested.
+#
+# The two LOSING configurations are both the 70-90c band (-2.7c). That
+# is the whole finding in one line: at 70-90c you are buying genuine
+# uncertainty, at 80-95c you are buying near-certainty the book has not
+# finished repricing. Retail sells the almost-sure side too cheaply -
+# the favourite-longshot bias, which is the same effect the live
+# weather book has harvested for two months.
+#
+# So the model stops being the ENTRY TRIGGER and becomes a SAFETY
+# CHECK: take the favourite unless our own arithmetic actively
+# contradicts the market. That inversion is the fix.
+#
+# SAMPLE CAUTION: 10-21 trades per configuration. Positive everywhere it
+# should be and negative exactly where theory says it should be, which
+# is encouraging - but this is paper, and the shadow table is what will
+# confirm or kill it.
+FAV_MIN_C = float(os.environ.get("TICK_FAV_MIN", "80"))
+FAV_MAX_C = float(os.environ.get("TICK_FAV_MAX", "95"))
+FAV_AT_S = int(os.environ.get("TICK_FAV_AT", "90"))    # final 90 seconds
+FAV_VETO_P = float(os.environ.get("TICK_FAV_VETO", "0.60"))  # model veto
 MAX_TRIPS = int(os.environ.get("TICK_MAX_TRIPS", "6"))   # per window
 # TRUE ARB: if YES ask + NO ask < 100 minus both fees, buying both sides
 # locks a profit no matter how it settles. Almost certainly absent on a
@@ -1128,6 +1164,23 @@ class TickBook:
                 cands.append((edge, "endgame", px, side, p_side))
             elif t_left <= TAIL_MAX_S and p_side >= TAIL_P:
                 cands.append((edge, "tail", px, side, p_side))
+        # THE FAVOURITE LANE. Checked last, and deliberately NOT gated on
+        # the model beating the market - only on the model not
+        # contradicting it. See the note at FAV_MIN_C.
+        if not cands and t_left <= FAV_AT_S:
+            # THE FAVOURITE IS THE EXPENSIVE SIDE. Buying YES costs the
+            # ask; buying NO costs 100 - the yes bid. Whichever costs
+            # MORE is the near-certain one - the first version of this
+            # line took the cheaper side, i.e. the longshot, which is
+            # precisely the trade the 70-90c band shows losing money.
+            fav_side = "yes" if ya >= (100.0 - yb) else "no"
+            fav_px = round(ya if fav_side == "yes" else 100.0 - yb, 2)
+            fav_p = p_yes if fav_side == "yes" else 1.0 - p_yes
+            if FAV_MIN_C <= fav_px <= FAV_MAX_C:
+                if fav_p >= FAV_VETO_P:
+                    return "fav", p_yes, fav_px, fav_side, fav_p
+                self.stats["fav_vetoed"] = self.stats.get(
+                    "fav_vetoed", 0) + 1
         if not cands:
             return None
         edge, lane, px, side, p_side = max(cands)
@@ -1260,6 +1313,17 @@ class TickBook:
         for t in trades:
             by_tk.setdefault(t["tk"], []).append(t)
         for tk, q in self.resting.items():
+            if q.get("lane") == "fav":
+                # a taker order fills at once, at the price we saw. No
+                # queue to wait in and no pretending otherwise.
+                left = float(SIZE) - float(q.get("filled", 0.0))
+                if left > 0:
+                    got = self._fill(q, left, q["our_px"])
+                    if got > 0:
+                        q["filled"] = float(q.get("filled", 0.0)) + got
+                        self.stats["fills_taker"] = self.stats.get(
+                            "fills_taker", 0) + 1
+                continue
             prints = by_tk.get(tk) or []
             if not prints:
                 continue
@@ -1328,7 +1392,7 @@ class TickBook:
             "opened": datetime.datetime.now().isoformat(timespec="seconds")})
         p["n"] += n
         p["cost_c"] += px * n
-        p["fee_c"] += fee_c(px, n, maker=True)
+        p["fee_c"] += fee_c(px, n, maker=(q.get("lane") != "fav"))
         self.fills.append({"tk": q["tk"], "px": px, "n": n,
                            "side": q["side"], "lane": q["lane"],
                            "model_p": q["p_side"], "ts": time.time()})
@@ -1845,7 +1909,10 @@ class TickBook:
             "refuse": {k: self.stats.get(k, 0) for k in
                        ("no_vol", "no_proxy", "capped", "band_skip",
                         "no_edge", "proxy_dead", "no_basis")},
+            "fills_taker": self.stats.get("fills_taker", 0),
             "rules": {"size": SIZE, "band": [MIN_PX_C, MAX_PX_C],
+                      "fav_band": [FAV_MIN_C, FAV_MAX_C],
+                      "fav_at_s": FAV_AT_S, "fav_veto": FAV_VETO_P,
                       "edge_c": EDGE_C, "endgame_s": ENDGAME_S,
                       "endgame_p": ENDGAME_P, "tail_p": TAIL_P,
                       "max_pos": MAX_POS, "maker_rate": MAKER_RATE,
