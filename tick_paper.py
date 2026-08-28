@@ -371,6 +371,25 @@ def _clean_key(raw):
     return k.strip()
 
 
+def _shadow_rows(v):
+    """Accept only a dict of per-ticker RECORDS.
+
+    The one line in load() that still read the old "shadow" key picked
+    up the PUBLISHED REPORT instead - {"n":4,"pending":0,"table":[...]}
+    - and the very next cycle did row["close_ts"] on the integer 4.
+    TypeError, thrown before save() could run, so the ledger froze and
+    looked exactly like a dead thread. That is the THIRD distinct
+    failure caused by one key collision.
+
+    Two fixes, not one: read the right key, AND refuse a value of the
+    wrong shape. A loader that trusts whatever is on disk turns any
+    past bug into a permanent one."""
+    if not isinstance(v, dict):
+        return {}
+    return {k: r for k, r in v.items()
+            if isinstance(r, dict) and "close_ts" in r}
+
+
 def _pyth_key():
     """The key, from the environment or from a file on the server.
 
@@ -594,7 +613,7 @@ class TickBook:
                 # shadow calibration measures the MODEL, not a trading
                 # regime - it survives an era bump for the same reason
                 # the price tape does
-                self.shadow = d.get("shadow_obs") or {}
+                self.shadow = _shadow_rows(d.get("shadow_obs"))
                 self.shadow_calib = d.get("shadow_calib") or {}
                 return
             self.pos = d.get("pos") or {}
@@ -613,7 +632,7 @@ class TickBook:
             self.trips = d.get("trips") or {}
             self.fine = {k: [tuple(x) for x in v]
                          for k, v in (d.get("fine") or {}).items()}
-            self.shadow = d.get("shadow") or {}
+            self.shadow = _shadow_rows(d.get("shadow_obs"))
             self.shadow_calib = d.get("shadow_calib") or {}
             self.pair_stats.update(d.get("pair_stats") or {})
             self.basis = {k: list(v)[-BASIS_N:] for k, v in

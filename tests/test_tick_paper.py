@@ -1136,3 +1136,31 @@ def test_start_thread_declines_when_another_owner_is_live():
     T.LOCK = os.path.join(tempfile.mkdtemp(), "tick.lock")
     T.take_lease("paper")
     assert T.start_thread("dashboard") is None
+
+
+# ---------- the loader must refuse a wrong-shaped value (8/28) ----------
+def test_shadow_loader_refuses_the_published_report_shape():
+    """One line in load() still read the old "shadow" key and picked up
+    the PUBLISHED REPORT - {"n":4,"pending":0,"table":[...]} - so the
+    next cycle did row["close_ts"] on the integer 4. TypeError, thrown
+    before save() could run, so the ledger froze and looked exactly like
+    a dead thread. Third distinct failure from one key collision."""
+    assert T._shadow_rows({"n": 4, "pending": 0, "at_s": 120,
+                           "table": [{"bucket": "90-99%"}]}) == {}
+    assert T._shadow_rows(None) == {}
+    assert T._shadow_rows([1, 2, 3]) == {}
+    good = {"TK1": {"p": 0.9, "close_ts": 123.0, "label": "btc"}}
+    assert T._shadow_rows(good) == good
+
+
+def test_a_poisoned_state_file_cannot_freeze_the_book():
+    """End to end: load a state file carrying the bad shape and prove a
+    cycle still runs."""
+    path = os.path.join(tempfile.mkdtemp(), "s.json")
+    T.STATE = path
+    json.dump({"era": T.ERA,
+               "shadow_obs": {"n": 4, "pending": 0, "table": []},
+               "realized_c": 0.0}, open(path, "w"))
+    b = T.TickBook()
+    assert b.shadow == {}
+    b.grade_shadow()          # must not raise
