@@ -1245,3 +1245,15 @@ def test_migration_is_idempotent():
     twice = T._migrate_rows(once)
     assert once[0]["gross"] == twice[0]["gross"]
     assert once[0]["run"] == twice[0]["run"]
+
+
+def test_more_markets_not_a_looser_bar():
+    """The edge fires on ~1 window in 4-8, so more trades must come from
+    MORE INDEPENDENT MARKETS at the same selectivity. Loosening the bar
+    is how the scalping backtest lost money in all 64 configurations."""
+    assert len(T.CRYPTO) >= 9
+    for st, (pair, lab) in T.CRYPTO.items():
+        assert pair.endswith("-USD") and lab.isalpha()
+    # the entry bar itself must NOT have moved
+    assert T.FAV_MIN_C == 80.0 and T.FAV_MAX_C == 95.0
+    assert T.FAV_VETO_P >= 0.60

@@ -124,10 +124,25 @@ SERIES = {
 #    crypto never does, which roughly triples the sample rate per day.
 # BTC's book is also the deepest of any 15-minute market (~8,200
 # contracts at touch when measured).
+# 8/28 EXPANSION. Adam wants more trades. The measured edge (the fav
+# lane) fires on roughly one window in four to eight, so the honest way
+# to get more of them is MORE INDEPENDENT MARKETS AT THE SAME
+# SELECTIVITY - never a lower bar on the same few. Loosening the bar is
+# how the scalping backtest lost money in all 64 configurations; adding
+# uncorrelated windows just multiplies the chances to be selective.
+# Every pair below has a free Coinbase spot feed (verified 8/28), so
+# this costs nothing and cannot expire.
+#   3 series x 4 windows/hr  ->  9 series x 4 windows/hr
 CRYPTO = {
     "KXBTC15M": ("BTC-USD", "btc"),
     "KXETH15M": ("ETH-USD", "eth"),
     "KXSOL15M": ("SOL-USD", "sol"),
+    "KXXRP15M": ("XRP-USD", "xrp"),
+    "KXDOGE15M": ("DOGE-USD", "doge"),
+    "KXZEC15M": ("ZEC-USD", "zec"),
+    "KXNEAR15M": ("NEAR-USD", "near"),
+    "KXBNB15M": ("BNB-USD", "bnb"),
+    "KXHYPE15M": ("HYPE-USD", "hype"),
 }
 CRYPTO = {k: v for k, v in CRYPTO.items()
           if k in os.environ.get("TICK_CRYPTO", ",".join(CRYPTO))}
