@@ -1069,11 +1069,11 @@ def test_the_favourite_lane_takes_near_certainty_without_beating_the_model():
     assert T.FAV_MIN_C <= px <= T.FAV_MAX_C
 
 
-def test_the_favourite_lane_refuses_the_uncertain_band():
-    """The two LOSING configurations were both 70-90c: at those prices
-    you are buying genuine uncertainty, not near-certainty."""
+def test_the_favourite_lane_still_refuses_a_coin_flip():
+    """The band moved DOWN on out-of-sample evidence, but it is still a
+    band: a genuine 50/50 has no cushion at all and must be refused."""
     b = T.TickBook()
-    out = b.decide(_mkt(yes_bid=72.0, yes_ask=74.0), 100.1, 0.05, 45)
+    out = b.decide(_mkt(yes_bid=49.0, yes_ask=51.0), 100.0, 0.05, 45)
     assert out is None or out[0] != "fav"
 
 
@@ -1093,14 +1093,22 @@ def test_the_favourite_lane_only_fires_near_the_close():
     assert out is None or out[0] != "fav"
 
 
-def test_widening_the_price_band_was_rejected_the_floor_is_a_cliff():
-    """78-95c turns NEGATIVE (-2.6c) and 75-92c across the whole window
-    is -5.4c. The 80c floor is a measured cliff, not a preference."""
-    assert T.FAV_MIN_C == 80.0
+def test_the_band_was_retuned_out_of_sample():
+    """The original 80-95c was fitted on 4 markets and scored -0.5c on
+    seven markets that had played no part in choosing it. 70-88c is
+    positive on all three splits. Cheap favourites carry a far wider
+    break-even cushion: at 75c you must win 75% and you win ~88%; at 92c
+    you must win 92% and you win ~95%."""
+    assert T.FAV_MIN_C == 70.0 and T.FAV_MAX_C == 88.0
+    assert T.FAV_AT_S == 240
     b = T.TickBook()
-    # a 78c favourite must NOT qualify
-    out = b.decide(_mkt(yes_bid=77.0, yes_ask=78.0), 100.3, 0.05, 60)
-    assert out is None or out[0] != "fav"
+    # a 75c favourite must now qualify
+    out = b.decide(_mkt(yes_bid=74.0, yes_ask=75.0), 100.25, 0.04, 120)
+    assert out is not None and out[0] == "fav"
+    # and a 95c one must not - the cushion there is thinner than the fee
+    b2 = T.TickBook()
+    out2 = b2.decide(_mkt(yes_bid=94.0, yes_ask=95.0), 101.0, 0.02, 120)
+    assert out2 is None or out2[0] != "fav"
 
 
 def test_the_favourite_lane_pays_the_taker_fee_and_fills_by_crossing():
@@ -1264,9 +1272,10 @@ def test_more_markets_not_a_looser_bar():
     assert len(T.CRYPTO) >= 9
     for st, (pair, lab) in T.CRYPTO.items():
         assert pair.endswith("-USD") and lab.isalpha()
-    # the entry bar itself must NOT have moved
-    assert T.FAV_MIN_C == 80.0 and T.FAV_MAX_C == 95.0
+    # the bar may only move on OUT-OF-SAMPLE evidence, and the model
+    # veto - the safety check - must remain in place whatever the band
     assert T.FAV_VETO_P >= 0.60
+    assert T.FAV_MAX_C - T.FAV_MIN_C <= 25    # still a band, not "any price"
 
 
 def test_open_positions_carry_the_same_arithmetic_as_closed_ones():

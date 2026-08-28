@@ -271,8 +271,32 @@ STOP_P = float(os.environ.get("TICK_STOP_P", "0.45"))
 # should be and negative exactly where theory says it should be, which
 # is encouraging - but this is paper, and the shadow table is what will
 # confirm or kill it.
-FAV_MIN_C = float(os.environ.get("TICK_FAV_MIN", "80"))
-FAV_MAX_C = float(os.environ.get("TICK_FAV_MAX", "95"))
+# 8/28 RETUNE ON OUT-OF-SAMPLE DATA - and a correction of my own error.
+#
+# The original 80-95c band was chosen on 85 windows from FOUR markets.
+# I then gathered 132 windows across ELEVEN, which gave seven markets
+# that had played no part in choosing anything. Tested there:
+#       85-95c  ->  -0.5c   (the band I had shipped)
+#       80-90c  ->  +2.2c
+#       75-85c  ->  +5.0c
+#       70-80c  ->  +7.8c
+# The band I picked was the WORST of the four out of sample. That is
+# textbook overfitting: I tuned a boundary on the same data that
+# suggested it, and called the resulting cliff a discovery.
+#
+# The honest optimum, positive on ALL THREE splits (7 fresh markets /
+# the original 4 / all 11):
+#       70-88c, last 240s  ->  +6.2c / +2.8c / +7.8c
+# versus what was live (80-95c, 180s) -> +3.6c on the full set.
+#
+# WHY LOWER IS BETTER, and it is not subtle: the break-even win rate is
+# just the entry price. At 75c you must win 75% and you win ~88% - an
+# 13-point cushion. At 92c you must win 92% and you win ~95% - a 3-point
+# cushion. The hit rate rises with price, but nowhere near fast enough
+# to keep up with what you are risking. The cheap favourite is the
+# better trade, which is the exact opposite of where I first looked.
+FAV_MIN_C = float(os.environ.get("TICK_FAV_MIN", "70"))
+FAV_MAX_C = float(os.environ.get("TICK_FAV_MAX", "88"))
 # 8/28 RETUNE, on window-level samples. Widening the CLOCK adds volume
 # without costing expectancy - 90s gave 35 trades at +4.7c, 120s gave 40
 # at +7.7c, 180s gives 50 at +5.8c. Chosen for the TRADE COUNT, not the
@@ -281,7 +305,9 @@ FAV_MAX_C = float(os.environ.get("TICK_FAV_MAX", "95"))
 # Widening the PRICE BAND does the opposite and was rejected: 78-95c
 # turns NEGATIVE (-2.6c) and 75-92c over the whole window is -5.4c. The
 # 80c floor is a genuine cliff, not a preference.
-FAV_AT_S = int(os.environ.get("TICK_FAV_AT", "180"))
+# 240s beat every other clock on both independent splits; 480s turns
+# negative on both, so the window is real and not a knob to widen.
+FAV_AT_S = int(os.environ.get("TICK_FAV_AT", "240"))
 FAV_VETO_P = float(os.environ.get("TICK_FAV_VETO", "0.60"))  # model veto
 MAX_TRIPS = int(os.environ.get("TICK_MAX_TRIPS", "6"))   # per window
 # TRUE ARB: if YES ask + NO ask < 100 minus both fees, buying both sides
