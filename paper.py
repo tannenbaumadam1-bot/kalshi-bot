@@ -32,6 +32,20 @@ import os
 import sys
 import json
 import time
+
+
+def _git_head():
+    """Short SHA of the code on disk (not necessarily the code running)."""
+    try:
+        import subprocess
+        return subprocess.check_output(
+            ["git", "rev-parse", "--short", "HEAD"],
+            stderr=subprocess.DEVNULL, timeout=5).decode().strip()
+    except Exception:
+        return ""
+
+
+_BOOT_HEAD = _git_head()
 import datetime
 import threading
 import requests
@@ -883,6 +897,22 @@ def main():
                             print(f"  TICK restart failed: {_e}")
                 except Exception as e:
                     print(f"  tick heartbeat skipped: {e}")
+            # SELF-HEALING DEPLOY (8/28). Pushes stopped reaching the running
+            # process for ~18 hours: the updater pulled the code but nothing
+            # restarted this service, so a fixed bug stayed broken and the
+            # watchdog written to revive a dead thread could not itself be
+            # deployed. Chicken-and-egg, and it cost a full day of evidence.
+            # If the repo on disk has moved past the commit we booted from,
+            # exit cleanly - systemd Restart=always brings us back on the new
+            # code. Deploys become self-healing from here on.
+            if n % 20 == 7 and _BOOT_HEAD:
+                _now_head = _git_head()
+                if _now_head and _now_head != _BOOT_HEAD:
+                    print(f"  DEPLOY: disk is {_now_head}, running {_BOOT_HEAD}"
+                          f" - exiting so systemd restarts on fresh code")
+                    sys.stdout.flush()
+                    os._exit(0)
+
             if cu_bot is not None and n % 10 == 4:
                 try:
                     cs2 = cu_bot.step()

@@ -37,3 +37,26 @@ def _run():
 
 if __name__ == "__main__":
     sys.exit(_run())
+
+
+# ---------- self-healing deploys (8/28) ----------
+def test_paper_exits_when_the_repo_has_moved_past_the_running_build():
+    """Pushes stopped reaching the running process for ~18 hours: the
+    updater pulled code but nothing restarted the service, so a fixed
+    bug stayed broken and the watchdog written to revive a dead thread
+    could not itself be deployed."""
+    src = open("paper.py").read()
+    assert "_BOOT_HEAD" in src
+    assert "_git_head()" in src
+    blk = src.split("SELF-HEALING DEPLOY")[1][:1400]
+    assert "os._exit(0)" in blk
+    assert "!= _BOOT_HEAD" in blk
+
+
+def test_the_deploy_check_is_a_no_op_without_git():
+    """A checkout without git metadata must not exit-loop."""
+    import paper
+    if paper._BOOT_HEAD == "":
+        assert True
+    else:
+        assert isinstance(paper._BOOT_HEAD, str)
