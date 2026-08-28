@@ -428,6 +428,24 @@ def _migrate_rows(rows):
     return out
 
 
+def _mark_of(p):
+    """Mid of the side we hold, in cents, or None if unmarked."""
+    mid = (getattr(p, "_mid", None) if not isinstance(p, dict)
+           else p.get("_mid"))
+    if mid is None:
+        return None
+    return round(mid if p["side"] == "yes" else 100.0 - mid, 2)
+
+
+def _unreal_of(p):
+    """Mark-to-market P&L on an open position, in dollars."""
+    mk = _mark_of(p)
+    if mk is None:
+        return None
+    n = float(p.get("n") or 0)
+    return round((mk * n - p["cost_c"] - p["fee_c"]) / 100.0, 2)
+
+
 def _shadow_rows(v):
     """Accept only a dict of per-ticker RECORDS.
 
@@ -1844,6 +1862,17 @@ class TickBook:
             r["per_turn"] = round(r["pnl"] / r["n"], 3) if r["n"] else None
         return out
 
+    def _mark_book(self, mkts):
+        """One place that decides what a held position is worth right
+        now - so the positions table, the open-P&L headline and the exit
+        logic can never quote three different marks for one position."""
+        self._marks = {}
+        for m in mkts:
+            yb, ya = m.get("yes_bid"), m.get("yes_ask")
+            if yb is None or ya is None:
+                continue
+            self._marks[m["tk"]] = (yb + ya) / 2.0
+
     def _open_pnl_c(self, mkts):
         by_tk = {m["tk"]: m for m in mkts}
         tot = 0.0
@@ -1890,6 +1919,9 @@ class TickBook:
         self.stats["cycles"] += 1
         self.heartbeat()
 
+        self._mark_book(mkts)
+        for _tk, _p in self.pos.items():
+            _p["_mid"] = self._marks.get(_tk)
         open_c = self._open_pnl_c(mkts)
         hrs = max(1e-9, (time.time() - self._t0) / 3600.0)
         total_c = self.realized_c + open_c
@@ -1937,11 +1969,24 @@ class TickBook:
             "fills_loose": self.stats["fills_loose"],
             "trades_seen": self.stats["trades_seen"],
             "open_n": len(self.pos),
+            # OPEN trades get the SAME columns as closed ones. Adam
+            # asked for the P&L of every trade, and a position we are
+            # still holding is a trade - showing only settled rows hides
+            # exactly the exposure that is live right now.
             "positions": [
                 {"tk": p["tk"], "label": p["label"], "lane": p["lane"],
                  "side": p["side"], "n": round(p["n"], 2),
-                 "px": round(p["cost_c"] / max(1e-9, p["n"]), 2),
-                 "model_p": p["p_side"]}
+                 "avg": bool(p.get("avg")),
+                 "entry": round(p["cost_c"] / max(1e-9, p["n"]), 2),
+                 "cost": round(p["cost_c"] / 100.0, 2),
+                 "mark": _mark_of(p),
+                 "unreal": _unreal_of(p),
+                 "fees": round(p["fee_c"] / 100.0, 2),
+                 "held_s": round(max(0.0, time.time()
+                                     - _ts(p.get("opened")))),
+                 "t_left": round(max(0.0, p["close_ts"] - now0)),
+                 "model_p": (round(p["p_side"], 3)
+                             if p.get("p_side") is not None else None)}
                 for p in self.pos.values()],
             "realized": round(self.realized_c / 100.0, 2),
             "open_pnl": round(open_c / 100.0, 2),

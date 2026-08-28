@@ -1267,3 +1267,17 @@ def test_more_markets_not_a_looser_bar():
     # the entry bar itself must NOT have moved
     assert T.FAV_MIN_C == 80.0 and T.FAV_MAX_C == 95.0
     assert T.FAV_VETO_P >= 0.60
+
+
+def test_open_positions_carry_the_same_arithmetic_as_closed_ones():
+    """A position we are still holding IS a trade. Showing only settled
+    rows hides exactly the exposure that is live right now."""
+    p = {"tk": "T1", "label": "btc", "side": "yes", "n": 10.0,
+         "cost_c": 880.0, "fee_c": 15.0, "_mid": 92.0}
+    assert T._mark_of(p) == 92.0
+    # 10 x 92c = 920c, minus 880c cost minus 15c fees = 25c = $0.25
+    assert T._unreal_of(p) == 0.25
+    p2 = dict(p, side="no")
+    assert T._mark_of(p2) == 8.0
+    assert T._mark_of(dict(p, _mid=None)) is None
+    assert T._unreal_of(dict(p, _mid=None)) is None

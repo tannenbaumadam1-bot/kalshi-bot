@@ -821,6 +821,11 @@ td.num,th.num{text-align:right}
 <table><thead><tr><th>Model said</th><th class=num>Windows</th><th class=num>Actually won</th><th>Verdict</th></tr></thead>
 <tbody id=tkcal></tbody></table>
 <div class=mut style="font-size:11px;margin-top:6px">A model that is right about its own confidence is a business; one that is overconfident is a slow way to lose. Nothing here trades real money &mdash; this table decides whether anything ever does.</div></div>
+<div style="margin-top:14px"><div class=t style="margin-bottom:6px">OPEN RIGHT NOW <span id=tkopenn class=mut style="font-weight:400;text-transform:none;letter-spacing:0"></span></div>
+<table><thead><tr><th>Market</th><th>Lane</th><th>Side</th><th class=num>Contracts</th>
+<th class=num>Entry</th><th class=num>Mark</th><th class=num>Cost</th>
+<th class=num>Unrealised</th><th class=num>Held</th><th class=num>Settles in</th></tr></thead>
+<tbody id=tkopen></tbody></table></div>
 <div style="margin-top:14px"><div class=t style="margin-bottom:6px">TRADE LEDGER &mdash; every closed trade <span id=tkledn class=mut style="font-weight:400;text-transform:none;letter-spacing:0"></span></div>
 <table><thead><tr><th>Closed</th><th>Market</th><th>Lane</th><th>Side</th>
 <th class=num>Contracts</th><th class=num>Entry</th><th class=num>Exit</th>
@@ -1209,6 +1214,20 @@ async function load(){
       +'<td class=num>'+(c.hit!=null?c.hit.toFixed(0)+'%':'&ndash;')+'</td>'
       +'<td>'+((dev==null||c.n<10)?'<span class=mut>too few</span>':(Math.abs(dev)<=8?'<span class=pos>honest</span>':'<span class=neg>'+(dev<0?'OVERconfident':'UNDERconfident')+'</span>'))+'</td></tr>';}).join('')
       ||'<tr><td colspan=4 class=empty>No settled windows yet &mdash; the table fills as the clock runs&hellip;</td></tr>';
+    var OP=T.positions||[];
+    $('tkopenn').innerHTML=OP.length?(OP.length+' position'+(OP.length>1?'s':'')+' &middot; '+M(T.capital||0)+' at work &middot; unrealised <b>'+M(T.open_pnl||0)+'</b>'):'';
+    $('tkopen').innerHTML=OP.map(function(o){
+      return '<tr><td><b>'+String(o.label||'').toUpperCase()+'</b>'+(o.avg?' <span class=chip style="background:rgba(52,211,153,.16);color:#6ee7b7;font-size:10px">C</span>':'')+'</td>'
+      +'<td class=mut>'+(o.lane||'')+'</td>'
+      +'<td>'+String(o.side||'').toUpperCase()+'</td>'
+      +'<td class=num>'+(o.n!=null?o.n:'&ndash;')+'</td>'
+      +'<td class=num>'+(o.entry!=null?o.entry+'&cent;':'&ndash;')+'</td>'
+      +'<td class=num>'+(o.mark!=null?o.mark+'&cent;':'<span class=mut>unmarked</span>')+'</td>'
+      +'<td class=num class=mut>'+M(-(o.cost||0))+'</td>'
+      +'<td class=num><b><span class="'+C(o.unreal)+'">'+(o.unreal!=null?M(o.unreal):'&ndash;')+'</span></b></td>'
+      +'<td class=num class=mut>'+(o.held_s!=null?(o.held_s>90?Math.round(o.held_s/60)+'m':o.held_s+'s'):'&ndash;')+'</td>'
+      +'<td class=num class=mut>'+(o.t_left!=null?(o.t_left>90?Math.round(o.t_left/60)+'m':o.t_left+'s'):'&ndash;')+'</td></tr>';}).join('')
+      ||'<tr><td colspan=10 class=empty>Flat &mdash; no open positions</td></tr>';
     var LG=T.ledger||{};
     $('tkledn').innerHTML=(LG.n||0)+' trades &middot; '+(LG.contracts||0)+' contracts &middot; gross '+M(LG.gross||0)+' &minus; fees '+M(LG.fees||0)+' = <b>'+M(LG.net||0)+'</b>';
     var HOW={SOLD:['pos','SOLD'],WON:['pos','WON'],LOST:['neg','LOST'],STOPPED:['neg','STOPPED']};
