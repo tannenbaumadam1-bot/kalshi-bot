@@ -309,6 +309,37 @@ FAV_MAX_C = float(os.environ.get("TICK_FAV_MAX", "88"))
 # negative on both, so the window is real and not a knob to widen.
 FAV_AT_S = int(os.environ.get("TICK_FAV_AT", "240"))
 FAV_VETO_P = float(os.environ.get("TICK_FAV_VETO", "0.60"))  # model veto
+# ---------------------------------------------------------------------
+# THE EARLY LANE (8/28) - the directional pattern, found by testing both
+# sides of the same setup and letting the data pick.
+#
+# HYPOTHESIS TESTED: mid-window, is a strong favourite over-extended
+# (fade it) or persistent (ride it)? Both directions, both splits:
+#     FADE the >=85c favourite   ->  -6.5c / -10.0c   (loses on both)
+#     RIDE the >=85c favourite   ->  +2.5c /  +6.0c   (wins on both)
+# There is no mean reversion here. The favourite keeps winning, which is
+# the same convergence the weather book harvests - a market that is
+# already mostly decided goes on being decided.
+#
+# The profitable slice, positive on ALL THREE splits:
+#     88-95c, 300-600s left  ->  +4.5c / +6.9c / +7.1c  (win 96-99%)
+#
+# AN IMPLEMENTATION DETAIL THAT MATTERS ENORMOUSLY: entering on the
+# FIRST TOUCH of the band scored -1.6c, while the same band measured at
+# a settled moment scored +6.0c. A price brushing 85c on its way through
+# is not the same event as a price sitting at 85c. Hence a band that
+# starts at 88c and a window that opens 300s in - by then the level has
+# had time to mean something.
+#
+# NOTE THE SHAPE OF THE TWO LANES TOGETHER: early you need a STRONG
+# favourite (88c+) because there is still time for it to be wrong; late
+# a cheap one (70c+) pays better because the clock is doing the work.
+# Different regimes, non-overlapping in both price and time, so a single
+# window can legitimately produce one of each.
+FAV2_MIN_C = float(os.environ.get("TICK_FAV2_MIN", "88"))
+FAV2_MAX_C = float(os.environ.get("TICK_FAV2_MAX", "95"))
+FAV2_FROM_S = int(os.environ.get("TICK_FAV2_FROM", "600"))
+FAV2_TO_S = int(os.environ.get("TICK_FAV2_TO", "300"))
 MAX_TRIPS = int(os.environ.get("TICK_MAX_TRIPS", "6"))   # per window
 # TRUE ARB: if YES ask + NO ask < 100 minus both fees, buying both sides
 # locks a profit no matter how it settles. Almost certainly absent on a
@@ -1287,6 +1318,17 @@ class TickBook:
         # THE FAVOURITE LANE. Checked last, and deliberately NOT gated on
         # the model beating the market - only on the model not
         # contradicting it. See the note at FAV_MIN_C.
+        # EARLY lane first: it owns the 300-600s window, the late lane
+        # owns <=240s, and they cannot both fire on one observation.
+        if not cands and FAV2_TO_S <= t_left <= FAV2_FROM_S:
+            f_side = "yes" if ya >= (100.0 - yb) else "no"
+            f_px = round(ya if f_side == "yes" else 100.0 - yb, 2)
+            f_p = p_yes if f_side == "yes" else 1.0 - p_yes
+            if FAV2_MIN_C <= f_px <= FAV2_MAX_C:
+                if f_p >= FAV_VETO_P:
+                    return "early", p_yes, f_px, f_side, f_p
+                self.stats["fav_vetoed"] = self.stats.get(
+                    "fav_vetoed", 0) + 1
         if not cands and t_left <= FAV_AT_S:
             # THE FAVOURITE IS THE EXPENSIVE SIDE. Buying YES costs the
             # ask; buying NO costs 100 - the yes bid. Whichever costs
@@ -1433,7 +1475,7 @@ class TickBook:
         for t in trades:
             by_tk.setdefault(t["tk"], []).append(t)
         for tk, q in self.resting.items():
-            if q.get("lane") == "fav":
+            if q.get("lane") in ("fav", "early"):
                 # a taker order fills at once, at the price we saw. No
                 # queue to wait in and no pretending otherwise.
                 left = float(SIZE) - float(q.get("filled", 0.0))
@@ -1512,7 +1554,8 @@ class TickBook:
             "opened": datetime.datetime.now().isoformat(timespec="seconds")})
         p["n"] += n
         p["cost_c"] += px * n
-        p["fee_c"] += fee_c(px, n, maker=(q.get("lane") != "fav"))
+        p["fee_c"] += fee_c(px, n, maker=(q.get("lane")
+                                              not in ("fav", "early")))
         self.fills.append({"tk": q["tk"], "px": px, "n": n,
                            "side": q["side"], "lane": q["lane"],
                            "model_p": q["p_side"], "ts": time.time()})
@@ -2109,6 +2152,8 @@ class TickBook:
             "rules": {"size": SIZE, "band": [MIN_PX_C, MAX_PX_C],
                       "fav_band": [FAV_MIN_C, FAV_MAX_C],
                       "fav_at_s": FAV_AT_S, "fav_veto": FAV_VETO_P,
+                      "early_band": [FAV2_MIN_C, FAV2_MAX_C],
+                      "early_window": [FAV2_TO_S, FAV2_FROM_S],
                       "edge_c": EDGE_C, "endgame_s": ENDGAME_S,
                       "endgame_p": ENDGAME_P, "tail_p": TAIL_P,
                       "max_pos": MAX_POS, "maker_rate": MAKER_RATE,

@@ -1290,3 +1290,46 @@ def test_open_positions_carry_the_same_arithmetic_as_closed_ones():
     assert T._mark_of(p2) == 8.0
     assert T._mark_of(dict(p, _mid=None)) is None
     assert T._unreal_of(dict(p, _mid=None)) is None
+
+
+# ---------- the EARLY lane: ride, don't fade (8/28) ----------
+def test_early_lane_rides_a_strong_favourite_mid_window():
+    """Tested BOTH directions on both splits. Fading the >=85c
+    favourite loses (-6.5c / -10.0c); riding it wins (+2.5c / +6.0c).
+    There is no mean reversion here - a market that is already mostly
+    decided goes on being decided."""
+    b = T.TickBook()
+    out = b.decide(_mkt(yes_bid=89.0, yes_ask=90.0), 100.6, 0.04, 450)
+    assert out is not None
+    lane, _p, px, side, _ps = out
+    assert lane == "early" and side == "yes"
+    assert T.FAV2_MIN_C <= px <= T.FAV2_MAX_C
+
+
+def test_the_two_lanes_do_not_overlap_in_time_or_price():
+    """Early needs a STRONG favourite because there is still time for it
+    to be wrong; late pays on a CHEAP one because the clock does the
+    work. Different regimes - a single window may produce one of each,
+    but never two from one observation."""
+    b = T.TickBook()
+    # cheap favourite is refused early...
+    assert b.decide(_mkt(yes_bid=74.0, yes_ask=75.0), 100.3, 0.04, 450) is None
+    # ...and taken late
+    late = b.decide(_mkt(yes_bid=74.0, yes_ask=75.0), 100.3, 0.04, 120)
+    assert late is not None and late[0] == "fav"
+    assert T.FAV2_TO_S >= T.FAV_AT_S       # windows cannot overlap
+
+
+def test_early_lane_will_not_fire_before_its_window_opens():
+    b = T.TickBook()
+    assert b.decide(_mkt(yes_bid=89.0, yes_ask=90.0), 100.6, 0.04, 800) is None
+
+
+def test_the_early_lane_crosses_the_spread_and_pays_taker():
+    b = T.TickBook()
+    q = _q(px=90.0)
+    q["lane"] = "early"
+    b.resting = {"T1": q}
+    b.check_fills([], 0)
+    assert b.pos["T1"]["n"] == T.SIZE
+    assert b.pos["T1"]["fee_c"] == T.fee_c(90.0, T.SIZE, maker=False)
