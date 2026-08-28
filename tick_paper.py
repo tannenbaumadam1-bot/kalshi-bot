@@ -371,6 +371,40 @@ def _clean_key(raw):
     return k.strip()
 
 
+def _migrate_rows(rows):
+    """Bring pre-ledger rows up to the auditable schema.
+
+    Rows written before 8/28 carry only px/exit_px/fee, so a ledger that
+    renders cost, gross and net would show dashes for them - a ledger
+    with holes is not a ledger. A settlement is an exit at 100c (won) or
+    0c (lost), which is exactly how the new schema already describes it,
+    so the conversion is exact rather than a guess."""
+    out, run = [], 0.0
+    for r in rows or []:
+        if not isinstance(r, dict):
+            continue
+        r = dict(r)
+        if "entry" not in r:
+            n = float(r.get("n") or 0)
+            entry = float(r.get("px") or 0)
+            ex = r.get("exit_px")
+            ex = (float(ex) if ex is not None
+                  else (100.0 if r.get("won") else 0.0))
+            r["entry"] = round(entry, 2)
+            r["exit"] = round(ex, 2)
+            r["cost"] = round(entry * n / 100.0, 2)
+            r["gross"] = round((ex - entry) * n / 100.0, 2)
+            r["fees"] = round(float(r.get("fee") or 0), 2)
+            r["how"] = ("STOPPED" if r.get("stop")
+                        else ("SOLD" if r.get("exit_px") is not None
+                              else ("WON" if r.get("won") else "LOST")))
+            r.setdefault("avg", False)
+        run = round(run + float(r.get("pnl") or 0), 2)
+        r["run"] = run
+        out.append(r)
+    return out
+
+
 def _shadow_rows(v):
     """Accept only a dict of per-ticker RECORDS.
 
@@ -617,7 +651,7 @@ class TickBook:
                 self.shadow_calib = d.get("shadow_calib") or {}
                 return
             self.pos = d.get("pos") or {}
-            self.settled = (d.get("settled") or [])[-200:]
+            self.settled = _migrate_rows((d.get("settled") or [])[-200:])
             self.calib = d.get("calib") or {}
             self.proxy_err = (d.get("proxy_err") or [])[-200:]
             self.fills = (d.get("fills") or [])[-400:]
@@ -1504,17 +1538,11 @@ class TickBook:
                 "tk": tk, "p_side": pos["p_side"], "side": pos["side"],
                 "close_ts": pos["close_ts"]})
             del self.pend_calib[:-200]
-            self.settled.append({
-                "tk": tk, "label": pos["label"], "lane": "exit",
-                "entry_lane": pos["lane"], "side": pos["side"],
-                "stop": broken,
-                "n": round(n, 2), "px": round(avg, 2),
-                "exit_px": sell_px, "model_p": pos["p_side"],
-                "won": pnl_c > 0, "pnl": round(pnl_c / 100.0, 2),
-                "fee": round((pos["fee_c"] + fee) / 100.0, 2),
-                "t_left": round(t_left),
-                "ts": datetime.datetime.now().isoformat(
-                    timespec="seconds")})
+            self.settled.append(self._row(
+                tk, pos, n, avg, sell_px, pos["fee_c"] + fee, pnl_c,
+                "STOPPED" if broken else "SOLD", pos.get("p_side"),
+                {"entry_lane": pos.get("lane"), "lane": "exit",
+                 "stop": broken, "t_left": round(t_left)}))
             del self.settled[:-200]
             self.pos.pop(tk, None)
 
@@ -1661,15 +1689,13 @@ class TickBook:
             row = self.calib.setdefault(b, [0, 0])
             row[0] += 1
             row[1] += 1 if won else 0
-            self.settled.append({
-                "tk": tk, "label": p["label"], "lane": p["lane"],
-                "side": p["side"], "n": round(p["n"], 2),
-                "px": round(p["cost_c"] / max(1e-9, p["n"]), 2),
-                "model_p": p["p_side"], "won": won,
-                "pnl": round(pnl_c / 100.0, 2),
-                "fee": round(p["fee_c"] / 100.0, 2),
-                "t_left": p.get("t_left"),
-                "ts": datetime.datetime.now().isoformat(timespec="seconds")})
+            # a settlement is an exit at 100 (won) or 0 (lost), so the
+            # same row builder describes it exactly
+            self.settled.append(self._row(
+                tk, p, p["n"], p["cost_c"] / max(1e-9, p["n"]),
+                100.0 if won else 0.0, p["fee_c"], pnl_c,
+                "WON" if won else "LOST", p.get("p_side"),
+                {"t_left": p.get("t_left"), "result": res}))
             del self.settled[:-200]
             self.proxy_err.append({
                 "tk": tk, "spot": p["spot_at_entry"],
@@ -1712,6 +1738,47 @@ class TickBook:
             mid = ((m["yes_bid"] or 0) + (m["yes_ask"] or 0)) / 2.0
             now_px = mid if f["side"] == "yes" else 100.0 - mid
             f["after"] = round(now_px - f["px"], 2)
+
+    def _row(self, tk, pos, n, entry_c, exit_c, fee_c_tot, pnl_c,
+             how, model_p, extra=None):
+        """One ledger row, built the SAME way for every exit path.
+
+        Adam asked for a ledger he can check by hand, so every row
+        carries the whole arithmetic rather than a bare P&L:
+            cost  = contracts x entry
+            gross = contracts x (exit - entry)      [exit=100 or 0 on a
+                                                     settlement]
+            net   = gross - fees
+        `how` names the ending in plain words - SOLD, WON, LOST,
+        STOPPED - because "won: false" cannot distinguish a losing
+        settlement from a deliberate stop, and those are different
+        events with different lessons."""
+        cost = entry_c * n
+        gross = (exit_c - entry_c) * n
+        row = {
+            "tk": tk, "label": pos["label"],
+            "lane": pos.get("lane"), "side": pos["side"],
+            "avg": bool(pos.get("avg")),
+            "n": round(n, 2),
+            "entry": round(entry_c, 2),
+            "exit": round(exit_c, 2),
+            "cost": round(cost / 100.0, 2),
+            "gross": round(gross / 100.0, 2),
+            "fees": round(fee_c_tot / 100.0, 2),
+            "pnl": round(pnl_c / 100.0, 2),
+            "how": how,
+            "won": pnl_c > 0,
+            "model_p": round(model_p, 3) if model_p is not None else None,
+            "hold_s": round(max(0.0, time.time() - _ts(pos.get("opened")))),
+            "ts": datetime.datetime.now().isoformat(timespec="seconds"),
+        }
+        if extra:
+            row.update(extra)
+        # running total, so the ledger reconciles to the headline on the
+        # page instead of asking anyone to add it up
+        prev = self.settled[-1]["run"] if self.settled else 0.0
+        row["run"] = round(prev + row["pnl"], 2)
+        return row
 
     def _by_market(self):
         """P&L per MARKET (btc, eth, gold...), which is the split Adam
@@ -1875,7 +1942,23 @@ class TickBook:
                 if not m.get("avg")), 2),
             "adverse": self._adverse(),
             "clock": self._clock(),
-            "settled": self.settled[-12:][::-1],
+            "settled": self.settled[-60:][::-1],
+            # totals computed from the SAME rows the table renders, so
+            # the ledger and the headline can never disagree
+            "ledger": {
+                "n": len(self.settled),
+                "contracts": round(sum(r.get("n") or 0
+                                       for r in self.settled), 2),
+                "gross": round(sum(r.get("gross") or 0
+                                   for r in self.settled), 2),
+                "fees": round(sum(r.get("fees") or 0
+                                  for r in self.settled), 2),
+                "net": round(sum(r.get("pnl") or 0
+                                 for r in self.settled), 2),
+                "how": {k: sum(1 for r in self.settled
+                               if r.get("how") == k)
+                        for k in ("SOLD", "WON", "LOST", "STOPPED")},
+            },
             "exits": self.stats.get("exits", 0),
             "stops": self.stats.get("stops", 0),
             "trips": sum(self.trips.values()),

@@ -821,10 +821,13 @@ td.num,th.num{text-align:right}
 <table><thead><tr><th>Model said</th><th class=num>Windows</th><th class=num>Actually won</th><th>Verdict</th></tr></thead>
 <tbody id=tkcal></tbody></table>
 <div class=mut style="font-size:11px;margin-top:6px">A model that is right about its own confidence is a business; one that is overconfident is a slow way to lose. Nothing here trades real money &mdash; this table decides whether anything ever does.</div></div>
-<div style="margin-top:12px"><div class=t style="margin-bottom:6px">Settled windows</div>
+<div style="margin-top:14px"><div class=t style="margin-bottom:6px">TRADE LEDGER &mdash; every closed trade <span id=tkledn class=mut style="font-weight:400;text-transform:none;letter-spacing:0"></span></div>
 <table><thead><tr><th>Closed</th><th>Market</th><th>Lane</th><th>Side</th>
-<th class=num>Paid</th><th class=num>Model said</th><th>Result</th><th class=num>P&amp;L</th></tr></thead>
-<tbody id=tkset></tbody></table></div>
+<th class=num>Contracts</th><th class=num>Entry</th><th class=num>Exit</th>
+<th class=num>Cost</th><th class=num>Gross</th><th class=num>Fees</th>
+<th class=num>Net P&amp;L</th><th class=num>Held</th><th>Ended</th><th class=num>Running</th></tr></thead>
+<tbody id=tkset></tbody><tfoot id=tksetfoot></tfoot></table>
+<div class=mut style="font-size:11px;margin-top:6px">Every row shows its own arithmetic: <b>cost</b> = contracts &times; entry, <b>gross</b> = contracts &times; (exit &minus; entry), <b>net</b> = gross &minus; fees. A settlement is just an exit at 100&cent; (won) or 0&cent; (lost). <b>SOLD</b> = closed early into the book &middot; <b>WON/LOST</b> = held to settlement &middot; <b>STOPPED</b> = cut because the model flipped against us. Running total reconciles to the headline above.</div></div>
 </div>
 <!-- PAPER SECTIONS RETIRED 7/30 (Adam: 'get rid of the other two paper
      strategies for now') - hidden, not deleted; ledgers archived on the
@@ -1206,15 +1209,32 @@ async function load(){
       +'<td class=num>'+(c.hit!=null?c.hit.toFixed(0)+'%':'&ndash;')+'</td>'
       +'<td>'+((dev==null||c.n<10)?'<span class=mut>too few</span>':(Math.abs(dev)<=8?'<span class=pos>honest</span>':'<span class=neg>'+(dev<0?'OVERconfident':'UNDERconfident')+'</span>'))+'</td></tr>';}).join('')
       ||'<tr><td colspan=4 class=empty>No settled windows yet &mdash; the table fills as the clock runs&hellip;</td></tr>';
+    var LG=T.ledger||{};
+    $('tkledn').innerHTML=(LG.n||0)+' trades &middot; '+(LG.contracts||0)+' contracts &middot; gross '+M(LG.gross||0)+' &minus; fees '+M(LG.fees||0)+' = <b>'+M(LG.net||0)+'</b>';
+    var HOW={SOLD:['pos','SOLD'],WON:['pos','WON'],LOST:['neg','LOST'],STOPPED:['neg','STOPPED']};
     $('tkset').innerHTML=(T.settled||[]).map(function(s){
+      var h=HOW[s.how]||['mut',(s.how||'?')];
       return '<tr><td class=mut>'+String(s.ts||'').replace('T',' ').slice(5,16)+'</td>'
-      +'<td>'+(s.label||'')+'</td><td>'+(s.lane||'')+'</td>'
+      +'<td><b>'+String(s.label||'').toUpperCase()+'</b>'+(s.avg?' <span class=chip style="background:rgba(52,211,153,.16);color:#6ee7b7;font-size:10px">C</span>':'')+'</td>'
+      +'<td class=mut>'+(s.lane||'')+(s.entry_lane&&s.entry_lane!=s.lane?'<span class=mut> &larr;'+s.entry_lane+'</span>':'')+'</td>'
       +'<td>'+String(s.side||'').toUpperCase()+'</td>'
-      +'<td class=num>'+(s.px!=null?s.px+'&cent;':'&ndash;')+(s.exit_px!=null?' &rarr; '+s.exit_px+'&cent;':'')+'</td>'
-      +'<td class=num>'+(s.model_p!=null?(s.model_p*100).toFixed(0)+'%':'&ndash;')+'</td>'
-      +'<td>'+(s.stop?'<span class=neg>STOPPED</span>':(s.won?'<span class=pos>WON</span>':'<span class=neg>LOST</span>'))+'</td>'
-      +'<td class=num><span class="'+C(s.pnl)+'">'+M(s.pnl)+'</span></td></tr>';}).join('')
-      ||'<tr><td colspan=8 class=empty>Nothing settled yet&hellip;</td></tr>';}
+      +'<td class=num>'+(s.n!=null?s.n:'&ndash;')+'</td>'
+      +'<td class=num>'+(s.entry!=null?s.entry+'&cent;':'&ndash;')+'</td>'
+      +'<td class=num>'+(s.exit!=null?s.exit+'&cent;':'&ndash;')+'</td>'
+      +'<td class=num class=mut>'+M(s.cost!=null?-s.cost:0)+'</td>'
+      +'<td class=num><span class="'+C(s.gross)+'">'+M(s.gross||0)+'</span></td>'
+      +'<td class=num class=mut>'+M(-(s.fees||0))+'</td>'
+      +'<td class=num><b><span class="'+C(s.pnl)+'">'+M(s.pnl)+'</span></b></td>'
+      +'<td class=num class=mut>'+(s.hold_s!=null?(s.hold_s>90?Math.round(s.hold_s/60)+'m':s.hold_s+'s'):'&ndash;')+'</td>'
+      +'<td><span class='+h[0]+'>'+h[1]+'</span></td>'
+      +'<td class=num class=mut>'+M(s.run!=null?s.run:0)+'</td></tr>';}).join('')
+      ||'<tr><td colspan=14 class=empty>No closed trades yet &mdash; the fav lane fires in the last 90 seconds of a window&hellip;</td></tr>';
+    $('tksetfoot').innerHTML=(LG.n?('<tr><td colspan=4><b>TOTAL</b></td>'
+      +'<td class=num><b>'+(LG.contracts||0)+'</b></td><td colspan=3></td>'
+      +'<td class=num><b><span class="'+C(LG.gross)+'">'+M(LG.gross||0)+'</span></b></td>'
+      +'<td class=num><b>'+M(-(LG.fees||0))+'</b></td>'
+      +'<td class=num><b><span class="'+C(LG.net)+'">'+M(LG.net||0)+'</span></b></td>'
+      +'<td colspan=3></td></tr>'):'');}
   // Book 4 (phantom) renderer retired 8/25 - see the panel note above.
   if(d.driftw){const D=d.driftw,dsm=D.summary||{};
     const wmkt=b=>'<td><span class=mkt>'+((b.name||b.ticker||'')+'').replace(/&/g,'&amp;').replace(/</g,'&lt;')+'</span></td>';

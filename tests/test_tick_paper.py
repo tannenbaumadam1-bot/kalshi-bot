@@ -1164,3 +1164,84 @@ def test_a_poisoned_state_file_cannot_freeze_the_book():
     b = T.TickBook()
     assert b.shadow == {}
     b.grade_shadow()          # must not raise
+
+
+# ---------- the ledger (8/28) ----------
+def _pos_for_row(**kw):
+    p = {"tk": "T1", "series": "KXBTC15M", "label": "btc", "lane": "fav",
+         "side": "yes", "n": 10.0, "cost_c": 880.0, "fee_c": 15.0,
+         "strike": 100.0, "close_ts": time.time() + 60, "model_p": 0.9,
+         "p_side": 0.9, "spot_at_entry": 100.5, "t_left": 60,
+         "avg": True, "opened": "2000-01-01T00:00:00"}
+    p.update(kw)
+    return p
+
+
+def test_every_ledger_row_shows_its_own_arithmetic():
+    """Adam asked for a ledger he can check by hand: cost, gross, fees
+    and net must all be present and must reconcile."""
+    b = T.TickBook()
+    p = _pos_for_row()
+    r = b._row("T1", p, 10.0, 88.0, 100.0, 15.0, 10 * 12.0 - 15.0,
+               "WON", 0.9)
+    assert r["n"] == 10.0
+    assert r["entry"] == 88.0 and r["exit"] == 100.0
+    assert r["cost"] == 8.80                 # 10 x 88c
+    assert r["gross"] == 1.20                # 10 x (100-88)c
+    assert r["fees"] == 0.15
+    assert abs(r["gross"] - r["fees"] - r["pnl"]) < 0.011
+    assert r["how"] == "WON"
+    assert r["hold_s"] >= 0
+
+
+def test_a_loss_and_a_stop_are_different_events_in_the_ledger():
+    """'won: false' cannot tell a losing settlement from a deliberate
+    stop, and those carry different lessons."""
+    b = T.TickBook()
+    p = _pos_for_row()
+    lost = b._row("T1", p, 10.0, 88.0, 0.0, 15.0, -895.0, "LOST", 0.9)
+    stopped = b._row("T1", p, 10.0, 88.0, 60.0, 15.0, -295.0, "STOPPED",
+                     0.9)
+    assert lost["how"] == "LOST" and stopped["how"] == "STOPPED"
+    assert lost["won"] is False and stopped["won"] is False
+    assert stopped["pnl"] > lost["pnl"]      # the stop saved money
+
+
+def test_the_running_total_reconciles_to_the_sum_of_rows():
+    b = T.TickBook()
+    p = _pos_for_row()
+    for ex in (100.0, 0.0, 95.0):
+        pnl = (ex - 88.0) * 10.0 - 15.0
+        b.settled.append(b._row("T1", p, 10.0, 88.0, ex, 15.0, pnl,
+                                "WON" if pnl > 0 else "LOST", 0.9))
+    assert abs(b.settled[-1]["run"]
+               - sum(r["pnl"] for r in b.settled)) < 0.011
+
+
+def test_pre_ledger_rows_are_migrated_not_left_as_holes():
+    """A ledger with holes is not a ledger. A settlement IS an exit at
+    100c (won) or 0c (lost), so the conversion is exact, not a guess."""
+    old = [
+        {"tk": "A", "label": "gold", "lane": "endgame", "side": "yes",
+         "n": 40.0, "px": 50.75, "model_p": 0.78, "won": True,
+         "pnl": 19.52, "fee": 0.18, "ts": "2026-08-26T10:31:18"},
+        {"tk": "B", "label": "gold", "lane": "exit", "side": "yes",
+         "n": 10.0, "px": 71.0, "exit_px": 95.5, "won": True,
+         "pnl": 2.40, "fee": 0.05, "ts": "2026-08-26T12:44:57"},
+    ]
+    got = T._migrate_rows(old)
+    a, b = got
+    assert a["how"] == "WON" and a["exit"] == 100.0
+    assert a["cost"] == round(50.75 * 40 / 100.0, 2)
+    assert abs(a["gross"] - (100 - 50.75) * 40 / 100.0) < 0.011
+    assert b["how"] == "SOLD" and b["exit"] == 95.5
+    assert b["run"] == round(a["pnl"] + b["pnl"], 2)
+
+
+def test_migration_is_idempotent():
+    rows = [{"tk": "A", "label": "btc", "n": 5.0, "px": 88.0, "won": True,
+             "pnl": 0.5, "fee": 0.1}]
+    once = T._migrate_rows(rows)
+    twice = T._migrate_rows(once)
+    assert once[0]["gross"] == twice[0]["gross"]
+    assert once[0]["run"] == twice[0]["run"]
