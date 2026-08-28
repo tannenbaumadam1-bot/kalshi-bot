@@ -1089,7 +1089,17 @@ def test_the_model_can_veto_the_favourite():
 
 def test_the_favourite_lane_only_fires_near_the_close():
     b = T.TickBook()
-    out = b.decide(_mkt(yes_bid=87.0, yes_ask=88.0), 100.4, 0.05, 600)
+    out = b.decide(_mkt(yes_bid=87.0, yes_ask=88.0), 100.4, 0.05, 800)
+    assert out is None or out[0] != "fav"
+
+
+def test_widening_the_price_band_was_rejected_the_floor_is_a_cliff():
+    """78-95c turns NEGATIVE (-2.6c) and 75-92c across the whole window
+    is -5.4c. The 80c floor is a measured cliff, not a preference."""
+    assert T.FAV_MIN_C == 80.0
+    b = T.TickBook()
+    # a 78c favourite must NOT qualify
+    out = b.decide(_mkt(yes_bid=77.0, yes_ask=78.0), 100.3, 0.05, 60)
     assert out is None or out[0] != "fav"
 
 

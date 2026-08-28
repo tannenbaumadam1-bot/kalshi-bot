@@ -273,7 +273,15 @@ STOP_P = float(os.environ.get("TICK_STOP_P", "0.45"))
 # confirm or kill it.
 FAV_MIN_C = float(os.environ.get("TICK_FAV_MIN", "80"))
 FAV_MAX_C = float(os.environ.get("TICK_FAV_MAX", "95"))
-FAV_AT_S = int(os.environ.get("TICK_FAV_AT", "90"))    # final 90 seconds
+# 8/28 RETUNE, on window-level samples. Widening the CLOCK adds volume
+# without costing expectancy - 90s gave 35 trades at +4.7c, 120s gave 40
+# at +7.7c, 180s gives 50 at +5.8c. Chosen for the TRADE COUNT, not the
+# backtest EV: at n=35-50 those EV differences are noise, and the thing
+# we actually need right now is a bigger honest sample.
+# Widening the PRICE BAND does the opposite and was rejected: 78-95c
+# turns NEGATIVE (-2.6c) and 75-92c over the whole window is -5.4c. The
+# 80c floor is a genuine cliff, not a preference.
+FAV_AT_S = int(os.environ.get("TICK_FAV_AT", "180"))
 FAV_VETO_P = float(os.environ.get("TICK_FAV_VETO", "0.60"))  # model veto
 MAX_TRIPS = int(os.environ.get("TICK_MAX_TRIPS", "6"))   # per window
 # TRUE ARB: if YES ask + NO ask < 100 minus both fees, buying both sides
