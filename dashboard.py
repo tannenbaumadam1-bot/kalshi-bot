@@ -393,6 +393,7 @@ def build_data():
         out["running"] = True
         if not out.get("updated"):
             out["updated"] = out["dlive"].get("updated", "")
+    out["dash"] = {"build": _DASH_BUILD, "tick_host": _TICK_HOST}
     # poly reward-farming book RETIRED 7/23 (ledger archived, not deleted)
     # drift1 paper book retired 7/25; driftw2-fin retired 7/30
     # driftc = LANE 2 AUDITION (7/31): crypto drift paper book, gate 100
@@ -1289,6 +1290,26 @@ class H(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
 
+def _dash_build():
+    """Which commit is the DASHBOARD process actually running?
+
+    Added 8/28 after two deploys appeared not to land and I could only
+    guess whether the code had arrived or the restart had. Publishing
+    the running build turns that guess into a fact - the same reason
+    drift_live has published its build since 8/21."""
+    try:
+        import subprocess
+        return subprocess.check_output(
+            ["git", "rev-parse", "--short", "HEAD"],
+            stderr=subprocess.DEVNULL, timeout=5).decode().strip()
+    except Exception:
+        return "?"
+
+
+_DASH_BUILD = _dash_build()
+_TICK_HOST = "no"
+
+
 def _start_tick_fallback():
     """Run the tick worker HERE if nobody else is.
 
@@ -1307,6 +1328,8 @@ def _start_tick_fallback():
     try:
         import tick_paper
         t = tick_paper.start_thread("dashboard")
+        global _TICK_HOST
+        _TICK_HOST = "yes" if t is not None else "lease-held-elsewhere"
         print("tick worker: started here"
               if t is not None else
               "tick worker: another process holds the lease")
