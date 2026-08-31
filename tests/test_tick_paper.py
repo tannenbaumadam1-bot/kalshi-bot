@@ -283,7 +283,9 @@ def test_model_confidence_is_capped_before_any_decision():
     """Raw model said 99.9%+ on the first live gold window while the
     market said 87%. Capped so a wrong vol can't mint fake certainty."""
     b = T.TickBook()
-    out = b.decide(_mkt(yes_bid=60.0, yes_ask=64.0), 200.0, 0.001, 30)
+    # (8/31: prices moved into the new 88c floor - what is under test
+    # here is the CAP, not the band)
+    out = b.decide(_mkt(yes_bid=89.0, yes_ask=91.0), 200.0, 0.001, 30)
     assert out is not None
     _lane, _p_yes, _px, _side, p_side = out
     assert p_side <= T.CONF_CAP
@@ -345,11 +347,17 @@ def test_the_no_side_is_evaluated_on_its_own_book():
     """A NO at 12 is only a YES at 88 if you cross the spread. The old
     code could only ever pick the side the model favoured."""
     b = T.TickBook()
-    # model favours YES (~98%) but YES is offered at 99 (no edge left),
-    # while the mirrored NO price still carries edge
-    out = b.decide(_mkt(yes_bid=30.0, yes_ask=34.0), 99.0, 0.02, 60)
+    # 8/31: THIS IS NOW THE SHORT-THE-LONGSHOT PATH, and the reason it
+    # never fired across 4,145 trades. The market prices YES at 5-9c;
+    # spot is far below the line so our model says even less. The trade
+    # is the NO side at ~92c. Every one of the last 200 ledger rows was
+    # a buy on the favourite - the book has never once sold a longshot,
+    # NOT because the lane was missing but because the uncalibrated
+    # arithmetic could not clear the bar. See cal().
+    out = b.decide(_mkt(yes_bid=5.0, yes_ask=9.0), 97.0, 0.02, 60)
     assert out is not None
     assert out[3] == "no"
+    assert out[2] >= T.MIN_PX_C          # expressed as a HIGH-priced buy
 
 
 def test_the_better_edge_wins_not_the_favoured_side():
@@ -603,6 +611,11 @@ def test_one_unavailable_feed_does_not_blind_the_others():
     8/26 WTI was absent from the plan and gold+silver - both perfectly
     available - returned nothing for hours."""
     b = T.TickBook()
+    # 8/31: the metals are OFF by default (metals gross -$30.17 against
+    # crypto +$7.07), so this bug-class test supplies its own pair.
+    old_series = T.SERIES
+    T.SERIES = {"KXGOLD15M": ("goldid", "gold"),
+                "KXWTI15M": ("wtiid", "wti")}
     wti = T.SERIES["KXWTI15M"][0]
     b._dead_ids.add(wti)
     seen = {}
@@ -612,9 +625,12 @@ def test_one_unavailable_feed_does_not_blind_the_others():
         return {"parsed": []}
 
     T._get = fake_get
-    b.fetch_proxy()
-    assert wti not in seen["url"]
-    assert T.SERIES["KXGOLD15M"][0] in seen["url"]
+    try:
+        b.fetch_proxy()
+        assert wti not in seen["url"]
+        assert T.SERIES["KXGOLD15M"][0] in seen["url"]
+    finally:
+        T.SERIES = old_series
 
 
 # ---------- the +$304 fabrication (8/26) ----------
@@ -844,7 +860,11 @@ def _mk_window(tk="S1", close_in=60):
 
 
 def _ready(b):
-    b.ticks["KXGOLD15M"] = [(1000 + i * 20, 100.0 + (i % 4) * 0.05)
+    # 8/31: was (i % 4) - only FOUR distinct prices, which is precisely
+    # the quantised-feed shape MIN_DISTINCT_N now refuses (it is what
+    # BNB looked like, and what cost -$31.80). The gate caught this
+    # fixture the moment it shipped, which is the gate working.
+    b.ticks["KXGOLD15M"] = [(1000 + i * 20, 100.0 + (i % 9) * 0.05)
                             for i in range(40)]
     b.basis["KXGOLD15M"] = [0.0, 0.0, 0.0]
 
@@ -855,18 +875,24 @@ def test_the_model_is_scored_on_every_window_not_only_traded_ones():
     b = T.TickBook()
     _ready(b)
     b.observe_shadow([_mk_window()], {"KXGOLD15M": (100.5, 1.0)})
-    assert "S1" in b.shadow
-    assert 0.0 <= b.shadow["S1"]["p"] <= 1.0
+    assert "S1@120" in b.shadow          # keyed by window AND horizon
+    assert b.shadow["S1@120"]["tk"] == "S1"
+    assert 0.0 <= b.shadow["S1@120"]["p"] <= 1.0
 
 
-def test_a_window_is_observed_once_at_a_fixed_point():
+def test_a_window_is_observed_once_per_horizon_at_a_fixed_point():
+    """8/31: three horizons (600/300/120s) instead of one, because
+    CAL_B was fitted only at T-2min and applying it at the early lane's
+    300-600s is an EXTRAPOLATION. Each horizon is still recorded once
+    and never overwritten - that is what makes it a fixed point."""
     b = T.TickBook()
     _ready(b)
     w = _mk_window()
     b.observe_shadow([w], {"KXGOLD15M": (100.5, 1.0)})
-    p1 = b.shadow["S1"]["p"]
+    p1 = b.shadow["S1@120"]["p"]
     b.observe_shadow([w], {"KXGOLD15M": (200.0, 1.0)})
-    assert b.shadow["S1"]["p"] == p1        # not overwritten later
+    assert b.shadow["S1@120"]["p"] == p1    # not overwritten later
+    assert T.SHADOW_ATS == [600, 300, 120]
 
 
 def test_windows_are_not_observed_too_early():
@@ -884,7 +910,7 @@ def test_momentum_is_recorded_as_a_feature_not_traded_on():
                             for i in range(40)]
     b.basis["KXGOLD15M"] = [0.0, 0.0, 0.0]
     b.observe_shadow([_mk_window()], {"KXGOLD15M": (103.0, 1.0)})
-    assert b.shadow["S1"]["mom"] > 0        # recorded
+    assert b.shadow["S1@120"]["mom"] > 0    # recorded
     src = open(os.path.join(os.path.dirname(T.__file__),
                             "tick_paper.py")).read()
     dec = src.split("def decide(")[1].split("def check_arb")[0]
@@ -1093,22 +1119,34 @@ def test_the_favourite_lane_only_fires_near_the_close():
     assert out is None or out[0] != "fav"
 
 
-def test_the_band_was_retuned_out_of_sample():
-    """The original 80-95c was fitted on 4 markets and scored -0.5c on
-    seven markets that had played no part in choosing it. 70-88c is
-    positive on all three splits. Cheap favourites carry a far wider
-    break-even cushion: at 75c you must win 75% and you win ~88%; at 92c
-    you must win 92% and you win ~95%."""
-    assert T.FAV_MIN_C == 70.0 and T.FAV_MAX_C == 88.0
+def test_the_cheap_favourite_is_refused_on_live_evidence():
+    """8/31 OVERRULES THE 8/28 RETUNE, and the reason matters more than
+    the numbers.
+
+    That retune (70-88c) was fitted on 35-50 window-level
+    HOLD-TO-SETTLEMENT samples. WE DO NOT HOLD TO SETTLEMENT - 160 of
+    the last 200 rows are round trips and 22 are stopped or dead. A
+    backtest measuring a strategy we do not run cannot referee one we
+    do, and 200 live settles beat 50 backtested windows.
+
+    On the live ledger the blow-up rate is monotone in entry price:
+        <80c  28.6%   -$54.69          88-91c  8.7%   -$13.48
+        80-85c 16.3%   -$9.45          91c+    1.8%   +$13.01
+    A 16x difference, and the mechanism is arithmetic: a 75c position
+    has only 30c of room before the stop, a 91c one has 47c."""
+    assert T.FAV_MIN_C == 88.0 and T.FAV_MAX_C == 97.0
     assert T.FAV_AT_S == 240
+    # the 75c favourite the old band existed to buy is now REFUSED,
+    # on every path - not just the fav lane
     b = T.TickBook()
-    # a 75c favourite must now qualify
     out = b.decide(_mkt(yes_bid=74.0, yes_ask=75.0), 100.25, 0.04, 120)
-    assert out is not None and out[0] == "fav"
-    # and a 95c one must not - the cushion there is thinner than the fee
+    assert out is None
+    # ...and a 91c one qualifies
     b2 = T.TickBook()
-    out2 = b2.decide(_mkt(yes_bid=94.0, yes_ask=95.0), 101.0, 0.02, 120)
-    assert out2 is None or out2[0] != "fav"
+    out2 = b2.decide(_mkt(yes_bid=90.0, yes_ask=91.0), 100.6, 0.04, 120)
+    assert out2 is not None and T.FAV_MIN_C <= out2[2] <= T.FAV_MAX_C
+    # the floor is global, so no lane can sneak in below it
+    assert T.MIN_PX_C >= T.FAV_MIN_C
 
 
 def test_the_favourite_lane_pays_the_taker_fee_and_fills_by_crossing():
@@ -1269,7 +1307,14 @@ def test_more_markets_not_a_looser_bar():
     """The edge fires on ~1 window in 4-8, so more trades must come from
     MORE INDEPENDENT MARKETS at the same selectivity. Loosening the bar
     is how the scalping backtest lost money in all 64 configurations."""
-    assert len(T.CRYPTO) >= 9
+    # 8/31: 9 -> 7. BNB and NEAR are out, and this is NOT a retreat
+    # from "more markets": it is the same selectivity applied to the
+    # INSTRUMENT list. BNB printed 4 distinct proxy values in 8 samples
+    # (5x coarser than any other pair), so the model read a flat feed as
+    # certainty and sized into it: -$31.80, the worst market in the
+    # book, half the whole deficit. NEAR was second at -$1.00/turn.
+    assert len(T.CRYPTO) >= 7
+    assert "KXBNB15M" not in T.CRYPTO and "KXNEAR15M" not in T.CRYPTO
     for st, (pair, lab) in T.CRYPTO.items():
         assert pair.endswith("-USD") and lab.isalpha()
     # the bar may only move on OUT-OF-SAMPLE evidence, and the model
@@ -1312,11 +1357,16 @@ def test_the_two_lanes_do_not_overlap_in_time_or_price():
     work. Different regimes - a single window may produce one of each,
     but never two from one observation."""
     b = T.TickBook()
-    # cheap favourite is refused early...
+    # 8/31: the cheap favourite is now refused in BOTH windows - the
+    # price floor is global. What still separates the lanes is the
+    # CLOCK, and that separation must hold.
     assert b.decide(_mkt(yes_bid=74.0, yes_ask=75.0), 100.3, 0.04, 450) is None
-    # ...and taken late
-    late = b.decide(_mkt(yes_bid=74.0, yes_ask=75.0), 100.3, 0.04, 120)
-    assert late is not None and late[0] == "fav"
+    assert b.decide(_mkt(yes_bid=74.0, yes_ask=75.0), 100.3, 0.04, 120) is None
+    # a 92c favourite is EARLY at 450s and FAV at 120s - never both
+    early = b.decide(_mkt(yes_bid=91.0, yes_ask=92.0), 100.7, 0.04, 450)
+    late = b.decide(_mkt(yes_bid=91.0, yes_ask=92.0), 100.7, 0.04, 120)
+    assert early is not None and early[0] == "early"
+    assert late is not None and late[0] in ("fav", "endgame", "tail")
     assert T.FAV2_TO_S >= T.FAV_AT_S       # windows cannot overlap
 
 
@@ -1333,3 +1383,269 @@ def test_the_early_lane_crosses_the_spread_and_pays_taker():
     b.check_fills([], 0)
     assert b.pos["T1"]["n"] == T.SIZE
     assert b.pos["T1"]["fee_c"] == T.fee_c(90.0, T.SIZE, maker=False)
+
+
+# =====================================================================
+# THE 8/31 AUTOPSY SHIP (era tick3). Six changes, one commit, and every
+# one of them carries a test that states WHY - because the six went out
+# together and a single uninterpretable P&L is the mistake this project
+# has already made four times.
+# =====================================================================
+
+# ---------- 1. the price stop that did not exist ----------
+def test_the_price_stop_needs_no_model_no_proxy_and_no_sigma():
+    """THE DEFECT: the only stop in this book was `p_side < STOP_P`
+    inside check_exits, guarded by five silent `continue`s - no market,
+    no yes_bid, no proxy, sigma is None, proxy_dead. Nothing
+    distinguished "I cannot find an opportunity" from "I cannot protect
+    a position", so eight positions rode 75-87c to ZERO without the
+    stop ever forming an opinion: -$96.81 on 8 rows against a $65.66
+    book deficit.
+
+    So this fires with NO tape, NO basis and NO proxy at all."""
+    b = T.TickBook()
+    _pos(b, side="yes", px=88.0, n=10.0)
+    b.ticks.clear()                 # no tape -> sigma is None
+    b.basis.clear()                 # no basis
+    b.check_stops([_mkt(yes_bid=40.0, yes_ask=44.0)])
+    assert "T1" not in b.pos                      # flattened
+    assert b.stats.get("stop_px_n") == 1
+    row = b.settled[-1]
+    assert row["how"] == "STOPPED" and row["stop_px"] is True
+    assert row["exit"] == 40.0
+
+
+def test_the_price_stop_holds_a_position_that_is_still_healthy():
+    b = T.TickBook()
+    _pos(b, side="yes", px=88.0, n=10.0)
+    b.check_stops([_mkt(yes_bid=86.0, yes_ask=90.0)])
+    assert "T1" in b.pos
+    assert not b.stats.get("stop_px_n")
+
+
+def test_a_position_that_cannot_be_priced_rings_an_alarm():
+    """A stop that cannot see must never be silent. That is the whole
+    lesson of the 8/24 cancel-410 and the 8/27 blind book."""
+    b = T.TickBook()
+    _pos(b)
+    b.check_stops([])                        # market missing entirely
+    assert b.stats["stop_blind"] == 1
+    b.check_stops([_mkt(yes_bid=None)])      # market present, no bid
+    assert b.stats["stop_blind"] == 2
+    assert "T1" in b.pos                     # and nothing was booked
+
+
+def test_protection_runs_before_opportunity():
+    src = open(os.path.join(os.path.dirname(T.__file__),
+                            "tick_paper.py")).read()
+    step = src.split("def step(")[1]
+    assert step.index("self.check_stops(") < step.index("self.check_exits(")
+
+
+def test_the_worst_price_seen_is_recorded_for_every_position():
+    """The only honest way to measure stop slippage next time, and to
+    answer "would 50c or 40c have been better" from evidence."""
+    b = T.TickBook()
+    _pos(b, side="yes", px=88.0, n=10.0)
+    b.check_stops([_mkt(yes_bid=70.0, yes_ask=74.0)])
+    b.check_stops([_mkt(yes_bid=60.0, yes_ask=64.0)])
+    b.check_stops([_mkt(yes_bid=80.0, yes_ask=84.0)])
+    assert b.pos["T1"]["low_px"] == 60.0
+
+
+def test_the_price_stop_can_be_switched_off_without_a_deploy():
+    b = T.TickBook()
+    _pos(b)
+    old = T.STOP_PX_C
+    T.STOP_PX_C = 0.0
+    try:
+        b.check_stops([_mkt(yes_bid=2.0, yes_ask=6.0)])
+        assert "T1" in b.pos
+    finally:
+        T.STOP_PX_C = old
+
+
+# ---------- 2. the calibration ----------
+def test_cal_squares_the_odds():
+    """true_logit = 0.00 + 1.95 x model_logit, fitted by weighted MLE on
+    2,825 graded shadow observations. Intercept ZERO - no directional
+    bias. Slope TWO - exactly half as confident as it should be."""
+    assert T.CAL_B == 1.95
+    assert abs(T.cal(0.5) - 0.5) < 1e-9          # 50% is a fixed point
+    # antisymmetric about 50%: cal(1-p) == 1-cal(p)
+    for p in (0.05, 0.25, 0.45, 0.75):
+        assert abs(T.cal(1 - p) - (1 - T.cal(p))) < 1e-9
+    # and it STRETCHES: confident claims get more confident
+    assert T.cal(0.75) > 0.88
+    assert T.cal(0.25) < 0.12
+
+
+def test_cal_b_of_one_is_the_exact_identity():
+    """The riskiest change in the commit must also be the most cleanly
+    reversible: one env var and a restart, no deploy, no code change."""
+    old = T.CAL_B
+    T.CAL_B = 1.0
+    try:
+        for p in (0.01, 0.25, 0.5, 0.75, 0.99):
+            assert T.cal(p) == p
+    finally:
+        T.CAL_B = old
+
+
+def test_calibration_is_applied_where_we_act():
+    src = open(os.path.join(os.path.dirname(T.__file__),
+                            "tick_paper.py")).read()
+    dec = src.split("def decide(")[1].split("def check_arb(")[0]
+    ex = src.split("def check_exits(")[1].split("def observe_shadow(")[0]
+    assert "cal(p_raw)" in dec
+    assert "cal(p_raw)" in ex
+
+
+def test_calibration_NEVER_touches_the_shadow_observer():
+    """DO NOT DELETE THIS TEST.
+
+    shadow_calib is what CAL_B is re-fitted from. If cal() ever leaks
+    into observe_shadow, next week's fit sees already-corrected numbers,
+    returns b ~ 1.0, and we conclude the correction was never needed -
+    silently un-shipping the single most valuable line in the project,
+    with no failing test and no visible symptom.
+
+    cal() is applied where we ACT. Never where we OBSERVE."""
+    src = open(os.path.join(os.path.dirname(T.__file__),
+                            "tick_paper.py")).read()
+    obs = src.split("def observe_shadow(")[1].split("def grade_shadow(")[0]
+    # strip comments and the docstring - the warning ABOUT cal() lives
+    # in there, and the point is that no CODE calls it
+    code = "\n".join(ln.split("#")[0] for ln in obs.splitlines()
+                     if not ln.strip().startswith("#"))
+    code = code.replace('"""', "\x00").split("\x00")
+    code = code[0] + "".join(code[2:]) if len(code) > 2 else code[0]
+    assert "cal(" not in code
+    # and behaviourally: the number stored is the RAW model output
+    b = T.TickBook()
+    _ready(b)
+    w = _mk_window()
+    b.observe_shadow([w], {"KXGOLD15M": (100.5, 1.0)})
+    stored = b.shadow["S1@120"]["p"]
+    raw = T.model_p(100.5, 100.0, b.sigma_s("KXGOLD15M"),
+                    w["close_ts"] - time.time())
+    assert abs(stored - min(T.CONF_CAP, max(1 - T.CONF_CAP, raw))) < 0.02
+    assert abs(stored - T.cal(raw)) > 1e-6 or abs(raw - 0.5) < 0.01
+
+
+def test_the_fit_recovers_the_slope_and_proves_it_helps():
+    """The self-monitor. CAL_B is a constant in a file; b_fit is what
+    the tape says it should be right now. This is the ACTUAL 8/31
+    shadow table - 2,825 graded observations."""
+    measured = {"0": [546, 4], "10": [254, 8], "20": [177, 16],
+                "30": [218, 42], "40": [176, 74], "50": [215, 127],
+                "60": [219, 175], "70": [210, 199], "80": [238, 227],
+                "90": [572, 567]}
+    fit = T.TickBook.fit_cal_b(measured)
+    assert fit["n"] == 2825
+    assert 1.8 <= fit["b"] <= 2.1                 # recovers ~1.95
+    # and the claim that calibration helps stays falsifiable
+    assert fit["brier_cal"] < fit["brier_raw"]
+    assert fit["brier_cal"] < 0.0827              # beats the MARKET's
+    assert T.TickBook.fit_cal_b({"90": [3, 3]})["b"] is None   # too thin
+
+
+# ---------- 3. the price floor, on every path ----------
+def test_the_floor_applies_to_every_lane_not_just_the_favourite():
+    """Caught by a test the moment cal() went in: calibration makes the
+    endgame lane fire far more often, and it was still free to buy at
+    74c - the exact band the autopsy convicted (28.6% blow-up rate)."""
+    assert T.MIN_PX_C == 88
+    b = T.TickBook()
+    for t_left in (60, 120, 450, 800):
+        out = b.decide(_mkt(yes_bid=73.0, yes_ask=75.0), 100.4, 0.02, t_left)
+        assert out is None or out[2] >= T.MIN_PX_C
+
+
+# ---------- 4. the fee term could not see its own curve ----------
+def test_the_fee_term_varies_with_price():
+    """fee_c(px, 1, ...) ceils to a whole penny, so the edge test used a
+    FLAT ~2c round trip across the entire band and could not see the
+    curve the strategy is built on. Kalshi still charges the ceil - that
+    is booking. Deciding needs the exact number."""
+    seq = [T.fee_exact_c(px, 1, maker=False) for px in (70, 80, 88, 94, 97)]
+    assert seq == sorted(seq, reverse=True)       # strictly cheaper
+    assert seq[0] > 2.5 * seq[-1]                 # and by a lot
+    # the ceil version is flat - which was the bug
+    flat = [T.fee_c(px, 1, maker=True) for px in (70, 80, 88, 94)]
+    assert len(set(flat)) == 1
+    # booking still uses the ceil, because that is what is charged
+    src = open(os.path.join(os.path.dirname(T.__file__),
+                            "tick_paper.py")).read()
+    fill = src.split("def _fill(")[1].split("def check_stops(")[0]
+    assert "fee_exact_c" not in fill
+
+
+# ---------- 5. feed granularity ----------
+def test_a_quantised_feed_is_declared_dead_even_if_it_spans_a_range():
+    """BNB passed the liveness gate at 2.9bp while printing only FOUR
+    distinct values in 8 samples - a feed ~5x coarser than the market it
+    predicts. The model read the flat stretches as certainty and sized
+    into them: -$31.80, the worst market in the book.
+
+    THE RULE: an instrument whose proxy prints fewer distinct values
+    than the market it predicts will always look certain and always be
+    wrong."""
+    b = T.TickBook()
+    # wide range, but only 3 distinct prices
+    b.ticks["KXBNB15M"] = [(1000 + i * 10, 100.0 + (i % 3) * 0.5)
+                           for i in range(30)]
+    assert b.liveness_bp("KXBNB15M") > T.MIN_LIVE_BP    # passes liveness
+    assert b.distinct_n("KXBNB15M") == 3
+    assert b.proxy_dead("KXBNB15M") is True             # still refused
+    # a healthy feed is not
+    b.ticks["KXETH15M"] = [(1000 + i * 10, 100.0 + i * 0.05)
+                           for i in range(30)]
+    assert b.proxy_dead("KXETH15M") is False
+
+
+def test_the_losing_instruments_are_off_by_default():
+    """Metals gross -$30.17 against crypto +$7.07, and WTI never placed
+    a single trade in 117 hours. We were paying for the losing half."""
+    assert T.SERIES == {}                     # metals off
+    assert "KXBNB15M" not in T.CRYPTO
+    assert "KXNEAR15M" not in T.CRYPTO
+    assert len(T.CRYPTO) == 7
+
+
+# ---------- 6. every change is measurable and reversible ----------
+def test_every_shipped_change_carries_its_own_counter():
+    """Six changes in one commit is only acceptable if each one reports
+    separately. Otherwise a single commit is a single uninterpretable
+    number - which is how this project lost four arguments with itself."""
+    src = open(os.path.join(os.path.dirname(T.__file__),
+                            "tick_paper.py")).read()
+    for counter in ("stop_blind", "stop_px_n", "band_lo", "cal_b",
+                    "cal_shift_c", "distinct_dead"):
+        assert f'"{counter}"' in src
+
+
+def test_every_shipped_change_has_an_env_switch():
+    """All six must be reversible without a deploy: one systemd line and
+    a restart. TICK_CAL_B=1.0 is the exact old behaviour."""
+    src = open(os.path.join(os.path.dirname(T.__file__),
+                            "tick_paper.py")).read()
+    for env in ("TICK_STOP_PX", "TICK_CAL_B", "TICK_FAV_MIN",
+                "TICK_FAV_MAX", "TICK_EDGE", "TICK_MIN_PX",
+                "TICK_MIN_DISTINCT", "TICK_CRYPTO", "TICK_SERIES",
+                "TICK_SHADOW_ATS"):
+        assert env in src
+
+
+def test_the_era_bumped_because_six_constraints_changed():
+    """A ledger cannot be compared across a constraint change - the
+    project rule, sixth application."""
+    assert T.ERA == "tick3"
+
+
+def test_the_risk_ceiling_was_not_touched():
+    """Standing rule: no risk-limit change without Adam saying so. Six
+    strategy changes shipped; not one of these moved."""
+    assert T.BOOK_CAPITAL_C == 100000
+    assert T.SIZE == 10
+    assert T.MAX_POS == 50

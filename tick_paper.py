@@ -89,7 +89,7 @@ KALSHI = os.environ.get("TICK_KALSHI",
                         "https://api.elections.kalshi.com/trade-api/v2")
 HERMES = os.environ.get("TICK_HERMES", "https://hermes.pyth.network")
 STATE = os.environ.get("TICK_STATE", os.path.join("logs", "tick_state.json"))
-ERA = os.environ.get("TICK_ERA", "tick2")
+ERA = os.environ.get("TICK_ERA", "tick3")
 
 # --- the surface -------------------------------------------------------
 # series -> (public Pyth proxy feed id, human label). Only series whose
@@ -144,16 +144,34 @@ CRYPTO = {
     "KXBNB15M": ("BNB-USD", "bnb"),
     "KXHYPE15M": ("HYPE-USD", "hype"),
 }
+# 8/31 AUTOPSY - BNB and NEAR are OFF by default.
+# BNB printed 4 distinct proxy values in 8 samples (range 0.029% against
+# 0.08-0.16% for every other pair): a feed quantised ~5x coarser than
+# the market it predicts. The model reads a flat feed as CERTAINTY,
+# sizes up, and then the real price gaps. It was the worst market in the
+# book at -$1.87/turn, -$31.80 total - half the entire deficit from one
+# instrument. NEAR was second at -$1.00/turn. MIN_DISTINCT_N below is
+# the general guard; this list is the immediate one.
+CRYPTO_DEFAULT = ("KXBTC15M,KXETH15M,KXSOL15M,KXXRP15M,"
+                  "KXDOGE15M,KXZEC15M,KXHYPE15M")
 CRYPTO = {k: v for k, v in CRYPTO.items()
-          if k in os.environ.get("TICK_CRYPTO", ",".join(CRYPTO))}
+          if k in os.environ.get("TICK_CRYPTO", CRYPTO_DEFAULT)}
 # settlement is the mean of the sixty one-second prints before the
 # boundary, so the model needs per-second resolution in that last minute
 AVG_WINDOW_S = int(os.environ.get("TICK_AVG_WINDOW", "60"))
 BURST_AT_S = int(os.environ.get("TICK_BURST_AT", "75"))    # sample fast
 COINBASE = os.environ.get("TICK_COINBASE", "https://api.coinbase.com")
 
+# 8/31 AUTOPSY - THE METALS ARE OFF BY DEFAULT.
+# Over 200 settled rows: metals gross -$30.17, crypto gross +$7.07.
+# Gold -$20.19, silver -$19.75, and WTI never placed a single trade in
+# 117 hours (0 basis samples, vol null). The metals settle on ONE print
+# at the bell rather than a 60-second average, so they have none of the
+# progressive lock-in that is the actual edge here - and they are the
+# half sitting behind a PAID feed whose trial expires. We were paying
+# for the losing half. Set TICK_SERIES=KXGOLD15M,... to bring them back.
 SERIES = {k: v for k, v in SERIES.items()
-          if k in os.environ.get("TICK_SERIES", ",".join(SERIES))}
+          if k in os.environ.get("TICK_SERIES", "")}
 
 TAKER_RATE = 0.07
 MAKER_RATE = float(os.environ.get("TICK_MAKER_RATE", "0.0175"))
@@ -190,9 +208,29 @@ MAX_POS = int(os.environ.get("TICK_MAX_POS", "50"))   # per market
 # the arithmetic refuses bad prices on its own merits instead of a
 # blanket ban. 15-97 keeps us off the 1-14c lottery tickets, where a
 # one-tick move is a 100% swing and our model has no resolution.
-MIN_PX_C = int(os.environ.get("TICK_MIN_PX", "15"))
+# 8/31: RAISED 15 -> 88, AND IT APPLIES TO EVERY ENTRY PATH.
+# Moving only the fav band would have left endgame/tail/edge lanes free
+# to buy at 74c - caught by a test the moment cal() went in, because
+# calibration makes those lanes fire far more often than they used to.
+# The two reasons to avoid cheap entries are both lane-independent: the
+# round-trip fee is 1.81c at 70c against 0.66c at 91c, and a 75c
+# position has only 30c of room before the stop while a 91c one has 47c
+# (blow-up rate 28.6% vs 1.8% over 200 live rows).
+#
+# THIS DOES NOT STOP US SHORTING LONGSHOTS - it is how we do it. We
+# never BUY a 20c ticket; we express that view by buying the OTHER side
+# at 80c+, which decide() already prices independently. And it costs no
+# learning: observe_shadow records every window at every price whether
+# we trade it or not, so the calibration table keeps filling across the
+# whole probability range for free.
+MIN_PX_C = int(os.environ.get("TICK_MIN_PX", "88"))
 MAX_PX_C = int(os.environ.get("TICK_MAX_PX", "97"))
-EDGE_C = float(os.environ.get("TICK_EDGE", "2"))      # NET of fees, cents
+# 8/31: raised 2 -> 4 in the same commit as cal(). Calibration adds
+# ~14.5c of apparent edge at model_p ~0.25 and ~0.75, so the SAME bar on
+# a sharper number would multiply trade count rather than quality. We
+# want the best of the newly-visible trades, not all of them. Re-tune
+# from the tape after 200 settles, never before.
+EDGE_C = float(os.environ.get("TICK_EDGE", "4"))      # NET of fees, cents
 ENDGAME_S = int(os.environ.get("TICK_ENDGAME_S", "900"))   # whole window
 ENDGAME_P = float(os.environ.get("TICK_ENDGAME_P", "0.75"))
 TAIL_P = float(os.environ.get("TICK_TAIL_P", "0.90"))      # tail lane bar
@@ -222,6 +260,12 @@ SHORT_N = int(os.environ.get("TICK_SHORT_N", "20"))
 # MIN_LIVE_BP of its own price across the tape is declared dead and
 # quoted by nobody until its feed is fixed.
 MIN_LIVE_BP = float(os.environ.get("TICK_MIN_LIVE_BP", "1.0"))   # bp
+# FEED GRANULARITY (8/31). Liveness measured as RANGE is not enough:
+# BNB's proxy passed this gate at 2.9bp while printing only 4 distinct
+# values in 8 samples. Range and RESOLUTION are different failures.
+# THE RULE: an instrument whose proxy prints fewer distinct values than
+# the market it predicts will always look certain and always be wrong.
+MIN_DISTINCT_N = int(os.environ.get("TICK_MIN_DISTINCT", "6"))
 LIVE_MIN_N = int(os.environ.get("TICK_LIVE_MIN_N", "15"))
 # EXIT LANE (Adam 8/25: "we can trade in and out of it as it moves
 # towards settlement"). The live weather book's ledger is unambiguous on
@@ -239,6 +283,24 @@ EXIT_MIN_HOLD_S = int(os.environ.get("TICK_EXIT_MIN_HOLD", "5"))
 # evaporated. Cutting there is what frees collateral to be redeployed
 # inside the same window.
 STOP_P = float(os.environ.get("TICK_STOP_P", "0.45"))
+# ---------------------------------------------------------------------
+# THE PRICE STOP (8/31 autopsy). READ THIS BEFORE CHANGING check_stops.
+#
+# STOP_P above is a threshold on THE MODEL'S PROBABILITY, and it lives
+# inside check_exits, which is guarded by five separate silent
+# `continue`s: no market, no yes_bid, no proxy, sigma is None,
+# proxy_dead. Any one of them skips the cycle. NOTHING IN THIS BOOK
+# DISTINGUISHED "I cannot find a new opportunity" FROM "I cannot protect
+# an open position" - so eight positions rode from 75-87c to ZERO
+# without the stop ever having an opinion. -$96.81 on 8 rows.
+#
+# That is the same failure class as the 8/24 cancel-410 and the 8/27
+# blind book: an instrument that fails silently. The fix is not a faster
+# model stop. It is a PRICE stop that depends on the one input which
+# cannot go missing - what the book will pay us right now - and which is
+# guarded by nothing else. Measured worth on the 200-row ledger: $68.50,
+# against a book deficit of $65.66.
+STOP_PX_C = float(os.environ.get("TICK_STOP_PX", "45"))
 # ---------------------------------------------------------------------
 # THE FAVOURITE LANE (8/28) - the trade Adam was making by hand, which
 # this bot could not find because it was asking the wrong question.
@@ -295,8 +357,24 @@ STOP_P = float(os.environ.get("TICK_STOP_P", "0.45"))
 # cushion. The hit rate rises with price, but nowhere near fast enough
 # to keep up with what you are risking. The cheap favourite is the
 # better trade, which is the exact opposite of where I first looked.
-FAV_MIN_C = float(os.environ.get("TICK_FAV_MIN", "70"))
-FAV_MAX_C = float(os.environ.get("TICK_FAV_MAX", "88"))
+# 8/31 AUTOPSY OVERRULES THE 8/28 RETUNE ABOVE, and the reason matters
+# more than the numbers. That retune was fitted on 35-50 window-level
+# HOLD-TO-SETTLEMENT samples. WE DO NOT HOLD TO SETTLEMENT - 160 of the
+# last 200 rows are round trips and 22 are stopped or dead. A backtest
+# measuring a strategy we do not run cannot referee one we do.
+#
+# On 200 LIVE settles the bad-exit rate is monotone in entry price:
+#     <80c   28.6% blow up   -$54.69
+#     80-85c 16.3%           -$9.45
+#     85-88c  7.4%           -$1.05
+#     88-91c  8.7%          -$13.48
+#     91c+    1.8%          +$13.01
+# A 16x difference, and the mechanism is arithmetic rather than luck: a
+# 75c position only has to fall 30c to reach the stop, a 91c one has to
+# fall 47c. The cheap favourite is not cheap, it is closer to the cliff.
+# The fee agrees - 2.94c round trip at 70c against 0.79c at 94c.
+FAV_MIN_C = float(os.environ.get("TICK_FAV_MIN", "88"))
+FAV_MAX_C = float(os.environ.get("TICK_FAV_MAX", "97"))
 # 8/28 RETUNE, on window-level samples. Widening the CLOCK adds volume
 # without costing expectancy - 90s gave 35 trades at +4.7c, 120s gave 40
 # at +7.7c, 180s gives 50 at +5.8c. Chosen for the TRADE COUNT, not the
@@ -424,6 +502,17 @@ PAIR_L = float(os.environ.get("TICK_PAIR_L", "45"))
 # This is the number that decides whether the model has any edge at all,
 # and therefore whether this lane is ever worth paying for data.
 SHADOW_AT_S = int(os.environ.get("TICK_SHADOW_AT", "120"))  # T-minus 2 min
+# 8/31: ONE observation per window, at T-2min, meant CAL_B (1.95) is
+# fitted only at that horizon. That is exactly where the fav lane
+# trades, so the fit is best-validated where it matters most - but
+# applying it at the early lane's 300-600s is an EXTRAPOLATION, and
+# saying so is the difference between a model and a lucky constant.
+# Three horizons, graded into their own tables, so the next re-fit can
+# answer "is b the same late and early?" from evidence. If b is ~1.0 at
+# 120s and ~2.5 at 600s, that re-times the entire strategy.
+SHADOW_ATS = sorted({int(x) for x in os.environ.get(
+    "TICK_SHADOW_ATS", "600,300,120").split(",") if x.strip()},
+    reverse=True)
 CLOCK_GOAL = int(os.environ.get("TICK_CLOCK", "200"))       # settle gate
 UA = {"User-Agent": "kalshibot-tick/1.0"}
 # Pyth closed public Hermes access (auth required from 2026-07-31); every
@@ -603,8 +692,81 @@ def fee_c(px_c, n, maker=True):
     return math.ceil(round(rate * n * p * (1.0 - p) * 100.0, 6))
 
 
+def fee_exact_c(px_c, n, maker=True):
+    """The same fee WITHOUT the per-order ceil, for DECIDING only.
+
+    Kalshi charges the ceil, so fee_c() stays exactly as it is for
+    booking. But the edge test called fee_c(px, 1, ...) - one contract -
+    and ceil() rounds every price in the band up to the same 1c. The
+    result was a flat ~2c round-trip assumption that DOES NOT VARY WITH
+    PRICE, so the edge test could not see the fee curve that the entire
+    strategy is built on: 2.94c round trip at 70c against 0.79c at 94c.
+    The comment at fee_c has described that curve since day one; the
+    arithmetic was never actually applying it."""
+    p = max(0.0, min(1.0, px_c / 100.0))
+    rate = MAKER_RATE if maker else TAKER_RATE
+    return rate * float(n) * p * (1.0 - p) * 100.0
+
+
 def _norm_cdf(x):
     return 0.5 * (1.0 + math.erf(x / math.sqrt(2.0)))
+
+
+# ---------------------------------------------------------------------
+# THE CALIBRATION (8/31). The single highest-value line in this project.
+#
+# The shadow table looked for a week like proof the model was worthless:
+# Brier 0.1256 against the market's 0.0827, optimal blend weight 0.05.
+# Read as "the market is efficient", which is how 118,010 `no_edge`
+# refusals got explained away.
+#
+# But the residuals were not noise. They were monotone and antisymmetric
+# about 50% - the signature of a broken LINK FUNCTION, not an absent
+# signal. Weighted MLE over all 2,825 graded observations:
+#
+#       true_logit  =  0.00  +  1.95 x model_logit
+#
+# Intercept ZERO: the model has no directional bias at all. Slope TWO:
+# it is exactly half as confident as it should be in log-odds space.
+#
+#       true_odds = model_odds ** 1.95
+#
+# Brier on those same rows: 0.0877 raw -> 0.0769 calibrated, against the
+# market's 0.0827. CALIBRATED, OUR MODEL BEATS THE MARKET PRICE.
+#
+# It also opens the half of the surface we have never touched. Every one
+# of the last 200 trades is a BUY at 70-97c; the book has never sold a
+# longshot. decide() already prices both sides - it just never saw the
+# trade, because raw arithmetic said no:
+#     model YES 25%  ->  NO side 75% priced 80c  =  -5c, refused
+#     calibrated     ->  NO side 89.5%           = +9.5c, taken
+#
+# CAL_B = 1.0 is the exact identity function, i.e. the old behaviour.
+# That makes the riskiest change in this commit the most cleanly
+# reversible: one env var and a restart, no deploy.
+CAL_B = float(os.environ.get("TICK_CAL_B", "1.95"))
+
+
+def cal(p):
+    """Map a raw model probability onto the one the tape actually paid.
+
+    ONE RULE, AND IT IS NOT NEGOTIABLE: cal() is applied where we ACT,
+    never where we OBSERVE. observe_shadow() must keep recording the RAW
+    model_p, because shadow_calib is what CAL_B is re-fitted from. Let
+    calibration leak into the observer and next week's fit sees
+    already-corrected numbers, returns b ~ 1.0, and we conclude the
+    correction was never needed - silently un-shipping this function.
+    There is a test for exactly that; do not delete it."""
+    if CAL_B == 1.0:
+        return p
+    p = min(1.0 - 1e-9, max(1e-9, float(p)))
+    try:
+        o = (p / (1.0 - p)) ** CAL_B
+    except (OverflowError, ValueError):
+        return 1.0 if p > 0.5 else 0.0
+    if not (o == o) or o == float("inf"):
+        return 1.0 if p > 0.5 else 0.0
+    return o / (1.0 + o)
 
 
 def model_p(spot, strike, sigma_s, t_left_s):
@@ -689,6 +851,7 @@ class TickBook:
         self.fine = {}         # series -> per-second prints (averaging)
         self.shadow = {}       # tk -> the model's claim, awaiting outcome
         self.shadow_calib = {}  # bucket -> [n, hits] on EVERY window
+        self.shadow_calib_h = {}  # horizon -> {bucket: [n, hits]}
         self.trips = {}        # tk -> completed round trips this window
         self.pend_calib = []   # exited claims awaiting the real outcome
         self.pair = {}         # tk -> {lo, hi} yes-price extremes seen
@@ -722,7 +885,7 @@ class TickBook:
                "pnl_days", "realized_c", "stats", "errs", "t0", "ticks",
                "arbs", "basis_obs", "basis_seen", "pair_obs",
                "pair_stats", "pend_calib", "trips",
-               "shadow_calib", "fine", "shadow_obs")
+               "shadow_calib", "fine", "shadow_obs", "shadow_calib_h")
 
     def load(self):
         try:
@@ -747,6 +910,7 @@ class TickBook:
                 # the price tape does
                 self.shadow = _shadow_rows(d.get("shadow_obs"))
                 self.shadow_calib = d.get("shadow_calib") or {}
+                self.shadow_calib_h = d.get("shadow_calib_h") or {}
                 return
             self.pos = d.get("pos") or {}
             self.settled = _migrate_rows((d.get("settled") or [])[-200:])
@@ -766,6 +930,7 @@ class TickBook:
                          for k, v in (d.get("fine") or {}).items()}
             self.shadow = _shadow_rows(d.get("shadow_obs"))
             self.shadow_calib = d.get("shadow_calib") or {}
+            self.shadow_calib_h = d.get("shadow_calib_h") or {}
             self.pair_stats.update(d.get("pair_stats") or {})
             self.basis = {k: list(v)[-BASIS_N:] for k, v in
                           (d.get("basis_obs") or {}).items()}
@@ -816,6 +981,7 @@ class TickBook:
             # instead of listing keys I have to remember.
             state["shadow_obs"] = self.shadow
             state["shadow_calib"] = self.shadow_calib
+            state["shadow_calib_h"] = self.shadow_calib_h
             state["fine"] = {k: v[-400:] for k, v in self.fine.items()}
             state["ticks"] = {k: v[-VOL_WINDOW:]
                               for k, v in self.ticks.items()}
@@ -1139,9 +1305,25 @@ class TickBook:
             return None
         return 10000.0 * (hi - lo) / mid
 
+    def distinct_n(self, series):
+        """How many DIFFERENT prices this proxy has printed recently.
+
+        A feed can span a healthy range and still be quantised: BNB
+        moved 2.9bp (passing MIN_LIVE_BP) across only 4 distinct values
+        in 8 samples, roughly 5x coarser than every other pair. The
+        model reads the flat stretches as certainty and sizes into
+        them. -$31.80, the worst market in the book."""
+        tape = self.ticks.get(series) or []
+        if len(tape) < LIVE_MIN_N:
+            return None
+        return len({round(p, 10) for _t, p in tape[-LIVE_MIN_N:] if p})
+
     def proxy_dead(self, series):
         bp = self.liveness_bp(series)
-        return (bp is not None) and bp < MIN_LIVE_BP
+        if (bp is not None) and bp < MIN_LIVE_BP:
+            return True
+        dn = self.distinct_n(series)
+        return (dn is not None) and dn < MIN_DISTINCT_N
 
     # ---------------- the exchange surface ----------------
     def fetch_markets(self):
@@ -1282,7 +1464,16 @@ class TickBook:
         # Never claim more certainty than CONF_CAP. The far tail is
         # exactly where a wrong vol estimate does its damage, and a
         # "99%" that is really 90% is a losing trade dressed as a gift.
-        p_yes = min(CONF_CAP, max(1.0 - CONF_CAP, p_raw))
+        # CALIBRATE BEFORE DECIDING. See cal(). This is the line that
+        # turns 118,010 "no edge" refusals into inventory, and it is
+        # also what lets the NO side finally clear the bar - i.e. the
+        # short-the-longshot trade this book has never once taken.
+        p_cal = cal(p_raw)
+        self.stats["cal_n"] = self.stats.get("cal_n", 0) + 1
+        self.stats["cal_shift_c"] = round(
+            self.stats.get("cal_shift_c", 0.0)
+            + abs(p_cal - p_raw) * 100.0, 3)
+        p_yes = min(CONF_CAP, max(1.0 - CONF_CAP, p_cal))
         yb, ya = m["yes_bid"], m["yes_ask"]
         if yb is None or ya is None:
             return None
@@ -1305,8 +1496,13 @@ class TickBook:
             # gross-edge test would happily buy a 4c edge that costs 5c
             # to trade - which is precisely how the phantom book lost
             # 2.45c on every pair it captured.
-            rt_fee = (fee_c(px, 1, maker=True)
-                      + fee_c(min(99.0, px + EDGE_C), 1, maker=True))
+            # 8/31: fee_c(px, 1, ...) ceils to a whole penny, which
+            # flattened this term to ~2c across the WHOLE band and hid
+            # the very curve the strategy rests on. Exact, unrounded,
+            # and priced the way the book actually pays: the fav/early
+            # entry is a TAKER fill (see _fill) and the exit rests.
+            rt_fee = (fee_exact_c(px, 1, maker=False)
+                      + fee_exact_c(min(99.0, px + EDGE_C), 1, maker=True))
             edge = p_side * 100.0 - px - rt_fee
             if edge < EDGE_C:
                 self.stats["no_edge"] += 1
@@ -1324,6 +1520,8 @@ class TickBook:
             f_side = "yes" if ya >= (100.0 - yb) else "no"
             f_px = round(ya if f_side == "yes" else 100.0 - yb, 2)
             f_p = p_yes if f_side == "yes" else 1.0 - p_yes
+            if f_px < FAV2_MIN_C:
+                self.stats["band_lo"] = self.stats.get("band_lo", 0) + 1
             if FAV2_MIN_C <= f_px <= FAV2_MAX_C:
                 if f_p >= FAV_VETO_P:
                     return "early", p_yes, f_px, f_side, f_p
@@ -1338,6 +1536,12 @@ class TickBook:
             fav_side = "yes" if ya >= (100.0 - yb) else "no"
             fav_px = round(ya if fav_side == "yes" else 100.0 - yb, 2)
             fav_p = p_yes if fav_side == "yes" else 1.0 - p_yes
+            # band_lo is the count of favourites refused for being
+            # CHEAPER than the new 88c floor - i.e. exactly the trades
+            # the 8/31 autopsy convicted. If P&L improves and this
+            # number is large, the band change is why.
+            if fav_px < FAV_MIN_C:
+                self.stats["band_lo"] = self.stats.get("band_lo", 0) + 1
             if FAV_MIN_C <= fav_px <= FAV_MAX_C:
                 if fav_p >= FAV_VETO_P:
                     return "fav", p_yes, fav_px, fav_side, fav_p
@@ -1562,6 +1766,78 @@ class TickBook:
         del self.fills[:-400]
         return n
 
+    # ---------------- the price stop ----------------
+    def check_stops(self, mkts):
+        """PROTECT OPEN INVENTORY. Runs before anything else, and is
+        guarded by NOTHING except having a price.
+
+        THE DEFECT THIS EXISTS TO FIX (8/31 autopsy): the only stop in
+        this book was `p_side < STOP_P` inside check_exits - a threshold
+        on the MODEL, sitting behind five silent `continue`s (no market,
+        no yes_bid, no proxy, sigma is None, proxy_dead). Nothing
+        distinguished "I cannot find a new opportunity" from "I cannot
+        protect an open position", so eight positions rode from 75-87c
+        to ZERO without the stop ever forming an opinion: -$96.81 on 8
+        rows, against a whole-book deficit of $65.66.
+
+        So this deliberately depends on NO model, NO proxy and NO sigma.
+        Every one of those can vanish; the bid is the one input that
+        cannot, because without it we could not have traded at all. When
+        even the bid is missing we do not shrug - we count it, loudly,
+        in `stop_blind`. A stop that cannot see is the failure we spent
+        a day finding, and it must never again be silent."""
+        by_tk = {m["tk"]: m for m in mkts}
+        for tk, pos in list(self.pos.items()):
+            m = by_tk.get(tk)
+            bid = None
+            if m is not None:
+                if pos["side"] == "yes":
+                    bid = m.get("yes_bid")
+                elif m.get("yes_ask") is not None:
+                    bid = 100.0 - m["yes_ask"]
+            if bid is None:
+                # THE ALARM. If this is not ~0 the stop is decorative
+                # and we need to know now, not in the next autopsy.
+                self.stats["stop_blind"] = self.stats.get(
+                    "stop_blind", 0) + 1
+                continue
+            # worst price seen while held - the only honest way to
+            # measure stop slippage, and to answer "would 50c or 40c
+            # have been better" from evidence instead of argument
+            lo = pos.get("low_px")
+            if lo is None or bid < lo:
+                pos["low_px"] = round(bid, 2)
+            if STOP_PX_C <= 0 or bid > STOP_PX_C:
+                continue
+            n = pos["n"]
+            sell_px = round(bid, 2)
+            fee = fee_c(sell_px, n, maker=True)
+            avg = pos["cost_c"] / max(1e-9, n)
+            pnl_c = sell_px * n - pos["cost_c"] - pos["fee_c"] - fee
+            self.realized_c += pnl_c
+            self.stats["exits"] += 1
+            self.stats["stops"] = self.stats.get("stops", 0) + 1
+            self.stats["stop_px_n"] = self.stats.get("stop_px_n", 0) + 1
+            self.stats["settled"] += 1
+            self.trips[tk] = self.trips.get(tk, 0) + 1
+            self.stats["wins" if pnl_c > 0 else "losses"] += 1
+            # same calibration integrity as check_exits: the claim is
+            # parked and graded against Kalshi's real result, never
+            # self-credited
+            self.pend_calib.append({
+                "tk": tk, "p_side": pos["p_side"], "side": pos["side"],
+                "close_ts": pos["close_ts"]})
+            del self.pend_calib[:-200]
+            self.settled.append(self._row(
+                tk, pos, n, avg, sell_px, pos["fee_c"] + fee, pnl_c,
+                "STOPPED", pos.get("p_side"),
+                {"entry_lane": pos.get("lane"), "lane": "stop",
+                 "stop": True, "stop_px": True,
+                 "low_px": pos.get("low_px"),
+                 "t_left": round(max(0.0, pos["close_ts"] - time.time()))}))
+            del self.settled[:-200]
+            self.pos.pop(tk, None)
+
     # ---------------- the exit lane ----------------
     def check_exits(self, mkts, proxy):
         """Take the money when the market comes to us, instead of riding
@@ -1603,7 +1879,7 @@ class TickBook:
                                     t_left)
             else:
                 p_raw = model_p(_sp, pos["strike"], sig, t_left)
-            p_yes = min(CONF_CAP, max(1.0 - CONF_CAP, p_raw))
+            p_yes = min(CONF_CAP, max(1.0 - CONF_CAP, cal(p_raw)))
             p_side = p_yes if pos["side"] == "yes" else 1.0 - p_yes
             # what we could sell into right now, passively
             if pos["side"] == "yes":
@@ -1662,11 +1938,18 @@ class TickBook:
         now = time.time()
         for m in mkts:
             tk, st = m["tk"], m["series"]
-            if tk in self.shadow:
-                continue
             left = m["close_ts"] - now
-            if left > SHADOW_AT_S or left <= 0:
-                continue            # one observation, at a fixed point
+            if left <= 0:
+                continue
+            # the tightest horizon this observation qualifies for that we
+            # have not already recorded - one row per window per horizon
+            hz = None
+            for h in SHADOW_ATS:
+                if left <= h and f"{tk}@{h}" not in self.shadow:
+                    hz = h
+            if hz is None:
+                continue
+            key = f"{tk}@{hz}"
             pa = proxy.get(st)
             sig = self.sigma_s(st)
             if not pa or sig is None or self.proxy_dead(st):
@@ -1690,21 +1973,27 @@ class TickBook:
                 (t0, p0), (t1, p1) = tape[-6], tape[-1]
                 if t1 > t0:
                     mom = round((p1 - p0) / (t1 - t0), 8)
-            self.shadow[tk] = {"p": round(p, 4), "close_ts": m["close_ts"],
-                               "label": m["label"], "mom": mom,
-                               "d": round(spot - m["strike"], 6),
-                               "px": m.get("yes_bid")}
-        if len(self.shadow) > 400:
+            # RAW, DELIBERATELY. cal() must never touch this value -
+            # shadow_calib is what CAL_B is re-fitted from, so recording
+            # a calibrated p would make next week's fit return b ~ 1.0
+            # and silently un-ship the correction. See cal().
+            self.shadow[key] = {"p": round(p, 4), "close_ts": m["close_ts"],
+                                "label": m["label"], "mom": mom,
+                                "tk": tk, "h": hz,
+                                "d": round(spot - m["strike"], 6),
+                                "px": m.get("yes_bid")}
+        if len(self.shadow) > 1200:
             for k in sorted(self.shadow,
-                            key=lambda x: self.shadow[x]["close_ts"])[:200]:
+                            key=lambda x: self.shadow[x]["close_ts"])[:600]:
                 self.shadow.pop(k, None)
 
     def grade_shadow(self):
         """Grade every recorded claim against Kalshi's settled result."""
         now = time.time()
-        for tk, row in list(self.shadow.items()):
+        for key, row in list(self.shadow.items()):
             if row["close_ts"] > now - 60:
                 continue
+            tk = row.get("tk") or str(key).split("@")[0]
             try:
                 m = _get(f"{KALSHI}/markets/{tk}")["market"]
             except Exception:
@@ -1713,15 +2002,73 @@ class TickBook:
             res = (m.get("result") or "").lower()
             if res not in ("yes", "no"):
                 if row["close_ts"] < now - 3600:
-                    self.shadow.pop(tk, None)
+                    self.shadow.pop(key, None)
                 continue
             p = row["p"]
             b = str(int(min(0.99, max(0.0, p)) * 10) * 10)
             c = self.shadow_calib.setdefault(b, [0, 0])
             c[0] += 1
             c[1] += 1 if res == "yes" else 0
+            hb = self.shadow_calib_h.setdefault(
+                str(row.get("h") or SHADOW_AT_S), {})
+            ch = hb.setdefault(b, [0, 0])
+            ch[0] += 1
+            ch[1] += 1 if res == "yes" else 0
             self.stats["shadow_n"] = self.stats.get("shadow_n", 0) + 1
-            self.shadow.pop(tk, None)
+            self.shadow.pop(key, None)
+
+    @staticmethod
+    def fit_cal_b(table):
+        """Re-fit the calibration slope from a bucket table.
+
+        true_logit = b x model_logit, by weighted maximum likelihood over
+        the decile counts. The intercept is pinned at zero because the
+        8/31 fit found it to be 0.00 to two places - the model has no
+        directional bias, only compressed confidence - and a free
+        intercept on ten buckets is a licence to drift.
+
+        THIS IS THE SELF-MONITOR. CAL_B is a constant in a file; `b_fit`
+        on the tracker is what the tape currently says it should be. If
+        they diverge, the correction has gone stale and we will see it
+        instead of discovering it in an autopsy. Also returns the Brier
+        of raw vs recalibrated on the same rows, so the claim that
+        calibration helps stays falsifiable every single cycle."""
+        rows = []
+        for b, v in (table or {}).items():
+            try:
+                lo, n, h = int(b), int(v[0]), int(v[1])
+            except Exception:
+                continue
+            if n > 0:
+                rows.append(((lo + 5) / 100.0, n, h))
+        tot = sum(r[1] for r in rows)
+        if tot < 100 or len(rows) < 4:
+            return {"n": tot, "b": None}
+
+        def lg(x):
+            x = min(1 - 1e-4, max(1e-4, x))
+            return math.log(x / (1 - x))
+
+        best = None
+        for i in range(5, 401):
+            b = i / 100.0
+            ll = 0.0
+            for m, n, h in rows:
+                q = 1.0 / (1.0 + math.exp(-b * lg(m)))
+                q = min(1 - 1e-9, max(1e-9, q))
+                ll += h * math.log(q) + (n - h) * math.log(1 - q)
+            if best is None or ll > best[0]:
+                best = (ll, b)
+        b = best[1]
+        braw = sum(h * (1 - m) ** 2 + (n - h) * m ** 2
+                   for m, n, h in rows) / tot
+        bcal = 0.0
+        for m, n, h in rows:
+            q = 1.0 / (1.0 + math.exp(-b * lg(m)))
+            bcal += h * (1 - q) ** 2 + (n - h) * q ** 2
+        return {"n": tot, "b": round(b, 2),
+                "brier_raw": round(braw, 4),
+                "brier_cal": round(bcal / tot, 4)}
 
     def shadow_table(self):
         """Reliability curve: when the model says X%, does X% happen?"""
@@ -1978,6 +2325,10 @@ class TickBook:
         # let a position expire that we had already decided to leave.
         self.observe_shadow(mkts, proxy)
         self.grade_shadow()
+        # PROTECTION BEFORE OPPORTUNITY. check_exits can bail out for
+        # five different reasons; check_stops cannot, and it must have
+        # the first look at every open position.
+        self.check_stops(mkts)
         self.check_exits(mkts, proxy)
         self.grade_pending()
         self.settle_check()
@@ -2098,6 +2449,33 @@ class TickBook:
             },
             "exits": self.stats.get("exits", 0),
             "stops": self.stats.get("stops", 0),
+            # ---- 8/31 SHIP COUNTERS. Six changes went out in one
+            # commit, so each one carries its own number: without these
+            # a single commit is a single uninterpretable P&L, which is
+            # the mistake this project has made four times.
+            "ship": {
+                # THE ALARM. Cycles where an open position could not be
+                # price-checked. Anything but ~0 means the stop is
+                # decorative - stop the book and fix that first.
+                "stop_blind": self.stats.get("stop_blind", 0),
+                "stop_px_n": self.stats.get("stop_px_n", 0),
+                "band_lo": self.stats.get("band_lo", 0),
+                "cal_b": CAL_B,
+                "cal_n": self.stats.get("cal_n", 0),
+                # mean cents the calibration moved a decision by
+                "cal_shift_c": round(
+                    self.stats.get("cal_shift_c", 0.0)
+                    / max(1, self.stats.get("cal_n", 0)), 2),
+                "edge_c": EDGE_C,
+                "fav_band": [FAV_MIN_C, FAV_MAX_C],
+                "stop_px": STOP_PX_C,
+                "distinct_dead": sorted(
+                    st for st in list(SERIES) + list(CRYPTO)
+                    if (self.distinct_n(st) is not None
+                        and self.distinct_n(st) < MIN_DISTINCT_N)),
+                "distinct": {st: self.distinct_n(st)
+                             for st in list(SERIES) + list(CRYPTO)},
+            },
             "trips": sum(self.trips.values()),
             "trip_capped": self.stats.get("trip_capped", 0),
             # CAPITAL TURNOVER - how many times the whole book recycles
@@ -2131,7 +2509,16 @@ class TickBook:
             "shadow": {"n": self.stats.get("shadow_n", 0),
                        "pending": len(self.shadow),
                        "at_s": SHADOW_AT_S,
-                       "table": self.shadow_table()},
+                       "ats": SHADOW_ATS,
+                       "table": self.shadow_table(),
+                       # what the tape says CAL_B should be, right now,
+                       # overall and at each horizon. If b_fit drifts
+                       # away from CAL_B we see it instead of finding
+                       # out in the next autopsy.
+                       "fit": self.fit_cal_b(self.shadow_calib),
+                       "fit_h": {h: self.fit_cal_b(t) for h, t in
+                                 sorted(self.shadow_calib_h.items(),
+                                        key=lambda kv: -int(kv[0]))}},
             "feed": {
                 "ok": not self._feed_err,
                 "err": self._feed_err,
