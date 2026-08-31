@@ -1649,3 +1649,21 @@ def test_the_risk_ceiling_was_not_touched():
     assert T.BOOK_CAPITAL_C == 100000
     assert T.SIZE == 10
     assert T.MAX_POS == 50
+
+
+def test_the_alarm_does_not_cry_wolf_on_a_closed_window():
+    """stop_blind hit 4 within eleven cycles of going live. The cause
+    was benign - a window that has CLOSED legitimately drops out of
+    mkts, and it is settle_check's job by then, not the stop's. Left
+    alone, the number would have climbed every window until we learned
+    to ignore it, and an alarm that cries wolf is worse than no alarm.
+    That is precisely how the last three outages went unnoticed."""
+    b = T.TickBook()
+    _pos(b)
+    b.pos["T1"]["close_ts"] = time.time() - 10      # already closed
+    b.check_stops([])
+    assert b.stats.get("stop_blind", 0) == 0        # not an alarm
+    assert b.stats["stop_closed"] == 1              # counted, separately
+    b.pos["T1"]["close_ts"] = time.time() + 120     # still open
+    b.check_stops([])
+    assert b.stats["stop_blind"] == 1               # now it IS an alarm

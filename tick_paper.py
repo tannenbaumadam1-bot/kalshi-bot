@@ -1796,10 +1796,20 @@ class TickBook:
                 elif m.get("yes_ask") is not None:
                     bid = 100.0 - m["yes_ask"]
             if bid is None:
-                # THE ALARM. If this is not ~0 the stop is decorative
-                # and we need to know now, not in the next autopsy.
-                self.stats["stop_blind"] = self.stats.get(
-                    "stop_blind", 0) + 1
+                # THE ALARM - but only while there is still something to
+                # protect. A position whose window has already closed is
+                # settle_check's job, and it legitimately drops out of
+                # mkts; counting that as blindness would have this
+                # number tick up every single window until we learned to
+                # ignore it. An alarm that cries wolf is worse than no
+                # alarm, which is the whole reason the last three
+                # outages went unnoticed.
+                if pos.get("close_ts", 0) > time.time():
+                    self.stats["stop_blind"] = self.stats.get(
+                        "stop_blind", 0) + 1
+                else:
+                    self.stats["stop_closed"] = self.stats.get(
+                        "stop_closed", 0) + 1
                 continue
             # worst price seen while held - the only honest way to
             # measure stop slippage, and to answer "would 50c or 40c
@@ -2458,6 +2468,8 @@ class TickBook:
                 # price-checked. Anything but ~0 means the stop is
                 # decorative - stop the book and fix that first.
                 "stop_blind": self.stats.get("stop_blind", 0),
+                # benign: window already closed, settle_check owns it
+                "stop_closed": self.stats.get("stop_closed", 0),
                 "stop_px_n": self.stats.get("stop_px_n", 0),
                 "band_lo": self.stats.get("band_lo", 0),
                 "cal_b": CAL_B,
