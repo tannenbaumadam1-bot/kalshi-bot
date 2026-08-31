@@ -1717,3 +1717,31 @@ def test_a_reset_is_a_ledger_epoch_not_an_era_bump():
         assert after.basis["KXBTC15M"] == [0.1, 0.2]
     finally:
         T.STATE, T.RESET_TAG = old_state, old_tag
+
+
+def test_the_granularity_gate_measures_time_not_ticks():
+    """SHIPPED BROKEN, CAUGHT IN AN HOUR BY ITS OWN COUNTER.
+
+    distinct_n counted the last LIVE_MIN_N *ticks*. But the sampler
+    bursts near the close (BURST_AT_S=75, ~2.2s apart against ~20s
+    normally), so those 15 ticks are ~33 SECONDS of real time - and no
+    healthy asset prints 6 distinct prices in 33 seconds. Result:
+    distinct_dead listed 6 of 7 markets, blinding the book in the last
+    minute of every window, which is precisely where the 60-second
+    averaging lock-in lives.
+
+    The gate must measure a SPAN OF TIME."""
+    b = T.TickBook()
+    # a healthy feed sampled during a burst: 40 ticks, ~2s apart, real
+    # movement but only a handful of distinct prices in any 30s slice
+    t0 = 1_000_000
+    b.ticks["KXBTC15M"] = ([(t0 + i * 20, 100.0 + i * 0.05) for i in range(30)]
+                           + [(t0 + 600 + i * 2, 101.5 + (i % 3) * 0.01)
+                              for i in range(40)])
+    assert b.proxy_dead("KXBTC15M") is False        # must NOT be killed
+    # BNB's actual shape: quantised across the WHOLE window, not just
+    # the burst - 3 distinct prices over ten minutes
+    b.ticks["KXBNB15M"] = [(t0 + i * 20, 688.4 + (i % 3) * 0.1)
+                           for i in range(40)]
+    assert b.distinct_n("KXBNB15M") == 3
+    assert b.proxy_dead("KXBNB15M") is True         # still caught

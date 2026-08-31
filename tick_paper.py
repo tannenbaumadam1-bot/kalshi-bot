@@ -284,6 +284,16 @@ MIN_LIVE_BP = float(os.environ.get("TICK_MIN_LIVE_BP", "1.0"))   # bp
 # THE RULE: an instrument whose proxy prints fewer distinct values than
 # the market it predicts will always look certain and always be wrong.
 MIN_DISTINCT_N = int(os.environ.get("TICK_MIN_DISTINCT", "6"))
+# ...MEASURED OVER A FIXED SPAN OF TIME, NOT A FIXED NUMBER OF TICKS.
+# Shipped counting ticks, and it declared 6 of 7 healthy feeds dead
+# within an hour. The sampler BURSTS near the close (BURST_AT_S=75,
+# ~2.2s apart against ~20s normally), so "the last 15 ticks" is ~33
+# SECONDS of real time down there - and no asset prints 6 distinct
+# prices in 33 seconds. The gate was blinding the book in the last
+# minute of every window, which is exactly where the 60-second
+# averaging lock-in lives: the most valuable seconds we have.
+# Caught in an hour only because distinct_dead was on the tracker.
+DISTINCT_WINDOW_S = int(os.environ.get("TICK_DISTINCT_WINDOW", "600"))
 LIVE_MIN_N = int(os.environ.get("TICK_LIVE_MIN_N", "15"))
 # EXIT LANE (Adam 8/25: "we can trade in and out of it as it moves
 # towards settlement"). The live weather book's ledger is unambiguous on
@@ -1337,9 +1347,15 @@ class TickBook:
         model reads the flat stretches as certainty and sizes into
         them. -$31.80, the worst market in the book."""
         tape = self.ticks.get(series) or []
-        if len(tape) < LIVE_MIN_N:
+        if not tape:
             return None
-        return len({round(p, 10) for _t, p in tape[-LIVE_MIN_N:] if p})
+        cut = tape[-1][0] - DISTINCT_WINDOW_S
+        recent = [p for t, p in tape if p and t >= cut]
+        # not enough evidence in the window is UNKNOWN, not dead - the
+        # same contract liveness_bp keeps
+        if len(recent) < LIVE_MIN_N:
+            return None
+        return len({round(p, 10) for p in recent})
 
     def proxy_dead(self, series):
         bp = self.liveness_bp(series)
