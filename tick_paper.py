@@ -90,6 +90,24 @@ KALSHI = os.environ.get("TICK_KALSHI",
 HERMES = os.environ.get("TICK_HERMES", "https://hermes.pyth.network")
 STATE = os.environ.get("TICK_STATE", os.path.join("logs", "tick_state.json"))
 ERA = os.environ.get("TICK_ERA", "tick3")
+# ---------------------------------------------------------------------
+# THE LEDGER EPOCH (8/31), DELIBERATELY SEPARATE FROM ERA.
+#
+# ERA is an epistemic claim: "the constraints changed, so rows from
+# before are not comparable to rows from after." RESET_TAG is a
+# bookkeeping request: "start the count again from here." Those are
+# different things, and folding the second into the first means every
+# routine "reset the P&L" burns an era name and leaves the era column
+# lying about what actually changed.
+#
+# Changing this string wipes pos / settled / calib / realized / stats on
+# the next boot, and carries across exactly what an era bump carries:
+# the PRICE TAPE, the instrument basis, and the SHADOW CALIBRATION.
+# None of those are ledger entries - and the shadow table in particular
+# holds the 2,868 graded observations CAL_B is fitted from, which is the
+# last thing to throw away when the whole point is to measure the new
+# rules cleanly.
+RESET_TAG = os.environ.get("TICK_RESET", "2026-08-31-tick3-clean")
 
 # --- the surface -------------------------------------------------------
 # series -> (public Pyth proxy feed id, human label). Only series whose
@@ -885,12 +903,16 @@ class TickBook:
                "pnl_days", "realized_c", "stats", "errs", "t0", "ticks",
                "arbs", "basis_obs", "basis_seen", "pair_obs",
                "pair_stats", "pend_calib", "trips",
-               "shadow_calib", "fine", "shadow_obs", "shadow_calib_h")
+               "shadow_calib", "fine", "shadow_obs", "shadow_calib_h",
+               "reset_tag")
 
     def load(self):
         try:
             d = json.load(open(STATE))
-            if d.get("era") != ERA:
+            # either a new constraint regime OR an explicit reset - both
+            # mean "this ledger is not ours", and both keep the feed
+            # measurements, which belong to the instruments not the book
+            if d.get("era") != ERA or d.get("reset_tag") != RESET_TAG:
                 # A LEDGER from another regime is not ours - P&L, settles
                 # and calibration all reset. But the PRICE TAPE and the
                 # INSTRUMENT OFFSET are not ledger entries: they are
@@ -980,6 +1002,7 @@ class TickBook:
             # test below now derives the collision set automatically
             # instead of listing keys I have to remember.
             state["shadow_obs"] = self.shadow
+            state["reset_tag"] = RESET_TAG
             state["shadow_calib"] = self.shadow_calib
             state["shadow_calib_h"] = self.shadow_calib_h
             state["fine"] = {k: v[-400:] for k, v in self.fine.items()}
@@ -2389,7 +2412,7 @@ class TickBook:
                 "dead": self.proxy_dead(st)})
         state = {
             "updated": datetime.datetime.now().isoformat(timespec="seconds"),
-            "era": ERA, "mode": "PAPER",
+            "era": ERA, "mode": "PAPER", "reset_tag": RESET_TAG,
             "series": sorted(SERIES),
             "windows": rows,
             "quoted": quoted,

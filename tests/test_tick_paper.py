@@ -1667,3 +1667,53 @@ def test_the_alarm_does_not_cry_wolf_on_a_closed_window():
     b.pos["T1"]["close_ts"] = time.time() + 120     # still open
     b.check_stops([])
     assert b.stats["stop_blind"] == 1               # now it IS an alarm
+
+
+def test_a_reset_is_a_ledger_epoch_not_an_era_bump():
+    """Adam, 8/31: "reset the paper bot P&L to $0 so we can track it
+    from the start after these changes."
+
+    ERA means the CONSTRAINTS changed - an epistemic claim about
+    comparability. A reset is bookkeeping. Keeping them separate means a
+    routine reset does not burn an era name or leave the era column
+    lying about what changed."""
+    path = os.path.join(tempfile.mkdtemp(), "s.json")
+    old_state, old_tag = T.STATE, T.RESET_TAG
+    T.STATE = path
+    try:
+        b = T.TickBook()
+        b.realized_c = -172130.0
+        b.settled = [{"tk": "X", "pnl": -3.0, "run": -3.0, "n": 1.0}]
+        b.stats["settled"] = 4145
+        b.calib = {"90": [54, 50]}
+        # the things that are NOT ledger entries
+        b.ticks["KXBTC15M"] = [(1000 + i, 100.0 + i * 0.01) for i in range(30)]
+        b.shadow_calib = {"90": [572, 567]}
+        b.basis["KXBTC15M"] = [0.1, 0.2]
+        # NB: "era" is stamped into the state by step(), not save() -
+        # so a direct save() has to supply it, or every load looks like
+        # an era bump. save() writes reset_tag itself, deliberately, so
+        # the epoch cannot be lost if step()'s payload is refactored.
+        b.save({"era": T.ERA})
+
+        # same tag -> the ledger survives a restart
+        same = T.TickBook()
+        same.load()
+        assert same.realized_c == -172130.0
+        assert same.stats["settled"] == 4145
+
+        # new tag -> the LEDGER is wiped...
+        T.RESET_TAG = "2026-09-01-fresh"
+        after = T.TickBook()
+        after.load()
+        assert after.realized_c == 0.0
+        assert after.settled == []
+        assert after.calib == {}
+        assert after.stats.get("settled", 0) == 0
+        # ...and the MEASUREMENTS are kept, because they belong to the
+        # instruments and the model, not to the book
+        assert after.shadow_calib == {"90": [572, 567]}
+        assert len(after.ticks["KXBTC15M"]) == 30
+        assert after.basis["KXBTC15M"] == [0.1, 0.2]
+    finally:
+        T.STATE, T.RESET_TAG = old_state, old_tag
