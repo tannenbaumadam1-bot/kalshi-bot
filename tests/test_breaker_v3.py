@@ -854,3 +854,63 @@ def test_fresh_cached_mark_still_carries(tmp_path, monkeypatch):
     ts1 = b.mnav_ts
     b._mark_nav([_mk("OTHER", bid=50, ask=52)])   # ticker missing, mark fresh
     assert b.mnav_ts > 0 and b.mnav_ts >= ts1
+
+
+def test_marked_nav_counts_cash_reserved_against_resting_orders(tmp_path,
+                                                                monkeypatch):
+    """9/1, CAUGHT LIVE MINUTES AFTER THE RESUME.
+
+    Kalshi RESERVES the cash for an unfilled buy order, so the account
+    balance drops the moment we quote. Marked NAV summed cash + POSITION
+    marks only - so every dollar the book put to work read as a dollar
+    LOST, and the weekly breaker measures drawdown on that number.
+
+    Observed: the book resumed, rested three orders worth $17.36, and
+    marked NAV fell 72.36 -> 60.73 against a 7-day peak of 86.22 and a
+    limit of 10.85. It would have re-halted itself within ~90 seconds of
+    resuming, on a 'loss' sitting in live orders on the exchange.
+
+    The money is reserved, not spent. An idle book showed its true NAV
+    and a working book showed NAV minus its working capital - the worst
+    possible property for a risk gate on a book whose job is to deploy.
+    """
+    b = _bot(tmp_path, monkeypatch)
+    monkeypatch.setattr(dl, "MNAV_ON", True)
+    b.dry_balance_c = 6073                     # cash, after reservation
+    b.bets = {}                                # nothing filled
+    b.pending = {"KXHIGHTATL-26SEP01-B93.5": {"entry": 84, "count": 7},
+                 "KXHIGHTHOU-26SEP01-B89.5": {"entry": 83, "count": 7},
+                 "KXHIGHPHIL-26SEP01-B93.5": {"entry": 81, "count": 7}}
+    b._mark_nav([_mk(tk="KXHIGHNY-26SEP01-T86", bid=50, ask=52)])
+    # 60.73 cash + 17.36 reserved = 78.09, not 60.73
+    assert b.last_mnav_c == 6073 + (84 + 83 + 81) * 7
+    assert round(b.last_pend_c / 100.0, 2) == 17.36
+    # and with nothing resting the number is unchanged - this only ever
+    # ADDS BACK money the account still owns
+    b.pending = {}
+    b._mark_nav([_mk(tk="KXHIGHNY-26SEP01-T86", bid=50, ask=52)])
+    assert b.last_mnav_c == 6073
+
+
+def test_the_breaker_does_not_halt_a_book_for_deploying(tmp_path,
+                                                        monkeypatch):
+    """The consequence, stated as a rule: quoting is not a loss."""
+    b = _bot(tmp_path, monkeypatch)
+    monkeypatch.setattr(dl, "MNAV_ON", True)
+    b.nav_days = {dl.today(): 8622.0}          # the 7-day peak
+    b.dry_balance_c = 6073
+    b.bets = {}
+    b.pending = {"a": {"entry": 84, "count": 7}, "b": {"entry": 83, "count": 7},
+                 "c": {"entry": 81, "count": 7}}
+    b._mark_nav([_mk(tk="KXHIGHNY-26SEP01-T86", bid=50, ask=52)])
+    b.mnav_ts = time.time()
+    tripped_working = b._week_loss_exceeded()
+    # the same book with the cash sitting idle instead of quoting
+    b.pending = {}
+    b.dry_balance_c = 6073 + (84 + 83 + 81) * 7
+    b._mark_nav([_mk(tk="KXHIGHNY-26SEP01-T86", bid=50, ask=52)])
+    b.mnav_ts = time.time()
+    tripped_idle = b._week_loss_exceeded()
+    assert tripped_working == tripped_idle, (
+        "the breaker must not care whether the money is resting in "
+        "orders or sitting in cash - only whether it was LOST")
