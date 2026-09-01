@@ -107,7 +107,7 @@ ERA = os.environ.get("TICK_ERA", "tick3")
 # holds the 2,868 graded observations CAL_B is fitted from, which is the
 # last thing to throw away when the whole point is to measure the new
 # rules cleanly.
-RESET_TAG = os.environ.get("TICK_RESET", "2026-08-31-tick3-clean")
+RESET_TAG = os.environ.get("TICK_RESET", "2026-09-01-band-91-95-clean")
 
 # --- the surface -------------------------------------------------------
 # series -> (public Pyth proxy feed id, human label). Only series whose
