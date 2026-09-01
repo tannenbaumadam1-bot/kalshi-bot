@@ -2355,34 +2355,50 @@ class DriftLive:
                 mark_c += cost           # never marked: entry cost
         if tot_c > 0 and cov_c / tot_c < MNAV_MIN_COV:
             return                       # too thin to trust; keep last
-        # 9/1 RESTING-ORDER COLLATERAL - THE BUG THAT PUNISHED WORKING.
-        # Kalshi RESERVES the cash for an unfilled buy order, so
-        # balance_c drops the instant we quote. This sum was cash +
-        # POSITION marks only, so every dollar the book put to work
-        # looked like a dollar LOST - and the weekly breaker measures
-        # drawdown on exactly this number.
+        # 9/1 REVERTED SAME DAY - I GOT THIS WRONG, ON REAL MONEY.
+        # I added resting-order collateral to this sum, believing Kalshi
+        # RESERVES the cash for an unfilled buy order. It does not.
+        # dashboard.py has carried the empirical check since 7/23:
+        # "bal $100.09 with $59.81 resting" - on a $100 deposit, in week
+        # one. If balance excluded the collateral the account would have
+        # held $159.90, which is impossible. Kalshi's balance INCLUDES
+        # cash committed to resting orders, so adding pend_c
+        # DOUBLE-COUNTS it and inflates NAV by the size of the book's
+        # own quotes - which makes the breaker LESS likely to fire. That
+        # is the dangerous direction on a live book.
         #
-        # Caught live: the book resumed at 18:02, rested three orders
-        # worth $17.36, and marked NAV fell 72.36 -> 60.73 against a
-        # 7-day peak of 86.22 and a limit of 10.85. It would have
-        # re-halted itself within ~90 seconds of resuming, on a "loss"
-        # that was sitting in live orders on the exchange.
+        # What I actually saw (72.36 -> 60.73 with zero open positions)
+        # is still UNEXPLAINED. It is not reserved cash. pend is kept as
+        # telemetry below precisely so the next person has the number
+        # instead of a hypothesis, and mnav_drop counts the event.
         #
-        # The money is RESERVED, NOT SPENT. An idle book showed its true
-        # NAV and a working book showed NAV minus its working capital -
-        # the worst possible property for a risk gate on a book whose
-        # entire job is to deploy. Same family as the 8/17 stale marks
-        # and the 8/6 day_nav0 anchor: an accounting hole that only
-        # shows up when the book CHANGES BEHAVIOUR.
+        # THE LESSON, and it is the expensive one: I diagnosed from a
+        # two-sample observation and shipped to real-money risk
+        # accounting without searching for prior art. The contradicting
+        # evidence was a dated comment in this repo. Grep before you
+        # theorise.
         pend_c = 0
         try:
             pend_c = sum(int(o.get("entry", 0)) * int(o.get("count", 0))
                          for o in (self.pending or {}).values())
         except (TypeError, ValueError, AttributeError):
             pend_c = 0
-        self.last_pend_c = float(pend_c)
-        nav_c = int((balance_c + mark_c + pend_c
-                     + _crypto_cost_c()) * WX_ALLOC)
+        self.last_pend_c = float(pend_c)   # telemetry ONLY - never added
+        nav_c = int((balance_c + mark_c + _crypto_cost_c()) * WX_ALLOC)
+        # instrument the drop I could not explain: a fall in marked NAV
+        # with no open positions and nothing realised is not possible
+        # from trading, so if it recurs we will have it on the record
+        # rather than in someone's memory.
+        _prev = float(getattr(self, "last_mnav_c", 0) or 0)
+        if (_prev > 0 and nav_c < _prev * 0.95 and not self.bets
+                and abs(float(getattr(self, "day_pnl_c", 0) or 0)) < 100):
+            self.exec_stats["mnav_drop"] = (
+                self.exec_stats.get("mnav_drop", 0) + 1)
+            self.exec_stats["mnav_drop_last"] = {
+                "from": round(_prev / 100.0, 2),
+                "to": round(nav_c / 100.0, 2),
+                "pend": round(pend_c / 100.0, 2),
+                "bal": round(balance_c / 100.0, 2), "ts": now()}
         if nav_c <= 0:
             return
         self.last_mnav_c = float(nav_c)

@@ -856,61 +856,55 @@ def test_fresh_cached_mark_still_carries(tmp_path, monkeypatch):
     assert b.mnav_ts > 0 and b.mnav_ts >= ts1
 
 
-def test_marked_nav_counts_cash_reserved_against_resting_orders(tmp_path,
-                                                                monkeypatch):
-    """9/1, CAUGHT LIVE MINUTES AFTER THE RESUME.
+def test_marked_nav_does_NOT_double_count_resting_order_collateral(
+        tmp_path, monkeypatch):
+    """9/1 - THE MISTAKE, AND THE GUARD AGAINST REPEATING IT.
 
-    Kalshi RESERVES the cash for an unfilled buy order, so the account
-    balance drops the moment we quote. Marked NAV summed cash + POSITION
-    marks only - so every dollar the book put to work read as a dollar
-    LOST, and the weekly breaker measures drawdown on that number.
+    I added resting-order collateral to marked NAV, believing Kalshi
+    reserves the cash for an unfilled buy order. IT DOES NOT. The
+    empirical check has been in dashboard.py since 7/23: "bal $100.09
+    with $59.81 resting" - on a $100 deposit, in week one. If balance
+    excluded the collateral the account would have held $159.90, which
+    is impossible.
 
-    Observed: the book resumed, rested three orders worth $17.36, and
-    marked NAV fell 72.36 -> 60.73 against a 7-day peak of 86.22 and a
-    limit of 10.85. It would have re-halted itself within ~90 seconds of
-    resuming, on a 'loss' sitting in live orders on the exchange.
-
-    The money is reserved, not spent. An idle book showed its true NAV
-    and a working book showed NAV minus its working capital - the worst
-    possible property for a risk gate on a book whose job is to deploy.
+    Kalshi's balance INCLUDES cash committed to resting orders, so
+    adding it again inflates NAV by the size of the book's own quotes -
+    and because _week_loss_exceeded reads this number, that makes the
+    breaker LESS likely to fire. On a live book that is the dangerous
+    direction, which is why this test asserts the invariant rather than
+    trusting the comment.
     """
     b = _bot(tmp_path, monkeypatch)
     monkeypatch.setattr(dl, "MNAV_ON", True)
-    b.dry_balance_c = 6073                     # cash, after reservation
-    b.bets = {}                                # nothing filled
-    b.pending = {"KXHIGHTATL-26SEP01-B93.5": {"entry": 84, "count": 7},
-                 "KXHIGHTHOU-26SEP01-B89.5": {"entry": 83, "count": 7},
-                 "KXHIGHPHIL-26SEP01-B93.5": {"entry": 81, "count": 7}}
-    b._mark_nav([_mk(tk="KXHIGHNY-26SEP01-T86", bid=50, ask=52)])
-    # 60.73 cash + 17.36 reserved = 78.09, not 60.73
-    assert b.last_mnav_c == 6073 + (84 + 83 + 81) * 7
-    assert round(b.last_pend_c / 100.0, 2) == 17.36
-    # and with nothing resting the number is unchanged - this only ever
-    # ADDS BACK money the account still owns
-    b.pending = {}
-    b._mark_nav([_mk(tk="KXHIGHNY-26SEP01-T86", bid=50, ask=52)])
-    assert b.last_mnav_c == 6073
-
-
-def test_the_breaker_does_not_halt_a_book_for_deploying(tmp_path,
-                                                        monkeypatch):
-    """The consequence, stated as a rule: quoting is not a loss."""
-    b = _bot(tmp_path, monkeypatch)
-    monkeypatch.setattr(dl, "MNAV_ON", True)
-    b.nav_days = {dl.today(): 8622.0}          # the 7-day peak
     b.dry_balance_c = 6073
     b.bets = {}
     b.pending = {"a": {"entry": 84, "count": 7}, "b": {"entry": 83, "count": 7},
                  "c": {"entry": 81, "count": 7}}
     b._mark_nav([_mk(tk="KXHIGHNY-26SEP01-T86", bid=50, ask=52)])
-    b.mnav_ts = time.time()
-    tripped_working = b._week_loss_exceeded()
-    # the same book with the cash sitting idle instead of quoting
+    # NAV is the balance, full stop - the collateral is already in it
+    assert b.last_mnav_c == 6073
+    # ...but the number is still PUBLISHED, so the next person debugging
+    # a NAV move has the figure instead of a hypothesis
+    assert round(b.last_pend_c / 100.0, 2) == 17.36
+
+
+def test_an_unexplained_nav_drop_is_recorded_not_theorised(tmp_path,
+                                                           monkeypatch):
+    """On 9/1 marked NAV fell 72.36 -> 60.73 with ZERO open positions
+    and nothing realised. That is not possible from trading, and I
+    guessed at the cause instead of instrumenting it. Now it counts
+    itself, so the next occurrence arrives with evidence attached."""
+    b = _bot(tmp_path, monkeypatch)
+    monkeypatch.setattr(dl, "MNAV_ON", True)
+    b.bets = {}
     b.pending = {}
-    b.dry_balance_c = 6073 + (84 + 83 + 81) * 7
+    b.dry_balance_c = 7236
     b._mark_nav([_mk(tk="KXHIGHNY-26SEP01-T86", bid=50, ask=52)])
-    b.mnav_ts = time.time()
-    tripped_idle = b._week_loss_exceeded()
-    assert tripped_working == tripped_idle, (
-        "the breaker must not care whether the money is resting in "
-        "orders or sitting in cash - only whether it was LOST")
+    assert b.last_mnav_c == 7236
+    b.dry_balance_c = 6073                      # unexplained fall
+    b._mark_nav([_mk(tk="KXHIGHNY-26SEP01-T86", bid=50, ask=52)])
+    assert b.exec_stats.get("mnav_drop") == 1
+    assert b.exec_stats["mnav_drop_last"]["from"] == 72.36
+    assert b.exec_stats["mnav_drop_last"]["to"] == 60.73
+
+
