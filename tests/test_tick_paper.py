@@ -93,7 +93,8 @@ def test_never_quotes_at_the_money_where_fees_peak():
 
 def test_endgame_lane_takes_cheap_certainty_late():
     b = T.TickBook()
-    out = b.decide(_mkt(yes_bid=88.0, yes_ask=92.0), 100.5, 0.02, 60)
+    # (9/1: fixture moved into the 91-95 band)
+    out = b.decide(_mkt(yes_bid=91.0, yes_ask=94.0), 100.5, 0.02, 60)
     assert out is not None
     lane, p_yes, px, side, p_side = out
     assert lane == "endgame"
@@ -1086,8 +1087,13 @@ def test_the_favourite_lane_takes_near_certainty_without_beating_the_model():
     favourite at the market's own price in the final minute returns
     +9.2c/trade in the 80-95c band."""
     b = T.TickBook()
-    # market says 88c yes; our model agrees it is likely but has NO edge
-    out = b.decide(_mkt(yes_bid=87.0, yes_ask=88.0), 100.4, 0.05, 45)
+    # market says 92c yes; our model agrees it is likely but has NO EDGE -
+    # which is the whole point of this lane, so the fixture has to keep
+    # the model UNDER the price. (9/1: at the old spot/sigma the
+    # calibration now clears the edge bar on its own and endgame takes
+    # the trade first - a fair reminder that cal() moved the boundary
+    # between "we beat the market" and "we merely agree with it".)
+    out = b.decide(_mkt(yes_bid=91.0, yes_ask=92.0), 100.2, 0.08, 45)
     assert out is not None
     lane, _p, px, side, p_side = out
     assert lane == "fav"
@@ -1107,15 +1113,15 @@ def test_the_model_can_veto_the_favourite():
     """The model stops being the entry trigger and becomes a SAFETY
     CHECK - take the favourite unless our arithmetic contradicts it."""
     b = T.TickBook()
-    # book says 88c YES, but spot is far BELOW the line: model objects
-    out = b.decide(_mkt(yes_bid=87.0, yes_ask=88.0), 95.0, 0.05, 45)
+    # book says 92c YES, but spot is far BELOW the line: model objects
+    out = b.decide(_mkt(yes_bid=91.0, yes_ask=92.0), 95.0, 0.05, 45)
     assert out is None or out[0] != "fav"
     assert b.stats.get("fav_vetoed", 0) >= 1
 
 
 def test_the_favourite_lane_only_fires_near_the_close():
     b = T.TickBook()
-    out = b.decide(_mkt(yes_bid=87.0, yes_ask=88.0), 100.4, 0.05, 800)
+    out = b.decide(_mkt(yes_bid=91.0, yes_ask=92.0), 100.4, 0.05, 800)
     assert out is None or out[0] != "fav"
 
 
@@ -1134,16 +1140,23 @@ def test_the_cheap_favourite_is_refused_on_live_evidence():
         80-85c 16.3%   -$9.45          91c+    1.8%   +$13.01
     A 16x difference, and the mechanism is arithmetic: a 75c position
     has only 30c of room before the stop, a 91c one has 47c."""
-    assert T.FAV_MIN_C == 88.0 and T.FAV_MAX_C == 97.0
+    # 9/1: TIGHTENED AGAIN, on 200 rows traded under the 88-97 band
+    # itself - the same monotone story one level deeper.
+    #     88-91c  n=57  -$57.55   <- the entire loss
+    #     91-95c  n=104 +$46.35   <- the entire business
+    #     95c+    n=39   -$9.12   <- risking 95c to make 5c
+    # bad-exit rate 8.0% -> 1.9%. Four of the seven price-stops in that
+    # window fired on entries below 91.
+    assert T.FAV_MIN_C == 91.0 and T.FAV_MAX_C == 95.0
     assert T.FAV_AT_S == 240
     # the 75c favourite the old band existed to buy is now REFUSED,
     # on every path - not just the fav lane
     b = T.TickBook()
     out = b.decide(_mkt(yes_bid=74.0, yes_ask=75.0), 100.25, 0.04, 120)
     assert out is None
-    # ...and a 91c one qualifies
+    # ...and a 93c one qualifies
     b2 = T.TickBook()
-    out2 = b2.decide(_mkt(yes_bid=90.0, yes_ask=91.0), 100.6, 0.04, 120)
+    out2 = b2.decide(_mkt(yes_bid=92.0, yes_ask=93.0), 100.6, 0.04, 120)
     assert out2 is not None and T.FAV_MIN_C <= out2[2] <= T.FAV_MAX_C
     # the floor is global, so no lane can sneak in below it
     assert T.MIN_PX_C >= T.FAV_MIN_C
@@ -1344,7 +1357,10 @@ def test_early_lane_rides_a_strong_favourite_mid_window():
     There is no mean reversion here - a market that is already mostly
     decided goes on being decided."""
     b = T.TickBook()
-    out = b.decide(_mkt(yes_bid=89.0, yes_ask=90.0), 100.6, 0.04, 450)
+    # 9/1: EARLY inside 91-95 is the single best cell in the whole book -
+    # n=59, +$37.95, +0.643/turn, ZERO blow-ups in 58 rows, against the
+    # late fav lane's +0.187/turn in the same band.
+    out = b.decide(_mkt(yes_bid=92.0, yes_ask=93.0), 100.6, 0.04, 450)
     assert out is not None
     lane, _p, px, side, _ps = out
     assert lane == "early" and side == "yes"
@@ -1363,8 +1379,8 @@ def test_the_two_lanes_do_not_overlap_in_time_or_price():
     assert b.decide(_mkt(yes_bid=74.0, yes_ask=75.0), 100.3, 0.04, 450) is None
     assert b.decide(_mkt(yes_bid=74.0, yes_ask=75.0), 100.3, 0.04, 120) is None
     # a 92c favourite is EARLY at 450s and FAV at 120s - never both
-    early = b.decide(_mkt(yes_bid=91.0, yes_ask=92.0), 100.7, 0.04, 450)
-    late = b.decide(_mkt(yes_bid=91.0, yes_ask=92.0), 100.7, 0.04, 120)
+    early = b.decide(_mkt(yes_bid=92.0, yes_ask=93.0), 100.7, 0.04, 450)
+    late = b.decide(_mkt(yes_bid=92.0, yes_ask=93.0), 100.7, 0.04, 120)
     assert early is not None and early[0] == "early"
     assert late is not None and late[0] in ("fav", "endgame", "tail")
     assert T.FAV2_TO_S >= T.FAV_AT_S       # windows cannot overlap
@@ -1372,7 +1388,7 @@ def test_the_two_lanes_do_not_overlap_in_time_or_price():
 
 def test_early_lane_will_not_fire_before_its_window_opens():
     b = T.TickBook()
-    assert b.decide(_mkt(yes_bid=89.0, yes_ask=90.0), 100.6, 0.04, 800) is None
+    assert b.decide(_mkt(yes_bid=92.0, yes_ask=93.0), 100.6, 0.04, 800) is None
 
 
 def test_the_early_lane_crosses_the_spread_and_pays_taker():
@@ -1470,7 +1486,12 @@ def test_cal_squares_the_odds():
     """true_logit = 0.00 + 1.95 x model_logit, fitted by weighted MLE on
     2,825 graded shadow observations. Intercept ZERO - no directional
     bias. Slope TWO - exactly half as confident as it should be."""
-    assert T.CAL_B == 1.95
+    # 9/1 re-fit on 4,653 observations (was 2,825): b=2.03 overall, and
+    # STABLE ACROSS HORIZONS - 600s b=2.15, 300s b=2.23, 120s b=2.04,
+    # with calibration improving Brier at all three. That answers the
+    # open question: the slope is a property of the model, not an
+    # artefact of the single T-2min horizon it was first fitted at.
+    assert T.CAL_B == 2.05
     assert abs(T.cal(0.5) - 0.5) < 1e-9          # 50% is a fixed point
     # antisymmetric about 50%: cal(1-p) == 1-cal(p)
     for p in (0.05, 0.25, 0.45, 0.75):
@@ -1555,11 +1576,12 @@ def test_the_floor_applies_to_every_lane_not_just_the_favourite():
     """Caught by a test the moment cal() went in: calibration makes the
     endgame lane fire far more often, and it was still free to buy at
     74c - the exact band the autopsy convicted (28.6% blow-up rate)."""
-    assert T.MIN_PX_C == 88
+    assert T.MIN_PX_C == 91
     b = T.TickBook()
     for t_left in (60, 120, 450, 800):
-        out = b.decide(_mkt(yes_bid=73.0, yes_ask=75.0), 100.4, 0.02, t_left)
-        assert out is None or out[2] >= T.MIN_PX_C
+        for bid, ask in ((73.0, 75.0), (88.0, 89.0), (96.0, 97.0)):
+            out = b.decide(_mkt(yes_bid=bid, yes_ask=ask), 100.4, 0.02, t_left)
+            assert out is None or T.MIN_PX_C <= out[2] <= T.MAX_PX_C
 
 
 # ---------- 4. the fee term could not see its own curve ----------

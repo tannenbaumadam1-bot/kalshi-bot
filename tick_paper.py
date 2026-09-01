@@ -217,6 +217,15 @@ MAKER_RATE = float(os.environ.get("TICK_MAKER_RATE", "0.0175"))
 BOOK_CAPITAL_C = int(os.environ.get("TICK_CAPITAL", "100000"))  # $1,000
 SIZE = int(os.environ.get("TICK_SIZE", "10"))         # contracts per entry
 MAX_POS = int(os.environ.get("TICK_MAX_POS", "50"))   # per market
+# ---------------------------------------------------------------------
+# CORRELATED EXPOSURE (9/1). Seven crypto markets are NOT seven
+# independent bets - they are seven expressions of one crypto beta, and
+# a single sharp move stops out all of them at once. The tape shows it:
+# in one 30-minute stretch the book lost -$43.92 with SIX bad exits,
+# against zero bad exits in each of two other 25-row stretches. Losses
+# arrive in clusters because the underlying is one thing.
+# MAX_POS caps each market and saw nothing; this caps the BOOK.
+MAX_OPEN_N = int(os.environ.get("TICK_MAX_OPEN", "4"))
 # Only ever buy the cheap-certain side. Above MAX_PX_C there is no room
 # left to pay for the fee; below MIN_PX_C we are buying a lottery ticket,
 # which is the side we intend to SELL to.
@@ -241,8 +250,18 @@ MAX_POS = int(os.environ.get("TICK_MAX_POS", "50"))   # per market
 # learning: observe_shadow records every window at every price whether
 # we trade it or not, so the calibration table keeps filling across the
 # whole probability range for free.
-MIN_PX_C = int(os.environ.get("TICK_MIN_PX", "88"))
-MAX_PX_C = int(os.environ.get("TICK_MAX_PX", "97"))
+# 9/1: 88 -> 91, on 200 fresh rows traded under the 88-97 band itself.
+# The same monotone story, one level deeper - and 88-91 is where the
+# whole loss lives:
+#     88-91c  n=57  -$57.55     91-95c  n=104  +$46.35
+#     95c+    n=39   -$9.12     bad-exit 8.0% -> 1.9%
+# The 200-row window nets -$20.32; the 91-95 slice of it nets +$46.35.
+# 4 of the 7 price-stops fired on entries below 91.
+MIN_PX_C = int(os.environ.get("TICK_MIN_PX", "91"))
+# 9/1: 97 -> 95. Above 95 you risk 95c+ to make 5c, and the tail is not
+# compensated: n=39, -$9.12, -1.02c/contract. The cheap-fee argument
+# does not extend forever.
+MAX_PX_C = int(os.environ.get("TICK_MAX_PX", "95"))
 # 8/31: raised 2 -> 4 in the same commit as cal(). Calibration adds
 # ~14.5c of apparent edge at model_p ~0.25 and ~0.75, so the SAME bar on
 # a sharper number would multiply trade count rather than quality. We
@@ -401,8 +420,8 @@ STOP_PX_C = float(os.environ.get("TICK_STOP_PX", "45"))
 # 75c position only has to fall 30c to reach the stop, a 91c one has to
 # fall 47c. The cheap favourite is not cheap, it is closer to the cliff.
 # The fee agrees - 2.94c round trip at 70c against 0.79c at 94c.
-FAV_MIN_C = float(os.environ.get("TICK_FAV_MIN", "88"))
-FAV_MAX_C = float(os.environ.get("TICK_FAV_MAX", "97"))
+FAV_MIN_C = float(os.environ.get("TICK_FAV_MIN", "91"))
+FAV_MAX_C = float(os.environ.get("TICK_FAV_MAX", "95"))
 # 8/28 RETUNE, on window-level samples. Widening the CLOCK adds volume
 # without costing expectancy - 90s gave 35 trades at +4.7c, 120s gave 40
 # at +7.7c, 180s gives 50 at +5.8c. Chosen for the TRADE COUNT, not the
@@ -442,7 +461,10 @@ FAV_VETO_P = float(os.environ.get("TICK_FAV_VETO", "0.60"))  # model veto
 # a cheap one (70c+) pays better because the clock is doing the work.
 # Different regimes, non-overlapping in both price and time, so a single
 # window can legitimately produce one of each.
-FAV2_MIN_C = float(os.environ.get("TICK_FAV2_MIN", "88"))
+# 9/1: the EARLY lane inside 91-95 is the single best cell in the book -
+# n=59, +$37.95, +0.643/turn, and ZERO blow-ups in 58 rows. The late fav
+# lane in the same band is +0.187/turn. Early is 3.4x better per turn.
+FAV2_MIN_C = float(os.environ.get("TICK_FAV2_MIN", "91"))
 FAV2_MAX_C = float(os.environ.get("TICK_FAV2_MAX", "95"))
 FAV2_FROM_S = int(os.environ.get("TICK_FAV2_FROM", "600"))
 FAV2_TO_S = int(os.environ.get("TICK_FAV2_TO", "300"))
@@ -772,7 +794,17 @@ def _norm_cdf(x):
 # CAL_B = 1.0 is the exact identity function, i.e. the old behaviour.
 # That makes the riskiest change in this commit the most cleanly
 # reversible: one env var and a restart, no deploy.
-CAL_B = float(os.environ.get("TICK_CAL_B", "1.95"))
+# 9/1 RE-FIT on 4,653 graded observations (was 2,825): b = 2.03, and the
+# MULTI-HORIZON tables now answer the question the ship plan left open -
+# is the slope a lucky constant, or a property of the model?
+#     600s  n=602  b=2.15   Brier 0.1940 -> 0.1794
+#     300s  n=602  b=2.23   Brier 0.1316 -> 0.1159
+#     120s  n=602  b=2.04   Brier 0.0776 -> 0.0677
+# STABLE AT EVERY TIME SCALE, and calibration helps at all three. It is
+# a property of the model, not an artefact of one horizon. If anything
+# the model is MORE under-confident early, which is where the early
+# lane trades. 1.95 -> 2.05.
+CAL_B = float(os.environ.get("TICK_CAL_B", "2.05"))
 
 
 def cal(p):
@@ -1774,6 +1806,13 @@ class TickBook:
         enforced at the moment inventory is created, and the fill is
         trimmed to whatever room is genuinely left. Returns the size
         actually taken, so the caller can stop when a cap bites."""
+        # correlated-exposure gate: a NEW market cannot be opened once
+        # the book already holds MAX_OPEN_N of them. Adding to a market
+        # we are already in is fine - that is not new correlation.
+        if (MAX_OPEN_N > 0 and q["tk"] not in self.pos
+                and len(self.pos) >= MAX_OPEN_N):
+            self.stats["corr_capped"] = self.stats.get("corr_capped", 0) + 1
+            return 0.0
         held = float(self.pos.get(q["tk"], {}).get("n", 0.0))
         room = float(MAX_POS) - held
         if room <= 0:
@@ -2511,6 +2550,9 @@ class TickBook:
                 "stop_closed": self.stats.get("stop_closed", 0),
                 "stop_px_n": self.stats.get("stop_px_n", 0),
                 "band_lo": self.stats.get("band_lo", 0),
+                "corr_capped": self.stats.get("corr_capped", 0),
+                "max_open": MAX_OPEN_N,
+                "px_band": [MIN_PX_C, MAX_PX_C],
                 "cal_b": CAL_B,
                 "cal_n": self.stats.get("cal_n", 0),
                 # mean cents the calibration moved a decision by
