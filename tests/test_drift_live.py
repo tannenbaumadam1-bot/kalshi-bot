@@ -27,6 +27,16 @@ def _bot(tmp_path, monkeypatch):
     monkeypatch.setattr(dl, "BUCKET_ALLOW", set())
     monkeypatch.setattr(dl, "GATE_FORCE", "")   # tests grade the gate honestly
     monkeypatch.setattr(dl, "OVN_LO_MODE", "off")  # ovn tests set explicitly
+    # 9/1 RETIREMENTS. Four lanes were switched OFF by default on the
+    # live book (cut, nickel, all-hours lows, and flattening a thesis
+    # that is still right). The tests below grade their MECHANICS, which
+    # must keep working - a retired lane we can no longer re-enable
+    # correctly is a lane we can never appeal. The defaults themselves
+    # are graded in test_the_four_convicted_lanes_are_off_by_default.
+    monkeypatch.setattr(dl, "CUT_ON", True)
+    monkeypatch.setattr(dl, "LIVE_NICKEL_ON", True)
+    monkeypatch.setattr(dl, "FLATTEN_SKIP_P", 1.01)   # skip disabled
+    monkeypatch.setattr(dl, "OVN_LO_H", 8.0)          # the pre-9/1 carve-out
     # 8/20 Adam order raised the live floor to 7. Legacy tests grade cap /
     # offer / dip MECHANICS with numbers hand-computed at the historic
     # 5-lot fixture scale; the floor itself is graded in

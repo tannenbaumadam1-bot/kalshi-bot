@@ -33,6 +33,16 @@ def _bot(tmp_path, monkeypatch):
     monkeypatch.setattr(dl, "BUCKET_ALLOW", set())
     monkeypatch.setattr(dl, "GATE_FORCE", "")   # tests grade the gate honestly
     monkeypatch.setattr(dl, "OVN_LO_MODE", "off")  # ovn tests set explicitly
+    # 9/1 RETIREMENTS. Four lanes were switched OFF by default on the
+    # live book (cut, nickel, all-hours lows, and flattening a thesis
+    # that is still right). The tests below grade their MECHANICS, which
+    # must keep working - a retired lane we can no longer re-enable
+    # correctly is a lane we can never appeal. The defaults themselves
+    # are graded in test_the_four_convicted_lanes_are_off_by_default.
+    monkeypatch.setattr(dl, "CUT_ON", True)
+    monkeypatch.setattr(dl, "LIVE_NICKEL_ON", True)
+    monkeypatch.setattr(dl, "FLATTEN_SKIP_P", 1.01)   # skip disabled
+    monkeypatch.setattr(dl, "OVN_LO_H", 8.0)          # the pre-9/1 carve-out
     # 8/20: live floor is 7 (Adam order); these fixtures were hand-sized
     # for 5-lots. The floor itself is graded in test_floor_is_seven_live.
     monkeypatch.setattr(dl, "MIN_CONTRACTS", 5)
@@ -698,14 +708,85 @@ def test_ovn_block_covers_the_nickel_lane(tmp_path, monkeypatch):
     assert not b.bets and not b.pending
 
 
-def test_same_morning_lows_still_trade(tmp_path, monkeypatch):
-    """The block is about the overnight GAP, not about lows."""
-    b = _bot(tmp_path, monkeypatch)
+def test_same_morning_lows_traded_under_the_8_20_carve_out(tmp_path,
+                                                           monkeypatch):
+    """The 8/20 policy was about the overnight GAP, not about lows, so a
+    same-morning low was allowed. That mechanism still works - it is the
+    THRESHOLD that moved on 9/1, not the code."""
+    b = _bot(tmp_path, monkeypatch)          # _bot pins OVN_LO_H = 8
     monkeypatch.setattr(dl, "OVN_LO_MODE", "block")
     b.dry_balance_c = 50000
     lo = _mk(tk="KXLOWTBOS-26AUG21-T66", bid=87, ask=89, city="boston",
              is_low=True, hrs=3.0)
     assert b.place(mkts=[lo]) == 1
+
+
+def test_9_1_every_low_is_blocked_not_just_the_overnight_ones(tmp_path,
+                                                              monkeypatch):
+    """9/1: the carve-out assumed same-morning lows were profitable.
+    Over 946 live turns they are not - the low side loses in every
+    bucket with weight behind it:
+        lo:na  n=89 -$23.78 | lo:16+ n=48 -$20.94 | lo:0-4 n=8 -$3.63
+        (positive cells: lo:4-8 n=16 +$1.76, lo:8-16 n=1 +$0.10)
+    Net -$46.49 against lifts of +$133.71. Two cells at n=16 and n=1
+    cannot carry the class. OVN_LO_H 8 -> 0."""
+    assert dl.OVN_LO_H == 0.0
+    assert dl.OVN_LO_MODE == "block"
+    b = _bot(tmp_path, monkeypatch)
+    monkeypatch.setattr(dl, "OVN_LO_MODE", "block")
+    monkeypatch.setattr(dl, "OVN_LO_H", 0.0)          # the 9/1 default
+    b.dry_balance_c = 50000
+    lo = _mk(tk="KXLOWTBOS-26AUG21-T66", bid=87, ask=89, city="boston",
+             is_low=True, hrs=3.0)                    # same morning
+    assert b.place(mkts=[lo]) == 0
+    assert b.exec_stats.get("ovn_lo_blocked", 0) >= 1
+    # ...and the HIGH side is untouched: this is a policy about lows
+    b2 = _bot(tmp_path, monkeypatch)
+    monkeypatch.setattr(dl, "OVN_LO_MODE", "block")
+    monkeypatch.setattr(dl, "OVN_LO_H", 0.0)
+    b2.dry_balance_c = 50000
+    hi = _mk(tk="KXHIGHNY-26AUG21-T86", bid=87, ask=89, city="new york",
+             is_low=False, hrs=3.0)
+    assert b2.place(mkts=[hi]) == 1
+
+
+def test_the_four_convicted_lanes_are_off_by_default(tmp_path, monkeypatch):
+    """9/1, Adam: "ship the 4 fixes and unhalt now."
+
+    Every one of these was recommended in an earlier autopsy and left
+    running. Together they are -$137.35 against lifts of +$133.71 - the
+    live book's entire loss, and the reason its weekly breaker tripped.
+    Each is one env var, so any of them can be appealed with a restart."""
+    # 1. lows, on every path (recommended 8/20 - twelve days open)
+    assert dl.OVN_LO_MODE == "block" and dl.OVN_LO_H == 0.0
+    # 2. CUT: 6 fires, -$23.36, per_ch -1.604 (flagged 8/28)
+    assert dl.CUT_ON is False
+    # 3. NICKEL on the live book: 43 turns, 26W/17L, -$16.89
+    assert dl.LIVE_NICKEL_ON is False
+    #    ...but the PAPER drift book keeps generating evidence
+    import drift_paper as dp
+    assert dp.NICKEL_ON is True
+    # 4. flatten never pays the spread to leave a thesis still intact
+    #    (recommended 8/24 - eight days open)
+    assert dl.FLATTEN_ON is True          # the lane still exists...
+    assert dl.FLATTEN_SKIP_P == 0.90      # ...it just stops self-harming
+
+
+def test_flatten_will_not_pay_the_spread_to_leave_a_winner(tmp_path,
+                                                           monkeypatch):
+    """-$50.61 over 179 turns at per_ch -0.120, the second-worst lane.
+    The diagnosis was never "flattening is wrong" - it is that we were
+    paying the spread to ABANDON POSITIONS THAT WERE STILL RIGHT."""
+    b = _bot(tmp_path, monkeypatch)
+    monkeypatch.setattr(dl, "FLATTEN_SKIP_P", 0.90)   # the 9/1 default
+    tk = "KXHIGHNY-26AUG21-T86"
+    b.bets = {tk: dict(_no_pos(tk, entry=88, count=5), pside=0.95)}
+    mk = _mk(tk=tk, bid=90, ask=92, hrs=0.5)
+    assert b.flatten(mkts=[mk]) == 0                  # still right: held
+    assert b.exec_stats.get("flatten_skip_right", 0) == 1
+    # a BROKEN one is still exited - that is what the lane is for
+    b.bets = {tk: dict(_no_pos(tk, entry=88, count=5), pside=0.40)}
+    assert b.flatten(mkts=[mk]) == 1
 
 
 def test_flatten_rescues_positions_the_scan_missed(tmp_path, monkeypatch):

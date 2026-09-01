@@ -99,6 +99,14 @@ OFFER_CLAMP_ON = os.environ.get("DRIFT_LIVE_CLAMP", "1") == "1"
 # Live nickels now HOLD TO SETTLEMENT like the original design; the <50c
 # hard stop remains as the disaster brake. Re-enable with =1 if it backfires.
 NICKEL_TRAIL = os.environ.get("DRIFT_LIVE_NICKEL_TRAIL", "0") == "1"
+# 9/1 RETIRED on the live book. 43 turns, 26W/17L, -$16.89. A lane that
+# wins 60% of the time and still loses money is buying 93-96c tickets
+# whose losses are 20x the wins - the same payoff asymmetry the tick
+# book was convicted for. Its own bucket ledger agrees: nickel:93-96 is
+# sticky-blocked at -$12.79. Separate switch from dp.NICKEL_ON so the
+# paper drift book keeps generating evidence.
+# REVERT: export DRIFT_LIVE_NICKEL=1.
+LIVE_NICKEL_ON = os.environ.get("DRIFT_LIVE_NICKEL", "0") == "1"
 # Trail-exit removal, ALL lanes (7/27, Adam-approved): exit autopsy graded
 # every live exit against eventual settlement - 4 of 5 would have WON, and
 # exiting cost -$1.56. Same wobble-tax the nickels paid. Level/climb now
@@ -125,6 +133,14 @@ BOOST_NAV_C = int(os.environ.get("DRIFT_LIVE_BOOST_NAV_C", "50000"))
 # it): inventory that never reaches settlement carries a different risk
 # shape from inventory held overnight, so it earns a bigger allowance.
 FLATTEN_ON = os.environ.get("DRIFT_LIVE_FLATTEN", "1") == "1"
+# 9/1: the 8/24 recommendation, finally shipped. Flatten is -$50.61 over
+# 179 turns at per_ch -0.120, the second-worst lane in the book. The
+# diagnosis was never "flattening is wrong" - it is that we were paying
+# the spread to ABANDON POSITIONS THAT WERE STILL RIGHT. A position our
+# own model still rates >= 90% is not one to sell into the bid an hour
+# before settlement; it is one to let settle. Only the broken ones need
+# the exit. REVERT: export DRIFT_LIVE_FLATTEN_SKIP_P=1.01.
+FLATTEN_SKIP_P = float(os.environ.get("DRIFT_LIVE_FLATTEN_SKIP_P", "0.90"))
 # HOLDING-TIME-SCALED RISK: 85%% of NAV may be deployed when everything
 # is flattened before close (the tail that killed 8/12 can't happen),
 # 60%% when positions ride into settlement. Utilization was ~30%% - the
@@ -544,7 +560,15 @@ MNAV_MARK_AGE_S = float(os.environ.get("DRIFT_LIVE_MARK_AGE_S", "2700"))
 # fee burn). Every cut is graded against settlement in the exit
 # autopsy (kind=CUT) so the rule is retuned on evidence.
 # REVERT: export DRIFT_LIVE_CUT=0.
-CUT_ON = os.environ.get("DRIFT_LIVE_CUT", "1") == "1"
+# 9/1 RETIRED. Six fires, -$23.36, per_ch -1.604 - the worst lane in
+# the book by an order of magnitude, and roughly 50x worse per
+# contract-hour than the next worst (flatten at -0.120). Flagged for
+# review on 8/28 after its first two fires lost $8.37; four more fires
+# have only confirmed it. A stop that fires rarely and badly is worse
+# than no stop, because it converts a tail we could measure into a
+# realised loss we cannot.
+# REVERT: export DRIFT_LIVE_CUT=1.
+CUT_ON = os.environ.get("DRIFT_LIVE_CUT", "0") == "1"
 CUT_C = float(os.environ.get("DRIFT_LIVE_CUT_C", "50"))
 CUT_CONFIRM = int(os.environ.get("DRIFT_LIVE_CUT_CONFIRM", "2"))
 CUT_MIN_ENTRY_C = int(os.environ.get("DRIFT_LIVE_CUT_MIN_ENTRY", "80"))
@@ -566,7 +590,18 @@ OVN_LO_MODE = os.environ.get(
     "DRIFT_LIVE_OVN_LO",
     "half" if os.environ.get("DRIFT_LIVE_OVN_LO_HALF") == "1"
     else "block").strip()
-OVN_LO_H = float(os.environ.get("DRIFT_LIVE_OVN_LO_H", "8"))
+# 9/1 (Adam: ship the four convicted lanes): 8 -> 0, i.e. "block" now
+# means EVERY low, not only those entered more than 8h out.
+# The 8/20 carve-out assumed same-morning lows were profitable. On 946
+# turns they are not - the low side loses in every bucket that has any
+# weight behind it:
+#     lo:na    n=89  -$23.78      lo:4-8   n=16  +$1.76
+#     lo:16+   n=48  -$20.94      lo:8-16  n= 1  +$0.10
+#     lo:0-4   n= 8   -$3.63
+# Net -$46.49 against lifts of +$133.71. The two positive cells are
+# n=16 and n=1 and cannot carry the class.
+# REVERT: export DRIFT_LIVE_OVN_LO_H=8 (or =0 with OVN_LO=off).
+OVN_LO_H = float(os.environ.get("DRIFT_LIVE_OVN_LO_H", "0"))
 
 
 def _hold_hours(ots):
@@ -1477,6 +1512,10 @@ class DriftLive:
                                                "realized"),
                           "gate_force": GATE_FORCE or None,
                           "ovn_lo": OVN_LO_MODE,
+                          "ovn_lo_h": OVN_LO_H,
+                          "nickel_on": LIVE_NICKEL_ON,
+                          "flatten_skip_p": (FLATTEN_SKIP_P
+                                             if FLATTEN_ON else None),
                           "allow": sorted(BUCKET_ALLOW),
                           "dyn": DYN_CAPS, "floor": ENTRY_FLOOR,
                           "chase": CHASE_MAX_E, "rest_h": REST_MAX_H,
@@ -2589,6 +2628,16 @@ class DriftLive:
                 continue
             if hrs > FLATTEN_H:
                 continue
+            # ...and never pay the spread to leave a thesis that is
+            # still INTACT. See FLATTEN_SKIP_P.
+            try:
+                _ps = float(b.get("pside") or 0)
+            except (TypeError, ValueError):
+                _ps = 0.0
+            if _ps >= FLATTEN_SKIP_P:
+                self.exec_stats["flatten_skip_right"] = (
+                    self.exec_stats.get("flatten_skip_right", 0) + 1)
+                continue
             yb, ya = mk.get("yes_bid"), mk.get("yes_ask")
             bid = yb if b["side"] == "yes" else (100 - ya if ya else 0)
             if not bid or bid <= 0:
@@ -3680,7 +3729,7 @@ class DriftLive:
             climbing = climb_c is not None and climb_c >= dp.DRIFT_UP_C
             # NICKEL zone first (paper-identical): >=95c mid, entry 93..96c,
             # own event ledger, ranked by payoff (cheapest entry first)
-            if dp.NICKEL_ON and smid >= dp.NICKEL_MIN_C:
+            if LIVE_NICKEL_ON and dp.NICKEL_ON and smid >= dp.NICKEL_MIN_C:
                 if entry < 93 or entry > dp.NICKEL_MAX_ENTRY:
                     continue
                 if ekey in nk_keys:
